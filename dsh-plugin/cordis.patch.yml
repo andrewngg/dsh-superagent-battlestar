@@ -1,0 +1,8 @@
+- insert:
+    - id: super-butler
+      name: '@local/dsh-super-butler'
+      config:
+        # 克隆项目的位置；不填则默认 ~/super-butler（也可用环境变量 SUPER_BUTLER_PROJECT_ROOT）
+        # projectRoot: 'C:/path/to/super-butler'
+        hubPort: 7317
+        autoStart: true

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 品牌深蓝紫：与图标 / Web 控制台一致 -->
+    <color name="brand_dark">#0B0818</color>
+    <color name="brand_bg">#141026</color>
+    <color name="brand_primary">#3A287A</color>
+    <color name="brand_accent">#7C5CFF</color>
+</resources>

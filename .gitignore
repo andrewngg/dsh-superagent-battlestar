@@ -1,0 +1,34 @@
+# Node
+node_modules/
+npm-debug.log*
+
+# Hub runtime data (tokens, devices, tasks)
+hub/data/
+*.state.json
+.butler-device.json
+device-agent/.state/
+worker-workspace/
+
+# Build / toolchain artifacts
+toolchain/
+android/build/
+android/.build/
+android/keystore/
+dist/*.apk.idsig
+android/keystore/*.jks.tmp
+
+# Personal local-only files (never publish)
+docs/FIRST-MACHINE.md
+device-agent/configs/first-machine.json
+
+# Local env
+.env
+.DS_Store
+Thumbs.db
+
+# Test / screenshot temp
+*.log
+tmp/
+.smoke/
+.chrome-profile/
+.chrome-shot*/

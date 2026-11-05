@@ -1,0 +1,73 @@
+{
+  "name": "工作机 · CLI",
+  "platform": "windows",
+  "kind": "multi",
+  "agentVersion": "0.1.0",
+  "tags": ["工作机", "CLI", "Hermes", "OpenCode"],
+  "models": [
+    {
+      "id": "deepseek-chat",
+      "provider": "deepseek",
+      "contextWindow": 65536,
+      "strengths": ["code", "writing", "reasoning"],
+      "available": true
+    },
+    {
+      "id": "deepseek-reasoner",
+      "provider": "deepseek",
+      "contextWindow": 65536,
+      "strengths": ["reasoning", "math", "code"],
+      "available": true
+    },
+    {
+      "id": "qwen2.5vl:7b",
+      "provider": "ollama",
+      "contextWindow": 32768,
+      "strengths": ["vision", "local"],
+      "available": true
+    }
+  ],
+  "profiles": [
+    { "id": "hermes", "name": "Hermes CLI", "plugins": ["hermes"] },
+    { "id": "opencode", "name": "OpenCode CLI", "plugins": ["opencode"] },
+    { "id": "cli-shell", "name": "本机 CLI 命令", "plugins": ["pwsh"] },
+    { "id": "dsh-desktop", "name": "DSH Desktop", "plugins": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"] },
+    { "id": "ollama", "name": "Ollama", "plugins": ["ollama"] }
+  ],
+  "gateways": [
+    { "id": "deepseek-api", "kind": "openai-compatible", "baseUrl": "https://api.deepseek.com", "models": ["deepseek-chat", "deepseek-reasoner"] },
+    { "id": "ollama-local", "kind": "ollama", "baseUrl": "http://127.0.0.1:11434", "models": ["qwen2.5vl:7b"] }
+  ],
+  "skills": [
+    { "id": "code-writing", "name": "代码编写与修复", "version": "1.0.0" },
+    { "id": "cli-exec", "name": "本机 CLI 命令执行", "version": "1.0.0" },
+    { "id": "autonomous-agents", "name": "自主 Agent", "version": "1.0.0" },
+    { "id": "research", "name": "调研与资料检索", "version": "1.0.0" },
+    { "id": "software-development", "name": "软件工程", "version": "1.0.0" },
+    { "id": "office-docx", "name": "Word 文档", "version": "1.0.0" },
+    { "id": "office-xlsx", "name": "Excel 表格", "version": "1.0.0" },
+    { "id": "office-pptx", "name": "PPT 演示", "version": "1.0.0" },
+    { "id": "web-research", "name": "联网检索", "version": "1.0.0" }
+  ],
+  "resources": { "cpuCores": 8, "memoryGB": 16, "gpu": "按实际填写", "os": "Windows 11" },
+  "limits": { "maxConcurrentTasks": 2 },
+  "executor": {
+    "type": "cli",
+    "cli": {
+      "mode": "auto",
+      "workdir": "C:/work",
+      "allowShell": false,
+      "fallbackToHermes": true,
+      "timeoutMs": 900000,
+      "hermes": {
+        "home": "C:/Users/you/AppData/Local/hermes",
+        "exe": "C:/Users/you/AppData/Local/hermes/bin/hermes.exe"
+      },
+      "opencode": {
+        "exe": "C:/Users/you/AppData/Roaming/npm/node_modules/opencode-ai/bin/opencode.exe",
+        "model": "opencode/deepseek-v4-flash-free"
+      }
+    }
+  },
+  "discovery": { "dsh": false, "ollama": false, "gateway": false, "skills": false }
+}

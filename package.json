@@ -1,0 +1,20 @@
+{
+  "name": "super-butler",
+  "version": "0.1.0",
+  "private": true,
+  "description": "超级智能管家：多设备 AI 能力申报、在线检测、任务编排、手机控制台与 Android APK",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "hub": "node hub/server.js",
+    "agent": "node device-agent/agent.js",
+    "agent:first-machine": "node device-agent/agent.js --config device-agent/configs/first-machine.json --state-dir device-agent/.state/first-machine",
+    "demo": "node scripts/demo.js",
+    "test": "node --test hub/test device-agent/test shared/test",
+    "test:isolated": "node --test --test-isolation=none hub/test device-agent/test shared/test",
+    "smoke": "node scripts/smoke-test.js",
+    "build:apk": "powershell -NoProfile -ExecutionPolicy Bypass -File android/build-apk.ps1"
+  }
+}

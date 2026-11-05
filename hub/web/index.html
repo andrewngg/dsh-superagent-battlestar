@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#070a13">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="Super Butler 多设备智能管家控制台">
+  <title>Super Butler · 控制台</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <!-- 静态图标库（仅常量路径，不承载用户数据） -->
+  <svg class="svg-sprite" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 2.5l2.1 6.1a3 3 0 0 0 1.8 1.8l6.1 2.1-6.1 2.1a3 3 0 0 0-1.8 1.8L12 22.5l-2.1-6.1a3 3 0 0 0-1.8-1.8L2 12.5l6.1-2.1a3 3 0 0 0 1.8-1.8L12 2.5z"/></symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20.5 12a8.5 8.5 0 1 1-2.6-6.1"/><path d="M20.5 4.5V11h-6.4"/></symbol>
+      <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 9 19.36a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.64 15a1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.64 9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.64h.08A1.7 1.7 0 0 0 10.11 3.1V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.36 9v.08a1.7 1.7 0 0 0 1.54 1.03H21a2 2 0 1 1 0 4h-.09A1.7 1.7 0 0 0 19.4 15z"/></symbol>
+      <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+      <symbol id="i-send" viewBox="0 0 24 24"><path d="M21.5 2.5L11 13"/><path d="M21.5 2.5l-6.8 19-3.7-8.5-8.5-3.7 19-6.8z"/></symbol>
+      <symbol id="i-devices" viewBox="0 0 24 24"><rect x="2.5" y="4" width="13" height="9.5" rx="1.6"/><path d="M7 20.5h4M9 13.5V20.5"/><rect x="17" y="9" width="4.5" height="11" rx="1.2"/></symbol>
+      <symbol id="i-tasks" viewBox="0 0 24 24"><path d="M9 6h12M9 12h12M9 18h12"/><path d="M3.5 6l1.4 1.4L7 4.8M3.5 12l1.4 1.4L7 10.8M3.5 18l1.4 1.4L7 16.8"/></symbol>
+      <symbol id="i-terminal" viewBox="0 0 24 24"><path d="M3.5 17.5l6.5-5.5-6.5-5.5"/><path d="M12.5 19.5H21"/></symbol>
+      <symbol id="i-activity" viewBox="0 0 24 24"><path d="M2.5 12h4l2.8-7.5 4.4 15 2.8-7.5h5"/></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.2"/><path d="M8 12.4l2.7 2.7L16.4 9"/></symbol>
+      <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3.5L22 20.5H2L12 3.5z"/><path d="M12 9.5v5M12 17.8v.2"/></symbol>
+      <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.2"/><path d="M12 6.8V12l3.4 2"/></symbol>
+      <symbol id="i-queue" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/><path d="M19 15.5v5M16.5 18H21.5"/></symbol>
+      <symbol id="i-link" viewBox="0 0 24 24"><path d="M10.5 13.5a5 5 0 0 0 7.1 0l2.4-2.4a5 5 0 0 0-7.1-7.1L11.6 5.3"/><path d="M13.5 10.5a5 5 0 0 0-7.1 0L4 12.9a5 5 0 0 0 7.1 7.1l1.3-1.3"/></symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="12" height="12" rx="2"/><path d="M15.5 8.5V5.6A2.1 2.1 0 0 0 13.4 3.5H5.6A2.1 2.1 0 0 0 3.5 5.6v7.8a2.1 2.1 0 0 0 2.1 2.1h2.9"/></symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3.5 6.5h17M8.5 6.5V4.2A1.2 1.2 0 0 1 9.7 3h4.6a1.2 1.2 0 0 1 1.2 1.2v2.3M6 6.5l1 13.3a1.5 1.5 0 0 0 1.5 1.4h7a1.5 1.5 0 0 0 1.5-1.4l1-13.3"/><path d="M10 10.8v6M14 10.8v6"/></symbol>
+      <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 3v8"/><path d="M6.2 6.2a8.4 8.4 0 1 0 11.6 0"/></symbol>
+      <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></symbol>
+      <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/></symbol>
+    </defs>
+  </svg>
+
+  <div class="bg-aurora" aria-hidden="true"><span></span><span></span><span></span></div>
+  <div id="boot-error" class="boot-error" hidden role="alert"></div>
+
+  <!-- ============ 连接页 ============ -->
+  <div id="connect-view" class="connect-view" hidden>
+    <div class="connect-card glass">
+      <div class="brand brand-lg">
+        <span class="brand-mark" aria-hidden="true"><svg class="icon"><use href="#i-spark"></use></svg></span>
+        <span class="brand-text"><strong>Super Butler</strong><small>多设备智能管家</small></span>
+      </div>
+
+      <h1 class="connect-title">连接到中枢</h1>
+      <p class="connect-desc">输入 Hub 地址与管理员令牌。手机 APK / WebView 内访问时，地址留空即使用当前入口。</p>
+
+      <form id="connect-form" autocomplete="off" novalidate>
+        <div class="field">
+          <label for="hub-url">Hub 地址</label>
+          <input id="hub-url" name="hub-url" type="text" inputmode="url" spellcheck="false"
+                 placeholder="http://192.168.1.10:7317" autocomplete="url">
+          <p class="field-hint">留空 = 当前页面地址（推荐，同源无需跨域）。</p>
+        </div>
+        <div class="field">
+          <label for="admin-token">管理员令牌</label>
+          <div class="input-wrap">
+            <input id="admin-token" name="admin-token" type="password" spellcheck="false"
+                   placeholder="adminToken（见 hub 启动日志）" autocomplete="current-password">
+            <button type="button" id="toggle-token" class="icon-btn" aria-label="显示令牌" title="显示/隐藏令牌">
+              <svg class="icon"><use href="#i-eye"></use></svg>
+            </button>
+          </div>
+          <p class="field-hint">令牌只保存在本机 localStorage，不会上传到其他服务。</p>
+        </div>
+        <div id="connect-error" class="form-error" role="alert" hidden></div>
+        <button id="connect-btn" type="submit" class="btn btn-primary btn-block">
+          <span class="btn-label">测试并连接</span>
+          <span class="spinner" hidden></span>
+        </button>
+      </form>
+
+      <div class="connect-foot">
+        <span class="dot-sep"><i class="status-dot" data-tone="muted"></i>协议 v1</span>
+        <span class="dot-sep">零依赖 · 局域网</span>
+        <span class="dot-sep">SSE 实时</span>
+      </div>
+      <p class="connect-tip">提示：也可用 <code>?token=…</code> 直接进入；连接成功后会记住本机。</p>
+    </div>
+    <p class="connect-credit">Super Butler · home AI butler</p>
+  </div>
+
+  <!-- ============ 主控制台 ============ -->
+  <div id="app-view" class="app" hidden>
+    <header class="topbar glass">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"><svg class="icon"><use href="#i-spark"></use></svg></span>
+        <span class="brand-text"><strong>Super Butler</strong><small id="brand-sub">家庭 AI 中枢</small></span>
+      </div>
+
+      <div class="header-metrics" aria-label="关键指标">
+        <span class="mini-stat"><span class="mini-label">在线</span><b id="head-online">–</b><small id="head-total">/–</small></span>
+        <span class="mini-stat"><span class="mini-label">运行</span><b id="head-running">–</b></span>
+        <span class="mini-stat"><span class="mini-label">排队</span><b id="head-queued">–</b></span>
+      </div>
+
+      <div class="header-actions">
+        <span id="sse-pill" class="conn-pill" data-state="idle" title="实时事件流状态">
+          <i class="status-dot"></i><span id="sse-text">未连接</span>
+        </span>
+        <button id="refresh-btn" class="icon-btn" type="button" title="刷新数据 (R)" aria-label="刷新数据">
+          <svg class="icon"><use href="#i-refresh"></use></svg>
+        </button>
+        <button id="settings-btn" class="icon-btn" type="button" title="设置" aria-label="打开设置">
+          <svg class="icon"><use href="#i-gear"></use></svg>
+        </button>
+        <button id="logout-btn" class="btn btn-ghost btn-sm" type="button">退出</button>
+      </div>
+    </header>
+
+    <main class="page">
+      <section id="stats-grid" class="stats-grid" aria-label="总体状态" data-tab-panel="status"></section>
+
+      <div class="layout">
+        <div class="col-main">
+          <section class="panel section-devices" id="section-devices" data-tab-panel="status">
+            <div class="panel-head">
+              <div>
+                <h2>设备</h2>
+                <p class="panel-sub" id="devices-sub">正在加载…</p>
+              </div>
+              <div class="panel-head-actions">
+                <span class="legend"><i class="status-dot" data-tone="online"></i>在线</span>
+                <span class="legend"><i class="status-dot" data-tone="offline"></i>离线</span>
+              </div>
+            </div>
+            <div id="device-grid" class="device-grid"></div>
+          </section>
+
+          <section class="panel section-tasks" id="section-tasks" data-tab-panel="tasks">
+            <div class="panel-head">
+              <div>
+                <h2>任务</h2>
+                <p class="panel-sub" id="tasks-sub">正在加载…</p>
+              </div>
+              <div class="filter-row" id="task-filters" role="group" aria-label="任务筛选">
+                <button type="button" class="filter-chip is-active" data-filter="all">全部</button>
+                <button type="button" class="filter-chip" data-filter="active">进行中</button>
+                <button type="button" class="filter-chip" data-filter="completed">已完成</button>
+                <button type="button" class="filter-chip" data-filter="failed">失败</button>
+              </div>
+            </div>
+            <div id="task-list" class="task-list" aria-live="polite"></div>
+          </section>
+        </div>
+
+        <aside class="col-rail">
+          <section class="panel section-command" id="section-command" data-tab-panel="command">
+            <div class="panel-head">
+              <div>
+                <h2>发指令</h2>
+                <p class="panel-sub">描述任务，中枢自动挑选设备</p>
+              </div>
+            </div>
+            <form id="task-form" autocomplete="off">
+              <div class="composer-input">
+                <label class="sr-only" for="instruction">指令内容</label>
+                <textarea id="instruction" name="instruction" rows="4" maxlength="8000"
+                          placeholder="例如：把本周的开销记录整理成一份 Word 报告，并附上汇总表格"></textarea>
+                <div class="composer-hint"><kbd>Ctrl</kbd> + <kbd>Enter</kbd> 发送</div>
+              </div>
+
+              <div class="field-row">
+                <div class="field">
+                  <label for="req-model">模型要求</label>
+                  <select id="req-model"><option value="">不限模型</option></select>
+                </div>
+                <div class="field">
+                  <label for="target-device">目标设备</label>
+                  <select id="target-device"><option value="">自动路由（全部在线）</option></select>
+                </div>
+              </div>
+
+              <div class="field">
+                <div class="field-label-row">
+                  <label>技能要求</label>
+                  <span class="muted" id="skills-hint">可多选</span>
+                </div>
+                <div id="skill-chips" class="chip-select" role="group" aria-label="技能要求"></div>
+              </div>
+
+              <div class="field-row">
+                <div class="field">
+                  <label for="priority">优先级</label>
+                  <select id="priority">
+                    <option value="9">9 · 紧急</option>
+                    <option value="7">7 · 高</option>
+                    <option value="5" selected>5 · 普通</option>
+                    <option value="3">3 · 低</option>
+                    <option value="1">1 · 后台</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="timeout">超时</label>
+                  <select id="timeout">
+                    <option value="60">60 秒</option>
+                    <option value="300" selected>5 分钟</option>
+                    <option value="600">10 分钟</option>
+                    <option value="1800">30 分钟</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="composer-foot">
+                <span class="composer-target" id="composer-target">自动路由：等待在线设备…</span>
+                <button type="submit" class="btn btn-primary" id="send-btn">
+                  <svg class="icon"><use href="#i-send"></use></svg><span>发送指令</span>
+                </button>
+              </div>
+
+              <div id="route-result" class="route-result" hidden aria-live="polite"></div>
+            </form>
+          </section>
+
+          <section class="panel section-activity" aria-label="实时动态">
+            <div class="panel-head">
+              <div><h2>实时动态</h2><p class="panel-sub" id="activity-sub">等待事件…</p></div>
+            </div>
+            <ul id="activity-list" class="activity-list"></ul>
+          </section>
+        </aside>
+      </div>
+
+      <section class="panel section-settings" id="section-settings" data-tab-panel="settings" hidden>
+        <div class="panel-head">
+          <div><h2>设置</h2><p class="panel-sub">连接、令牌与本机信息</p></div>
+        </div>
+        <div id="settings-inline-body" class="settings-body"></div>
+      </section>
+    </main>
+
+    <nav class="mobile-tabs" aria-label="主导航">
+      <button type="button" class="mobile-tab is-active" data-tab="status" aria-selected="true">
+        <svg class="icon"><use href="#i-devices"></use></svg><span>状态</span>
+      </button>
+      <button type="button" class="mobile-tab" data-tab="tasks" aria-selected="false">
+        <svg class="icon"><use href="#i-tasks"></use></svg><span>任务</span>
+      </button>
+      <button type="button" class="mobile-tab" data-tab="command" aria-selected="false">
+        <svg class="icon"><use href="#i-terminal"></use></svg><span>指令</span>
+      </button>
+      <button type="button" class="mobile-tab" data-tab="settings" aria-selected="false">
+        <svg class="icon"><use href="#i-gear"></use></svg><span>设置</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- ============ 详情抽屉 ============ -->
+  <div id="drawer-root" class="drawer-root" hidden>
+    <div class="drawer-backdrop" id="drawer-backdrop"></div>
+    <aside class="drawer glass" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" tabindex="-1">
+      <header class="drawer-head">
+        <div>
+          <h2 id="drawer-title">详情</h2>
+          <p id="drawer-sub" class="drawer-sub"></p>
+        </div>
+        <button id="drawer-close" class="icon-btn" type="button" aria-label="关闭详情">
+          <svg class="icon"><use href="#i-x"></use></svg>
+        </button>
+      </header>
+      <div id="drawer-body" class="drawer-body"></div>
+      <footer id="drawer-foot" class="drawer-foot" hidden></footer>
+    </aside>
+  </div>
+
+  <!-- ============ 确认弹窗 ============ -->
+  <div id="modal-root" class="modal-root" hidden>
+    <div class="modal-backdrop"></div>
+    <div class="modal glass" role="alertdialog" aria-modal="true" aria-labelledby="modal-title" aria-describedby="modal-message">
+      <h3 id="modal-title">确认操作</h3>
+      <p id="modal-message"></p>
+      <div class="modal-actions">
+        <button id="modal-cancel" type="button" class="btn btn-ghost">取消</button>
+        <button id="modal-ok" type="button" class="btn btn-danger">确认</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast-root" class="toast-root" role="status" aria-live="polite"></div>
+  <div id="loading-view" class="loading-view" hidden>
+    <span class="spinner spinner-lg"></span>
+    <p id="loading-text">正在连接中枢…</p>
+  </div>
+
+  <script src="assets/app.js" defer></script>
+</body>
+</html>

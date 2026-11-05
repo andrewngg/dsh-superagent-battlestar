@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>超级管家 · 连接 Hub</title>
+<style>
+  :root{
+    --accent:#8b6bff;
+    --accent-2:#6a4df0;
+    --ink:#f2efff;
+    --muted:#a79fd0;
+    --line:rgba(255,255,255,.12);
+    --card:rgba(255,255,255,.06);
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;min-height:100%}
+  body{
+    background:radial-gradient(120% 90% at 50% 0%,#2b1b63 0%,#171031 45%,#0b0818 100%);
+    color:var(--ink);
+    font-family:-apple-system,Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+    display:flex;align-items:center;justify-content:center;
+    padding:28px 20px 36px;
+  }
+  .wrap{width:100%;max-width:430px}
+  .brand{text-align:center;margin-bottom:20px}
+  .logo{
+    width:66px;height:66px;margin:0 auto 14px;border-radius:19px;
+    background:linear-gradient(140deg,#7c5cff,#3c2a8c);
+    display:flex;align-items:center;justify-content:center;
+    font:700 36px Georgia,"Times New Roman",serif;
+    color:#fff;box-shadow:0 14px 34px rgba(92,62,214,.45),inset 0 1px 0 rgba(255,255,255,.28);
+  }
+  h1{font-size:23px;margin:0 0 6px;letter-spacing:1px}
+  .tagline{margin:0;color:var(--muted);font-size:12.5px;letter-spacing:.4px}
+  .card{
+    background:var(--card);border:1px solid var(--line);border-radius:22px;
+    padding:22px 20px 18px;box-shadow:0 22px 60px rgba(0,0,0,.42);
+    backdrop-filter:blur(8px);
+  }
+  label{display:block;font-size:12.5px;font-weight:600;color:#d9d3ff;margin:0 0 7px;letter-spacing:.3px}
+  input{
+    width:100%;padding:13px 14px;border-radius:13px;
+    border:1px solid rgba(255,255,255,.16);background:rgba(8,6,20,.55);
+    color:var(--ink);font-size:15px;outline:none;transition:border-color .15s,box-shadow .15s;
+  }
+  input::placeholder{color:#6f679a}
+  input:focus{border-color:rgba(139,107,255,.85);box-shadow:0 0 0 3px rgba(139,107,255,.18)}
+  .hint{font-size:11.5px;color:#8f87b8;line-height:1.55;margin:8px 0 16px}
+  .hint code{background:rgba(255,255,255,.09);padding:1px 5px;border-radius:5px;font-size:11px}
+  .status{
+    min-height:19px;font-size:12.5px;line-height:1.5;margin:2px 0 14px;
+    color:var(--muted);word-break:break-all;
+  }
+  .status.ok{color:#6ee7b7}
+  .status.err{color:#fda4af}
+  .status.info{color:#c4b5fd}
+  .actions{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .btn{
+    padding:13px 10px;border-radius:13px;border:0;font-size:14.5px;font-weight:600;
+    color:#fff;cursor:pointer;transition:transform .08s,opacity .15s;
+  }
+  .btn:active{transform:scale(.975)}
+  .btn.primary{background:linear-gradient(135deg,var(--accent),var(--accent-2));box-shadow:0 8px 22px rgba(106,77,240,.35)}
+  .btn.ghost{background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.18);color:#e4deff}
+  .btn[disabled]{opacity:.55;cursor:default}
+  .link{
+    display:block;margin:14px auto 0;background:none;border:0;color:#8f87b8;
+    font-size:12px;padding:6px;cursor:pointer;text-decoration:underline;text-underline-offset:3px;
+  }
+  .foot{text-align:center;font-size:11px;color:#7a729f;margin:16px 0 0;line-height:1.6}
+  .warn{
+    margin-top:14px;padding:10px 12px;border-radius:11px;font-size:11.5px;line-height:1.55;
+    background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.28);color:#fcd34d;display:none;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="brand">
+    <div class="logo">S</div>
+    <h1>超级管家</h1>
+    <p class="tagline">Super Butler · 家庭 AI 控制台</p>
+  </div>
+
+  <div class="card">
+    <label for="hub">Hub 地址</label>
+    <input id="hub" type="url" inputmode="url" autocomplete="url" spellcheck="false"
+           placeholder="http://192.168.1.10:7317">
+    <p class="hint">运行 <code>node hub/server.js</code> 的电脑的局域网地址，默认端口 <code>7317</code>。</p>
+
+    <label for="token">管理员令牌</label>
+    <input id="token" type="password" autocomplete="off" spellcheck="false"
+           placeholder="Hub 启动日志中打印的 adminToken">
+
+    <div id="status" class="status" role="status" aria-live="polite"></div>
+
+    <div class="actions">
+      <button id="testBtn" class="btn ghost" type="button">测试连接</button>
+      <button id="saveBtn" class="btn primary" type="button">保存并进入</button>
+    </div>
+    <button id="resetBtn" class="link" type="button">清除已保存配置</button>
+    <div id="warn" class="warn">未检测到 App 桥接（直接在浏览器打开时只能试用「测试连接」，且 Hub 需允许 CORS）。请把本页放进 APK 的 assets 中使用。</div>
+  </div>
+
+  <p class="foot">v<span id="ver">0.1.0</span> · 令牌仅保存在本机应用私有存储，不会上传</p>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var bridge = (typeof window.ButlerBridge !== "undefined") ? window.ButlerBridge : null;
+  var $ = function (id) { return document.getElementById(id); };
+
+  function setStatus(msg, kind) {
+    var el = $("status");
+    el.textContent = msg || "";
+    el.className = "status" + (kind ? " " + kind : "");
+  }
+
+  function normalizeUrl(raw) {
+    var s = String(raw || "").trim();
+    if (!s) return null;
+    if (!/^[a-z][a-z0-9+.\-]*:\/\//i.test(s)) s = "http://" + s;
+    var u;
+    try { u = new URL(s); } catch (e) { return null; }
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    if (!u.hostname) return null;
+    var base = u.protocol + "//" + u.hostname + (u.port ? ":" + u.port : "");
+    var path = u.pathname.replace(/\/+$/, "");
+    if (path && path !== "/") base += path;
+    return base;
+  }
+
+  function setBusy(busy) {
+    $("testBtn").disabled = busy;
+    $("saveBtn").disabled = busy;
+  }
+
+  function testConnection() {
+    var base = normalizeUrl($("hub").value);
+    if (!base) {
+      setStatus("请输入有效的 http(s) Hub 地址，例如 http://192.168.1.10:7317", "err");
+      return;
+    }
+    $("hub").value = base;
+    var token = $("token").value.trim();
+    setBusy(true);
+    setStatus("正在连接 " + base + " …", "info");
+
+    function finish(res) {
+      setBusy(false);
+      if (res && res.ok) {
+        var extra = [];
+        if (res.name) extra.push(res.name);
+        if (res.version) extra.push("v" + res.version);
+        if (res.protocol) extra.push("协议 " + res.protocol);
+        setStatus("连接成功 ✓ " + (extra.length ? "（" + extra.join(" · ") + "）" : ""), "ok");
+      } else {
+        setStatus("连接失败 ✗ " + ((res && (res.message || res.error)) || "未知错误"), "err");
+      }
+    }
+
+    if (bridge && typeof bridge.testConnection === "function") {
+      try {
+        finish(JSON.parse(bridge.testConnection(base, token)));
+      } catch (e) {
+        finish({ ok: false, message: String(e) });
+      }
+      return;
+    }
+
+    // 浏览器兜底：需要 Hub 返回 CORS 头
+    var headers = token ? { "X-Butler-Token": token } : {};
+    fetch(base + "/api/health", { method: "GET", headers: headers, cache: "no-store" })
+      .then(function (r) {
+        return r.text().then(function (text) {
+          var body = {};
+          try { body = JSON.parse(text); } catch (e) {}
+          finish({
+            ok: r.ok,
+            status: r.status,
+            name: body.name || "",
+            version: body.version || "",
+            protocol: body.protocol || 0,
+            message: r.ok ? "" : ("HTTP " + r.status + (r.status === 401 || r.status === 403 ? "（令牌无效）" : ""))
+          });
+        });
+      })
+      .catch(function (e) {
+        finish({ ok: false, message: "网络错误或跨域受限：" + String(e) });
+      });
+  }
+
+  function saveAndEnter() {
+    var base = normalizeUrl($("hub").value);
+    var token = $("token").value.trim();
+    if (!base) {
+      setStatus("请输入有效的 http(s) Hub 地址", "err");
+      $("hub").focus();
+      return;
+    }
+    if (!token) {
+      setStatus("请输入管理员令牌（Hub 启动日志中的 adminToken）", "err");
+      $("token").focus();
+      return;
+    }
+    $("hub").value = base;
+    if (!bridge || typeof bridge.saveConfig !== "function") {
+      setStatus("请在「超级管家」APK 内保存配置（当前为浏览器环境）", "err");
+      return;
+    }
+    setBusy(true);
+    setStatus("正在保存配置…", "info");
+    var res;
+    try {
+      res = JSON.parse(bridge.saveConfig(base, token));
+    } catch (e) {
+      res = { ok: false, message: String(e) };
+    }
+    setBusy(false);
+    if (res && res.ok) {
+      setStatus("已保存，正在打开控制台…", "ok");
+      if (typeof bridge.toast === "function") {
+        try { bridge.toast("配置已保存"); } catch (e) {}
+      }
+      setTimeout(function () {
+        try { bridge.openDashboard(); } catch (e) {}
+      }, 220);
+    } else {
+      setStatus("保存失败：" + ((res && res.message) || "未知错误"), "err");
+    }
+  }
+
+  function resetConfig() {
+    if (bridge && typeof bridge.clearConfig === "function") {
+      try { bridge.clearConfig(); } catch (e) {}
+      $("token").value = "";
+      setStatus("已清除本机保存的 Hub 配置", "info");
+    } else {
+      setStatus("当前为浏览器环境，没有可清除的配置", "info");
+    }
+  }
+
+  function init() {
+    if (!bridge) {
+      $("warn").style.display = "block";
+    } else {
+      try {
+        var cfg = JSON.parse(bridge.getConfig());
+        if (cfg.hubUrl) $("hub").value = cfg.hubUrl;
+        if (cfg.token) $("token").value = cfg.token;
+        if (typeof bridge.appVersion === "function") {
+          var v = bridge.appVersion();
+          if (v) $("ver").textContent = v;
+        }
+        if (cfg.configured) setStatus("已保存配置，可直接「保存并进入」或重新测试连接", "info");
+      } catch (e) {}
+    }
+    var saved = normalizeUrl($("hub").value);
+    if (saved) $("hub").value = saved;
+
+    $("testBtn").addEventListener("click", testConnection);
+    $("saveBtn").addEventListener("click", saveAndEnter);
+    $("resetBtn").addEventListener("click", resetConfig);
+    $("token").addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { e.preventDefault(); saveAndEnter(); }
+    });
+    $("hub").addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { e.preventDefault(); testConnection(); }
+    });
+    $("hub").addEventListener("blur", function () {
+      var base = normalizeUrl($("hub").value);
+      if (base) $("hub").value = base;
+    });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
+})();
+</script>
+</body>
+</html>

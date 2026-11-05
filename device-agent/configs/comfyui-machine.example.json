@@ -1,0 +1,61 @@
+{
+  "name": "第二台电脑 · ComfyUI",
+  "platform": "windows",
+  "kind": "multi",
+  "agentVersion": "0.1.0",
+  "tags": ["第二台电脑", "ComfyUI", "图像生成", "GPU"],
+  "models": [
+    {
+      "id": "comfyui",
+      "provider": "comfyui",
+      "strengths": ["image", "image-edit", "upscale", "video"],
+      "available": true
+    }
+  ],
+  "profiles": [
+    {
+      "id": "comfyui",
+      "name": "ComfyUI 工作流",
+      "plugins": ["comfyui", "text2img"]
+    }
+  ],
+  "gateways": [
+    {
+      "id": "comfyui",
+      "kind": "comfyui",
+      "baseUrl": "http://127.0.0.1:8188",
+      "models": ["comfyui"]
+    }
+  ],
+  "skills": [
+    { "id": "image-generation", "name": "文生图", "version": "1.0.0" },
+    { "id": "image-edit", "name": "图生图 / 局部重绘", "version": "1.0.0" },
+    { "id": "upscale", "name": "放大修复", "version": "1.0.0" },
+    { "id": "video-generation", "name": "视频生成（如工作流支持）", "version": "1.0.0" },
+    { "id": "comfyui-workflow", "name": "ComfyUI 工作流执行", "version": "1.0.0" },
+    { "id": "visual-design", "name": "视觉设计", "version": "1.0.0" }
+  ],
+  "resources": {
+    "cpuCores": 8,
+    "memoryGB": 32,
+    "gpu": "NVIDIA GPU（按实际填写）",
+    "os": "Windows 11"
+  },
+  "limits": { "maxConcurrentTasks": 1 },
+  "executor": {
+    "type": "comfyui",
+    "comfyui": {
+      "baseUrl": "http://127.0.0.1:8188",
+      "workflowFile": "C:/Users/you/ComfyUI/workflows/text2img_api.json",
+      "promptNodeId": "6",
+      "negativeNodeId": "7",
+      "negativePrompt": "blurry, low quality, watermark, text",
+      "seedNodeId": "3",
+      "outputDir": "C:/Users/you/super-butler-worker/comfyui-out",
+      "timeoutMs": 900000,
+      "pollMs": 1500,
+      "maxImages": 8
+    }
+  },
+  "discovery": { "dsh": false, "ollama": false, "gateway": false, "skills": false }
+}

@@ -1,0 +1,47 @@
+{
+  "name": "书房工作站",
+  "platform": "windows",
+  "kind": "dsh",
+  "agentVersion": "0.1.0",
+  "endpoint": "http://192.168.1.20:7788",
+  "tags": ["书房", "夜间可跑"],
+  "models": [
+    {
+      "id": "deepseek-chat",
+      "provider": "deepseek",
+      "contextWindow": 128000,
+      "strengths": ["code", "reasoning", "writing"],
+      "available": true
+    },
+    {
+      "id": "deepseek-reasoner",
+      "provider": "deepseek",
+      "contextWindow": 128000,
+      "strengths": ["reasoning", "math"],
+      "available": true
+    }
+  ],
+  "profiles": [
+    {
+      "id": "desktop",
+      "name": "DSH Desktop",
+      "plugins": ["@deepseek-ai/dsh-web-app", "@deepseek-ai/dsh-experimental-agent-team-profile"]
+    }
+  ],
+  "gateways": [
+    {
+      "id": "openai-gateway",
+      "kind": "openai-compatible",
+      "baseUrl": "http://127.0.0.1:8787/v1",
+      "models": ["gpt-4o-mini"]
+    }
+  ],
+  "skills": [
+    { "id": "office-docx", "name": "Word 文档", "version": "1.0.0" },
+    { "id": "office-xlsx", "name": "Excel 表格", "version": "1.0.0" },
+    { "id": "office-pptx", "name": "PPT 演示", "version": "1.0.0" },
+    { "id": "web-research", "name": "联网调研", "version": "1.0.0" }
+  ],
+  "resources": { "cpuCores": 16, "memoryGB": 32, "gpu": "RTX 4070", "os": "Windows 11" },
+  "limits": { "maxConcurrentTasks": 2 }
+}
