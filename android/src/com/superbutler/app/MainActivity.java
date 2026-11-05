@@ -58,6 +58,7 @@ public class MainActivity extends Activity {
     private static final String PREFS_NAME = "butler_config";
     private static final String KEY_HUB = "hub_url";
     private static final String KEY_TOKEN = "admin_token";
+    private static final String KEY_PERSISTENT_NOTIFY = "persistent_notification";
 
     private static final String TASK_PROGRESS_CHANNEL = "butler_task_progress";
     private static final String TASK_DONE_CHANNEL = "butler_task_done";
@@ -99,6 +100,9 @@ public class MainActivity extends Activity {
 
         createNotificationChannels();
         requestNotificationPermissionIfNeeded();
+        if (prefs.getBoolean(KEY_PERSISTENT_NOTIFY, false)) {
+            startPersistentNotificationService();
+        }
         loadInitial();
     }
 
@@ -391,6 +395,35 @@ public class MainActivity extends Activity {
         }
     }
 
+    private boolean notificationPermissionGranted() {
+        if (Build.VERSION.SDK_INT < 33) return true;
+        return checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void startPersistentNotificationService() {
+        try {
+            Intent intent = new Intent(this, ButlerNotificationService.class);
+            intent.setAction(ButlerNotificationService.ACTION_START);
+            startForegroundService(intent);
+        } catch (Exception e) {
+            Log.w(TAG, "start persistent notification service failed", e);
+        }
+    }
+
+    private void stopPersistentNotificationService() {
+        try {
+            stopService(new Intent(this, ButlerNotificationService.class));
+        } catch (Exception e) {
+            Log.w(TAG, "stop persistent notification service failed", e);
+        }
+    }
+
+    private void applyPersistentNotification(boolean enabled) {
+        prefs.edit().putBoolean(KEY_PERSISTENT_NOTIFY, enabled).apply();
+        if (enabled) startPersistentNotificationService();
+        else stopPersistentNotificationService();
+    }
+
     private static String taskStatusLabel(String status) {
         if ("queued".equals(status)) return "排队中";
         if ("assigned".equals(status)) return "已派发";
@@ -586,6 +619,34 @@ public class MainActivity extends Activity {
                 postTaskNotification(new JSONObject(json), true);
             } catch (Exception e) {
                 Log.w(TAG, "taskFinished bridge failed", e);
+            }
+        }
+
+        @JavascriptInterface
+        public String getNotificationSettings() {
+            JSONObject o = new JSONObject();
+            try {
+                o.put("ok", true);
+                o.put("enabled", prefs.getBoolean(KEY_PERSISTENT_NOTIFY, false));
+                o.put("permissionGranted", notificationPermissionGranted());
+            } catch (Exception e) {
+                return errorJson("internal", "读取通知设置失败");
+            }
+            return o.toString();
+        }
+
+        @JavascriptInterface
+        public String setPersistentNotification(boolean enabled) {
+            if (!bridgeAllowed) return errorJson("forbidden", "仅允许在管家页面调用");
+            try {
+                applyPersistentNotification(enabled);
+                JSONObject o = new JSONObject();
+                o.put("ok", true);
+                o.put("enabled", enabled);
+                o.put("permissionGranted", notificationPermissionGranted());
+                return o.toString();
+            } catch (Exception e) {
+                return errorJson("internal", "设置常驻通知失败");
             }
         }
     }

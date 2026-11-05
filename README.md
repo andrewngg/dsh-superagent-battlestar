@@ -183,6 +183,7 @@ node device-agent/agent.js \
 - 或安装 [dist/SuperButler-0.1.0.apk](dist/SuperButler-0.1.0.apk)（Android 8+，测试签名；构建/安装见 [docs/APK.md](docs/APK.md)）。
 - 首次打开填写 Hub 地址与管理员令牌，点「测试连接」→「进入管家」。
 - 任务执行时通知栏显示**常驻进度条**，完成后推送完成/失败提醒；Android 13+ 首次启动需允许通知权限。
+- APK「设置 → 手机通知（APK）」可开启**常驻通知**：有任务时显示任务进度，没有任务时显示 `X 台在线 · Y 台待命`。
 
 ### DSH 插件（可选，推荐）
 

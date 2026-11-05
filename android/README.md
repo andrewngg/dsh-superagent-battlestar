@@ -7,6 +7,7 @@
 - 版本：`versionCode 1` / `versionName 0.1.0`
 - minSdk **26**（Android 8.0）/ targetSdk **36**
 - 产物：`dist/SuperButler-0.1.0.apk`（约 **0.11 MB**，远低于 5 MB 目标）
+- 任务通知：通知栏进度条、完成/失败提醒；设置中可开启**常驻通知**，空闲时显示在线/待命主机数
 
 ---
 
@@ -18,7 +19,8 @@ android/
 ├─ build-apk.ps1                # 一键构建流水线（aapt2→javac→d8→jar→zipalign→apksigner）
 ├─ generate-icons.py            # 用 Pillow 生成 mipmap 图标与 dist/icon-512.png
 ├─ src/com/superbutler/app/
-│  └─ MainActivity.java         # WebView 宿主 + JS Bridge + 本地错误页
+│  ├─ MainActivity.java         # WebView 宿主 + JS Bridge + 通知
+│  └─ ButlerNotificationService.java  # 常驻通知前台服务（5s 轮询 Hub）
 ├─ assets/
 │  └─ setup.html                # 首次启动的 Hub 配置页（品牌页 + 测试连接 + 保存）
 ├─ res/

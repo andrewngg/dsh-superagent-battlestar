@@ -1991,6 +1991,58 @@
     session.appendChild(el('p', { className: 'settings-note', text: '令牌仅保存在本机浏览器；清除后需重新输入 Hub 启动日志中的 adminToken。' }));
     wrap.appendChild(session);
 
+    // APK 专用：常驻通知开关（浏览器中没有 ButlerBridge，自动隐藏）
+    let appBridge = null;
+    try {
+      appBridge = window.ButlerBridge;
+    } catch (e) {
+      appBridge = null;
+    }
+    if (appBridge && typeof appBridge.getNotificationSettings === 'function'
+        && typeof appBridge.setPersistentNotification === 'function') {
+      const notifySection = el('section', { className: 'settings-section' },
+        el('h3', { text: '手机通知（APK）' }),
+      );
+      const toggle = el('input', { type: 'checkbox', id: 'persistent-notify-toggle' });
+      const label = el('label', { className: 'settings-note', style: { display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' } },
+        toggle, ' 启用常驻通知栏');
+      const status = el('p', { className: 'settings-note', text: '任务进行中显示进度条；没有任务时显示在线 / 待命主机数量。' });
+      notifySection.appendChild(label);
+      notifySection.appendChild(status);
+      wrap.appendChild(notifySection);
+
+      const describe = (info) => {
+        if (!info || !info.ok) return '无法读取通知设置';
+        if (!info.enabled) return '未开启。开启后通知栏会常驻显示管家状态。';
+        return info.permissionGranted
+          ? '已开启：通知栏会常驻显示任务进度或在线/待命统计。'
+          : '已开启，但通知权限未授予；请在系统设置中允许「超级管家」通知。';
+      };
+      try {
+        const info = JSON.parse(appBridge.getNotificationSettings());
+        toggle.checked = !!info.enabled;
+        status.textContent = describe(info);
+      } catch (e) {
+        status.textContent = '无法读取通知设置';
+      }
+      toggle.addEventListener('change', () => {
+        try {
+          const result = JSON.parse(appBridge.setPersistentNotification(toggle.checked));
+          if (!result || !result.ok) {
+            toggle.checked = !toggle.checked;
+            toast((result && result.message) || '设置失败', 'error');
+            return;
+          }
+          toggle.checked = !!result.enabled;
+          status.textContent = describe(result);
+          toast(result.enabled ? '常驻通知已开启' : '常驻通知已关闭', 'success');
+        } catch (e) {
+          toggle.checked = !toggle.checked;
+          toast('设置常驻通知失败', 'error');
+        }
+      });
+    }
+
     const about = el('section', { className: 'settings-section' },
       el('h3', { text: '关于' }),
       el('p', { className: 'settings-note', text: 'Super Butler 控制台 · 零依赖静态前端，同源加载 Hub 资源。设备能力、任务路由与事件流遵循协议 v1。' }),

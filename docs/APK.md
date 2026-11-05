@@ -51,6 +51,11 @@ adb install -r dist/SuperButler-0.1.0.apk
   - 任务 `completed / failed / timeout / cancelled` 时更新为完成/失败通知，完成时播放提示音；
   - Android 13+ 首次启动会请求通知权限；拒绝后可在系统设置中开启；
   - 点击通知回到 APK 控制台。
+- **常驻通知开关**（设置 → 手机通知（APK））：
+  - 开启后由前台服务每 5 秒读取 Hub 快照；
+  - 有进行中任务：显示任务指令、设备与进度条；
+  - 没有任务：显示 `X 台在线 · Y 台待命`（待命 = 在线且空闲）；
+  - 关闭开关会停止前台服务并移除常驻通知。
 - **实时**：SSE 推送，断线自动重连；不可用时降级 5 秒轮询。
 
 > 通知由 WebView 页面通过 `ButlerBridge.taskProgress / taskFinished` 驱动，App 进程被系统杀掉后不会继续更新；
@@ -169,5 +174,6 @@ toolchain\android-sdk\build-tools\36.0.0\zipalign.exe -c -v 4 dist\SuperButler-0
 - 自签名/私有 CA 的 HTTPS 会被 WebView 拒绝；家庭内网建议直接用 http（APK 已允许 cleartext）。
 - 无服务端推送、离线缓存、下拉刷新、自适应图标、扫码配对（v1 范围）；任务通知依赖 WebView 页面运行，App 被系统彻底杀死后不再更新。
 - 通知权限（Android 13+）需用户在首次启动时允许；未授权时任务照常执行，只是不显示通知。
+- 常驻通知依赖前台服务轮询 Hub（默认 5 秒）；Hub 不可达时通知会显示“无法连接 Hub”。
 - 无 AndroidX，UI 依赖系统 Material 主题。
 - 本机无 Android 真机/模拟器，仅完成静态校验与代码审查；首次真机安装后建议按第 2 节点验一遍。
