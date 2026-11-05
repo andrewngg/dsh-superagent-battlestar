@@ -146,6 +146,35 @@ node device-agent/agent.js \
 工作机上线后，母机控制台会显示设备名、在线状态、models / profiles / gateways / skills chips 与负载。
 所有执行器都是可配置、可插拔的；设备主人决定允许执行什么。
 
+### 让 AI 自动配置工作机（WORKER-SETUP）
+
+如果工作机上有一个能执行命令的 AI Agent，把下面这段发给它，它就会读取参考文件并自动完成配置与注册：
+
+```text
+读取本仓库的 docs/WORKER-SETUP.md，把本机配置成超级管家的「工作机」并自动注册到母机。
+母机：http://<母机IP>:7317
+加入码：<JOIN_CODE>
+角色：cli（或 comfyui / mika / ollama / http）
+设备名：<DEVICE_NAME>
+可选管理员令牌（仅用于验证）：<ADMIN_TOKEN 或留空>
+按文件里的步骤执行，完成后按第 7 节格式汇报。
+```
+
+参考文件：[docs/WORKER-SETUP.md](docs/WORKER-SETUP.md)
+
+它只需要你提供：
+
+| 信息 | 必填 | 说明 |
+| --- | --- | --- |
+| 母机 URL | ✅ | `http://<母机IP>:7317`，工作机必须能访问 |
+| 加入码 | ✅ | 母机启动日志里的 `join_...` |
+| 角色 / 执行器 | ✅ | `cli` / `comfyui` / `mika` / `ollama` / `http` |
+| 管理员令牌 | 可选 | 仅用于自动验证设备是否上线、发测试任务 |
+| 工作机自身 IP / 端口 | ❌ 不需要 | 工作机主动连母机，Hub 不会反向连接工作机 |
+
+> 这不是「互相桥接」：注册、心跳、领任务都是工作机发起的出站请求（`POST /api/devices/register` → 心跳/长轮询）。
+> 只有 Mika 桥需要本机连手机（ADB/Wi-Fi）、ComfyUI 需要本机连 `127.0.0.1:8188`，都与母机入站无关。
+
 ### 手机控制端（APK / 浏览器）
 
 > 这里是**控制端**，不是工作机。手机工作机是 Mika，见上面的工作机表格与 [docs/MIKA-PHONE.md](docs/MIKA-PHONE.md)。
@@ -190,7 +219,7 @@ super-butler/
 ├─ android/                # APK 工程 + 手工构建流水线
 ├─ dist/                   # 构建产物：SuperButler-0.1.0.apk、icon-512.png
 ├─ scripts/                # demo.js / smoke-test.js / simulate-devices.js
-├─ docs/                   # INSTALL / PROTOCOL / ARCHITECTURE / DEPLOY / APK / SECOND-MACHINE / MIKA-PHONE / DSH-PLUGIN
+├─ docs/                   # INSTALL / WORKER-SETUP / PROTOCOL / ARCHITECTURE / DEPLOY / APK / SECOND-MACHINE / MIKA-PHONE / DSH-PLUGIN
 ├─ CREDITS.md              # 第三方来源、许可证、商标与 AGPL 合规说明
 ├─ LICENSE                 # MIT
 └─ package.json            # npm scripts（无依赖）

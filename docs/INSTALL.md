@@ -108,6 +108,9 @@ plugin_manager(action: "install_bundle", target: "<abs>/super-butler/dsh-plugin"
 
 ## 二、安装工作机（Worker）
 
+> 想让工作机上的 AI 自动完成配置？直接让它读取 [WORKER-SETUP.md](WORKER-SETUP.md)；
+> 它会检查环境、选执行器、写配置、注册到母机并验证。你只需要提供母机 URL、加入码和角色。
+
 工作机按能力选择执行器。以下任选一种或组合。
 
 ### 通用步骤
