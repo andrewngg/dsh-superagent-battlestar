@@ -43,7 +43,7 @@
 | 工具 | 许可证 | 用途 |
 | --- | --- | --- |
 | [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) | **MIT** | 第一台工作机的通用 CLI 执行器（`hermes --cli -z`），以及其 profiles / gateways / skills 能力申报 |
-| [anomalyco/opencode](https://github.com/anomalyco/opencode)（opencode.ai） | **MIT** | 代码任务执行器（`opencode run -m opencode/deepseek-v4-flash-free`） |
+| [anomalyco/opencode](https://github.com/anomalyco/opencode)（opencode.ai） | **MIT** | 代码任务执行器（`opencode run -m deepseek/deepseek-flash`） |
 | [ollama/ollama](https://github.com/ollama/ollama) | **MIT** | 本地模型运行时（`qwen2.5vl:7b`） |
 | [wangzan101/Mika](https://github.com/wangzan101/Mika) | **Apache-2.0** | 手机端 AI Agent：通过 `mika` CLI（USB/ADB 或 Wi-Fi 私有网络）把手机作为工作机接入，**不随仓库分发** |
 | [Comfy-Org/ComfyUI](https://github.com/Comfy-Org/ComfyUI) | **GPL-3.0** | 第二台电脑的图像/视频生成服务，仅通过 HTTP API 调用，**不随仓库分发** |

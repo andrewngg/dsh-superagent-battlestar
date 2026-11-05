@@ -58,12 +58,12 @@ test('providerForModel：按模型/显式映射选择 provider', () => {
 test('buildOpencodeArgs：非交互 JSON 输出与模型参数', () => {
   const args = worker.buildOpencodeArgs({
     instruction: '写一个 hello.js',
-    model: 'opencode/deepseek-v4-flash-free',
+    model: 'deepseek/deepseek-flash',
     workdir: 'C:\\work',
   });
   assert.deepEqual(args, [
     'run', '写一个 hello.js',
-    '-m', 'opencode/deepseek-v4-flash-free',
+    '-m', 'deepseek/deepseek-flash',
     '--format', 'json',
     '--dir', 'C:\\work',
     '--auto',

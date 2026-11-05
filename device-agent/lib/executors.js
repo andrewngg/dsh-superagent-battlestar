@@ -619,7 +619,7 @@ function createCommandExecutor(kind, options = {}) {
  *     "fallbackToHermes": true,           // OpenCode 不可用时回退 Hermes
  *     "timeoutMs": 900000,
  *     "hermes":   { "home": "C:\\Users\\me\\AppData\\Local\\hermes" },
- *     "opencode": { "model": "opencode/deepseek-v4-flash-free" }
+ *     "opencode": { "model": "deepseek/deepseek-flash" }
  *   }
  * }
  */

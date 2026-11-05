@@ -66,7 +66,7 @@ SIGINT（Ctrl+C）会优雅注销设备后退出；发送两次强制退出（�
 - `simulate`（默认）：按指令关键词生成 3-6 条中文进度与结构化结果（text/markdown/artifacts/data），默认总耗时 2-6s，可被 `executor.simulate` 配置缩短；
 - `cli`：调用本机 CLI Agent（`device-agent/cli-worker.js`）：
   - `hermes`：`hermes --cli --yolo -z "<instruction>"`，可执行本机工具命令；
-  - `opencode`：`opencode run "<instruction>" -m opencode/deepseek-v4-flash-free --format json`，失败可回退 Hermes；
+  - `opencode`：`opencode run "<instruction>" -m deepseek/deepseek-flash --format json`，失败可回退 Hermes；
   - `shell`：`pwsh -NoProfile -NonInteractive -Command "<instruction>"`（需 `allowShell: true`）；
   - 由 `requirements.profile`（`hermes` / `hermes-<profile>` / `opencode` / `cli-shell`）或指令前缀（`!` / `/run`）选择后端；输出写入任务 `output.data.backend`；
 - `dsh-cli`：命令模板（默认 `dsh run --print {instruction}`），`{instruction}`、`{taskId}`、`{deviceName}`、`{model}`、`{outputFile}` 占位符；输出重定向到临时文件后截断（**不使用 pipe**，Windows 沙箱安全）；超时/取消会 kill 子进程树；

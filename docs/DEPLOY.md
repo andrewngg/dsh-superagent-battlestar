@@ -154,7 +154,7 @@ node device-agent/agent.js --hub http://192.168.1.10:7317 --join-code <joinCode>
 | 执行器 | 适用 | 配置 |
 | --- | --- | --- |
 | `simulate` | 演示 / 联调 | 默认，无需额外配置 |
-| `cli` | 本机装有 Hermes / OpenCode CLI（推荐，见 [FIRST-MACHINE.md](FIRST-MACHINE.md)） | `"executor": {"type":"cli","cli":{"mode":"auto","workdir":"C:\\work","allowShell":false,"hermes":{"home":"C:\\Users\\me\\AppData\\Local\\hermes"},"opencode":{"model":"opencode/deepseek-v4-flash-free"},"fallbackToHermes":true}}` |
+| `cli` | 本机装有 Hermes / OpenCode CLI（推荐，见 [FIRST-MACHINE.md](FIRST-MACHINE.md)） | `"executor": {"type":"cli","cli":{"mode":"auto","workdir":"C:\\work","allowShell":false,"hermes":{"home":"C:\\Users\\me\\AppData\\Local\\hermes"},"opencode":{"model":"deepseek/deepseek-flash"},"fallbackToHermes":true}}` |
 | `dsh-cli` | 设备上安装了 DeepSeek Harness CLI | `"executor": {"type":"dsh-cli","command":"dsh run --print {instruction}","timeoutSec":280}` |
 | `http` | 设备上已有自己的 Agent 服务 | `"executor": {"type":"http","url":"http://127.0.0.1:7788/execute"}` |
 | `ollama` | 本地 Ollama 模型 | `"executor": {"type":"ollama","model":"qwen2.5:7b"}` |

@@ -6,7 +6,7 @@
  *
  * 由 device-agent 的 `cli` 执行器启动，负责把一条任务指令交给本机的 CLI Agent：
  *   - hermes   : `hermes --cli -z "<instruction>"`（可执行本机工具命令，默认）
- *   - opencode : `opencode run "<instruction>" -m opencode/deepseek-v4-flash-free --format json`
+ *   - opencode : `opencode run "<instruction>" -m deepseek/deepseek-flash --format json`
  *   - shell    : `pwsh -NoProfile -NonInteractive -Command "<instruction>"`（需显式允许）
  *
  * stdout 只输出一行 JSON（设备代理解析）；日志/进度写 stderr。
@@ -34,7 +34,7 @@ const SHELL_PREFIX_RE = /^\s*(?:!|\/run\s+|\$ )/i;
 const DEFAULTS = {
   mode: 'auto',
   timeoutMs: 15 * 60 * 1000,
-  opencodeModel: 'opencode/deepseek-v4-flash-free',
+  opencodeModel: 'deepseek/deepseek-flash',
 };
 
 function stripAnsi(text) {
