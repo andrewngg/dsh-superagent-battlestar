@@ -1,6 +1,6 @@
 # @local/dsh-super-butler
 
-DSH bundle for the Super Butler project. It registers a **超级管家** sidebar panel and main page inside
+DSH bundle for the BattleStar project. It registers a **BattleStar** sidebar panel and main page inside
 the Harness Web UI, manages the local butler Hub process, and stores private account credentials through
 the Harness credential service.
 

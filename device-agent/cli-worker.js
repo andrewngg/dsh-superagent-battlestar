@@ -2,7 +2,7 @@
 'use strict';
 
 /**
- * Super Butler 本机 CLI 执行器 worker（零依赖）。
+ * BattleStar 本机 CLI 执行器 worker（零依赖）。
  *
  * 由 device-agent 的 `cli` 执行器启动，负责把一条任务指令交给本机的 CLI Agent：
  *   - hermes   : `hermes --cli -z "<instruction>"`（可执行本机工具命令，默认）

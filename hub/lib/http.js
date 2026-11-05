@@ -174,7 +174,7 @@ async function handleRequest(hub, req, res) {
   if (pathname === '/api/health') {
     return sendJson(res, 200, {
       ok: true,
-      name: 'super-butler',
+      name: 'BattleStar',
       version: hub.version,
       protocol: protocol.PROTOCOL_VERSION,
       uptimeSec: hub.uptimeSec,

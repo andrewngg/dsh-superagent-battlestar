@@ -1,4 +1,4 @@
-# Super Butler 设备代理（device-agent）
+# BattleStar 设备代理（device-agent）
 
 零依赖、Node 18+、CommonJS。遵循 `docs/PROTOCOL.md` 与 `shared/protocol.js`，向 Hub 申报能力、心跳、领任务并执行。
 

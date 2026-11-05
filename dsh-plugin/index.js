@@ -1,5 +1,5 @@
 /**
- * Super Butler · DSH Host 插件
+ * BattleStar · DSH Host 插件
  *
  * 职责：
  *  1. 在 DSH 内管理本机管家 Hub（检测已有 Hub / 自动启动 / 停止），并代理其 API；
@@ -91,7 +91,7 @@ function defaults() {
     adminToken: '',
     joinCode: '',
     defaultModel: 'deepseek-chat',
-    hubNickname: '超级管家母机',
+    hubNickname: 'BattleStar母机',
   }
 }
 
@@ -592,13 +592,13 @@ export function apply(ctx, rawConfig = {}) {
       }
       if (method === 'GET' && (sub === '/' || sub === '')) {
         return json(res, 200, {
-          name: 'super-butler',
+          name: 'BattleStar',
           routes: ['/api/status', '/api/settings', '/api/snapshot', '/api/tasks', '/api/devices/:id', '/api/test-credential', '/api/hub/start', '/api/hub/stop'],
         })
       }
       return json(res, 404, { error: { code: 'not_found', message: `未知路由：${method} ${sub}` } })
     } catch (err) {
-      return json(res, 500, { error: { code: 'super_butler_error', message: err && err.message ? err.message : String(err) } })
+      return json(res, 500, { error: { code: 'battlestar_error', message: err && err.message ? err.message : String(err) } })
     }
   }
 

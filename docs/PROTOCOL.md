@@ -1,4 +1,4 @@
-# Super Butler 协议 v1（Hub ⇄ Device ⇄ Phone）
+# BattleStar 协议 v1（Hub ⇄ Device ⇄ Phone）
 
 本文件是 **唯一接口契约**。Hub、设备代理、Web/手机端、模拟器与测试都必须遵循它。
 协议版本：`1`。所有时间为 ISO-8601 UTC 字符串；所有 ID 为 `前缀_随机串`，例如 `dev_ab12cd34`。
@@ -85,7 +85,7 @@ assigned/running ──timeout──▶ timeout (可重试)
 
 ### 5.1 公共
 
-`GET /api/health` → `{ ok:true, name:"super-butler", version, protocol:1, uptimeSec, hubTime }`
+`GET /api/health` → `{ ok:true, name:"BattleStar", version, protocol:1, uptimeSec, hubTime }`
 
 ### 5.2 设备注册
 

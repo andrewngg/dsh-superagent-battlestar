@@ -1,11 +1,11 @@
-# DSH 插件：超级管家
+# DSH 插件：BattleStar
 
-把「超级管家」做成 DeepSeek Harness 的持久化插件：在 Web UI 侧边栏打开管家控制台，
+把「BattleStar」做成 DeepSeek Harness 的持久化插件：在 Web UI 侧边栏打开管家控制台，
 并在插件设置里统一管理 Hub、私人账号与模型密钥。
 
 - 插件包：`super-butler/dsh-plugin/`（`@local/dsh-super-butler@0.1.0`）
 - 安装 profile 示例：`desktop`（`~/.dsh/profiles/<profile>/package.json` 的 bundle 列表）
-- 入口：侧边栏「超级管家」图标（order 5）
+- 入口：侧边栏「BattleStar」图标（order 5）
 - 面板：`main` 槽位的 `super-butler` 页，含「控制台 / 设置」两个标签
 
 ## 1. 安装

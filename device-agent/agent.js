@@ -2,7 +2,7 @@
 'use strict';
 
 /**
- * Super Butler 设备代理。
+ * BattleStar 设备代理。
  *
  * 流程（docs/PROTOCOL.md §8）：
  *   探测能力 → 注册（首次用加入码；之后用本地 deviceId+deviceToken 更新 manifest）
@@ -898,7 +898,7 @@ function parseArgs(argv = []) {
 
 function printHelp(stream = process.stdout) {
   const lines = [
-    'Super Butler 设备代理 v' + AGENT_VERSION,
+    'BattleStar 设备代理 v' + AGENT_VERSION,
     '',
     '用法：node device-agent/agent.js [选项]',
     '',
@@ -1019,7 +1019,7 @@ async function main(argv = process.argv.slice(2)) {
   process.on('SIGTERM', onSigterm);
 
   try {
-    logger.info(`Super Butler 设备代理 v${AGENT_VERSION}｜Hub=${agent.hubUrl}`);
+    logger.info(`BattleStar 设备代理 v${AGENT_VERSION}｜Hub=${agent.hubUrl}`);
     if (args.once) {
       const stats = await agent.runOnce({ waitMs: args.onceWaitMs });
       printStats(stats);

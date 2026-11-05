@@ -38,7 +38,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 
 /**
- * Super Butler（超级管家）手机端。
+ * BattleStar 手机端。
  *
  * <p>首次启动加载本地 {@code file:///android_asset/setup.html} 配置 Hub 地址与管理员令牌；
  * 配置完成后直接加载 {@code <hub>/m?token=<token>}。所有页面在无边框 WebView 中展示。</p>

@@ -113,8 +113,8 @@ package: name='com.superbutler.app' versionCode='1' versionName='0.1.0' ... comp
 minSdkVersion:'26'
 targetSdkVersion:'36'
 uses-permission: name='android.permission.INTERNET'
-application-label:'超级管家'
-launchable-activity: name='com.superbutler.app.MainActivity'  label='超级管家'
+application-label:'BattleStar'
+launchable-activity: name='com.superbutler.app.MainActivity'  label='BattleStar'
 
 Signer #1 certificate DN: CN=Super Butler, OU=Home Lab, O=Super Butler, L=KL, C=MY
 Signer #1 certificate SHA-256 digest: 45658ac253be038ab8dc6da60a99743afc7a3a5ac9c6b04d9f498cb7f914bb5a
@@ -163,7 +163,7 @@ adb install -r "dist\BattleStar-0.1.0.apk"
 
 首次启动流程：
 
-1. 打开「超级管家」，显示品牌配置页 `assets/setup.html`（深蓝紫主题）。
+1. 打开「BattleStar」，显示品牌配置页 `assets/setup.html`（深蓝紫主题）。
 2. 填写 Hub 地址（提示 `http://192.168.1.10:7317`，省略 `http://` 会自动补全）与管理员令牌。
 3. 点「测试连接」：通过 **JS Bridge + 原生 HttpURLConnection** 请求 `GET <hub>/api/health`（不依赖 CORS），
    成功提示 Hub 名称 / 版本 / 协议版本；失败提示 HTTP 状态或网络错误。

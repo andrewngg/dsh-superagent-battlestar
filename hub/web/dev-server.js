@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Super Butler · 独立 Mock API + 静态服务器（零依赖）
+ * BattleStar · 独立 Mock API + 静态服务器（零依赖）
  *
  * 用途：不依赖真实 hub/server.js 的情况下开发与截图 hub/web 前端。
  *   node hub/web/dev-server.js          → http://127.0.0.1:7399
@@ -782,7 +782,7 @@ async function handleApi(req, res, url, pathname) {
   if (pathname === '/api/health' && req.method === 'GET') {
     sendJson(res, 200, {
       ok: true,
-      name: 'super-butler',
+      name: 'BattleStar',
       version: VERSION,
       protocol: 1,
       uptimeSec: Math.floor((Date.now() - STARTED_AT) / 1000),
@@ -1015,7 +1015,7 @@ function main() {
 
   server.listen(PORT, HOST, () => {
     const base = `http://${HOST === '0.0.0.0' ? '127.0.0.1' : HOST}:${PORT}`;
-    console.log('┌─ Super Butler · Mock Dev Server ──────────────────────────');
+    console.log('┌─ BattleStar · Mock Dev Server ──────────────────────────');
     console.log(`│  桌面控制台: ${base}/?token=demo`);
     console.log(`│  手机控制台: ${base}/m?token=demo`);
     console.log(`│  健康检查 : ${base}/api/health`);

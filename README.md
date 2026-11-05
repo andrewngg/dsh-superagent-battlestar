@@ -1,4 +1,7 @@
-# DSH Superagent Battlestar · 超级管家
+# BattleStar · 多设备 AI 管家
+
+> 对外品牌、Hub `health.name`、Web 控制台、DSH 插件面板和 APK 显示名均为 **BattleStar**。
+> 为了兼容已有设备令牌、插件安装和启动项，目录名、`@local/dsh-super-butler` 包名、`/super-butler/api/*` 路由和 `~/.super-butler` 状态目录保留旧标识符。
 
 > 把家里多台跑着不同 AI 的设备，接进同一个「管家」：设备申报能力、管家按能力派活、手机随时看状态下指令。
 > A private, multi-device AI butler for DeepSeek Harness: capability-aware routing across your own machines, phones, ComfyUI and CLI agents.
@@ -49,7 +52,7 @@ node scripts/demo.js
 ```mermaid
 flowchart LR
   subgraph Phone["手机控制端"]
-    APK["Super Butler APK<br/>WebView + JS Bridge"]
+    APK["BattleStar APK<br/>WebView + JS Bridge"]
   end
   subgraph HubBox["母机（Hub）"]
     HUB["Hub 中枢<br/>Node.js 零依赖"]
@@ -91,7 +94,7 @@ flowchart LR
 
 > **角色区分（容易混淆）**
 > - **手机工作机（Mika）**：属于「工作机」，负责在 Android 手机上执行 App / 网页任务，由管家下发指令。
-> - **Super Butler APK / 浏览器**：属于「控制端」，只用来查看设备、发指令、看进度，本身不执行 AI 任务。
+> - **BattleStar APK / 浏览器**：属于「控制端」，只用来查看设备、发指令、看进度，本身不执行 AI 任务。
 > 两者可以是同一部手机上的两个不同应用/角色。
 
 完整的逐步说明在 **[docs/INSTALL.md](docs/INSTALL.md)**，下面是总览。
@@ -151,7 +154,7 @@ node device-agent/agent.js \
 如果工作机上有一个能执行命令的 AI Agent，把下面这段发给它，它就会读取参考文件并自动完成配置与注册：
 
 ```text
-读取本仓库的 docs/WORKER-SETUP.md，把本机配置成超级管家的「工作机」并自动注册到母机。
+读取本仓库的 docs/WORKER-SETUP.md，把本机配置成BattleStar的「工作机」并自动注册到母机。
 母机：http://<母机IP>:7317
 加入码：<JOIN_CODE>
 角色：cli（或 comfyui / mika / ollama / http）
@@ -189,7 +192,7 @@ node device-agent/agent.js \
 
 ### DSH 插件（可选，推荐）
 
-`dsh-plugin/` 是一个 DeepSeek Harness bundle，安装后侧边栏出现「超级管家」：
+`dsh-plugin/` 是一个 DeepSeek Harness bundle，安装后侧边栏出现「BattleStar」：
 
 - 原生面板显示 **母机状态与可编辑的母机昵称**、工作机连接方式/在线状态、任务流与指令发送；
 - 工作机卡片可直接重命名；母机昵称与 Hub 设置一起保存；
@@ -317,4 +320,4 @@ node scripts/demo.js
 | [Comfy-Org/ComfyUI](https://github.com/Comfy-Org/ComfyUI) | GPL-3.0 | 图像/视频生成服务（用户自行安装，不随仓库分发） |
 
 完整说明（构建工具、商标声明、AGPL 合规备注）见 **[CREDITS.md](CREDITS.md)**。
-「DSH Superagent Battlestar / 超级管家」为本项目名称，第三方名称与素材归各自所有者；本项目与上述公司/组织无隶属关系。
+「DSH Superagent Battlestar / BattleStar」为本项目名称，第三方名称与素材归各自所有者；本项目与上述公司/组织无隶属关系。

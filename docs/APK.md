@@ -30,7 +30,7 @@ adb install -r dist/BattleStar-0.1.0.apk
 ## 2. 首次使用
 
 1. 确保手机与 Hub 在同一 Wi-Fi / 内网（或已加入 Tailscale 等虚拟内网）。
-2. 打开「超级管家」，填写：
+2. 打开「BattleStar」，填写：
    - **Hub 地址**：`http://<Hub 内网 IP>:7317`，例如 `http://192.168.1.10:7317`
    - **管理员令牌**：Hub 启动日志里的「管理员令牌」（形如 `adm_...`）
 3. 点「测试连接」——通过原生 `HttpURLConnection` 请求 `GET /api/health`，不依赖浏览器 CORS。

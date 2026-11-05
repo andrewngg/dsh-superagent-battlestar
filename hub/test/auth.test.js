@@ -18,7 +18,7 @@ test('GET /api/health 公开，其余管理接口要求管理员令牌', async (
   const health = await request(env.base, 'GET', '/api/health');
   assert.equal(health.status, 200);
   assert.equal(health.json.ok, true);
-  assert.equal(health.json.name, 'super-butler');
+  assert.equal(health.json.name, 'BattleStar');
   assert.equal(health.json.protocol, 1);
   assert.equal(typeof health.json.version, 'string');
   assert.equal(typeof health.json.uptimeSec, 'number');

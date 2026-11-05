@@ -316,7 +316,7 @@ function parseArgs(argv = []) {
 function printHelp() {
   console.log(
     [
-      'Super Butler 模拟设备启动器',
+      'BattleStar 模拟设备启动器',
       '',
       '用法：node scripts/simulate-devices.js [选项]',
       '',

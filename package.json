@@ -1,8 +1,8 @@
 {
-  "name": "super-butler",
+  "name": "battlestar",
   "version": "0.1.0",
   "private": true,
-  "description": "超级智能管家：多设备 AI 能力申报、在线检测、任务编排、手机控制台与 Android APK",
+  "description": "BattleStar：多设备 AI 能力申报、在线检测、任务编排、手机控制台与 Android APK",
   "license": "MIT",
   "engines": {
     "node": ">=18"

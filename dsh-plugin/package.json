@@ -2,7 +2,7 @@
   "name": "@local/dsh-super-butler",
   "version": "0.1.0",
   "private": true,
-  "description": "超级管家：在 DSH 里管理多设备管家 Hub、私人账号/模型密钥与控制台面板",
+  "description": "BattleStar：在 DSH 里管理多设备管家 Hub、私人账号/模型密钥与控制台面板",
   "license": "MIT",
   "type": "module",
   "exports": {

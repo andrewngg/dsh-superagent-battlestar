@@ -93,7 +93,7 @@ Invoke-RestMethod http://<HUB_URL>/api/health
 期望：
 
 ```json
-{"ok":true,"name":"super-butler","version":"0.1.0","protocol":1}
+{"ok":true,"name":"BattleStar","version":"0.1.0","protocol":1}
 ```
 
 失败时按顺序检查：
@@ -286,7 +286,7 @@ Invoke-RestMethod "<HUB_URL>/api/tasks" -Method POST -Headers $headers -ContentT
 ## 10. 复制给 AI 的启动提示
 
 ```text
-读取本仓库的 docs/WORKER-SETUP.md，把本机配置成超级管家的「工作机」并自动注册到母机。
+读取本仓库的 docs/WORKER-SETUP.md，把本机配置成BattleStar的「工作机」并自动注册到母机。
 母机：http://<HUB_IP>:7317
 加入码：<JOIN_CODE>
 角色：cli（或 comfyui / mika / ollama / http）

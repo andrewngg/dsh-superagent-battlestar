@@ -16,7 +16,7 @@
 
 ```
 手机（Android）
-  ├─ Super Butler 设备代理（Termux 或专用 APK）
+  ├─ BattleStar 设备代理（Termux 或专用 APK）
   ├─ 申报 skills: phone-control, apk-search, screenshot, tap, input, install
   ├─ 心跳 + 长轮询领取命令
   └─ 执行器：ADB / Android 无障碍 / 自动化脚本
@@ -25,7 +25,7 @@
    Hub（首台工作机或 NAS）
         ▲
         │
-   用户手机 APK（Super Butler）→ 看状态、发指令
+   用户手机 APK（BattleStar）→ 看状态、发指令
 ```
 
 需要时管家发给手机设备的指令示例：
@@ -80,7 +80,7 @@ JOIN_CODE=<Hub 加入码> node device-agent/agent.js \
 
 ### B. 专用 Android APK（与 dsh-Go 类似的宿主）
 
-在现有 Super Butler APK 基础上增加「作为设备」模式：内嵌 Node/PTY 或直接调用无障碍服务，
+在现有 BattleStar APK 基础上增加「作为设备」模式：内嵌 Node/PTY 或直接调用无障碍服务，
 把手机能力注册到 Hub。工程量较大，但体验最好，后续再做。
 
 ## 4. 上线前检查

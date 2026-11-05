@@ -1,8 +1,8 @@
 # Credits · 第三方组件与许可说明
 
-> 项目：**超级管家 / Super Butler**（`super-butler`）
+> 项目：**BattleStar**（目录/仓库名沿用 `super-butler` 以兼容现有部署）
 > 许可证：**MIT**（见 [LICENSE](LICENSE)）
-> 维护者：Super Butler contributors
+> 维护者：BattleStar contributors
 
 本文件记录参考项目、运行时依赖与构建工具的来源和许可证。上传 GitHub 前请保留本文件，
 它同时说明「哪些是参考、哪些是运行时依赖、哪些没有复制」，避免许可误解。

@@ -1,4 +1,4 @@
-# Super Butler · Web / 手机控制台
+# BattleStar · Web / 手机控制台
 
 零依赖、无构建步骤的原生 HTML/CSS/JS 前端，由 Hub 静态服务（`hub/web`），桌面 `/` 与手机 `/m` 共用同一份响应式页面。
 

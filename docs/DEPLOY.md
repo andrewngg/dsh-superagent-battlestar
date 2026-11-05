@@ -1,6 +1,6 @@
 # 部署指南（家庭内网）
 
-超级管家是**私有部署**：一台常开设备跑 Hub，其余设备跑设备代理，手机通过 APK 或浏览器接入。
+BattleStar是**私有部署**：一台常开设备跑 Hub，其余设备跑设备代理，手机通过 APK 或浏览器接入。
 全部组件零 npm 依赖，只需要 Node.js ≥ 18。
 
 ## 1. 网络拓扑建议
@@ -42,7 +42,7 @@ node hub/server.js --port 7317 --host 0.0.0.0
 启动日志会打印：
 
 ```
-  超级管家 Hub  已启动
+  BattleStar Hub  已启动
   控制台     http://127.0.0.1:7317/?token=<adminToken>
   手机端     http://192.168.1.10:7317/m?token=<adminToken>
   局域网     http://192.168.1.10:7317
@@ -75,7 +75,7 @@ node hub/server.js --port 7317 --host 0.0.0.0
 ```ini
 # /etc/systemd/system/super-butler.service
 [Unit]
-Description=Super Butler Hub
+Description=BattleStar Hub
 After=network-online.target
 
 [Service]
@@ -101,7 +101,7 @@ sudo systemctl status super-butler
 
 ```bash
 curl http://192.168.1.10:7317/api/health
-# {"ok":true,"name":"super-butler","version":"0.1.0","protocol":1,...}
+# {"ok":true,"name":"BattleStar","version":"0.1.0","protocol":1,...}
 ```
 
 ## 3. 设备接入（每台 AI 设备一次）
@@ -182,7 +182,7 @@ adb install -r dist/BattleStar-0.1.0.apk
 
 ### 4.2 首次连接
 
-1. 打开「超级管家」。
+1. 打开「BattleStar」。
 2. 填写 Hub 地址（如 `http://192.168.1.10:7317`）与管理员令牌（启动日志里的 `adminToken`）。
 3. 点「测试连接」→「进入管家」。
 4. 之后启动自动直连；在应用内「设置」可修改地址/令牌或退出。

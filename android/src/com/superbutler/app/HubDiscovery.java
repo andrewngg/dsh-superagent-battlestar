@@ -168,7 +168,7 @@ public class HubDiscovery {
             JSONObject item = new JSONObject();
             item.put("ip", ip);
             item.put("url", "http://" + ip + ":" + port);
-            item.put("name", health.optString("name", "super-butler"));
+            item.put("name", health.optString("name", "BattleStar"));
             item.put("version", health.optString("version", ""));
             item.put("protocol", protocol);
             return item;

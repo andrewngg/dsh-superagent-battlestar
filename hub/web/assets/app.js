@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Super Butler · Web / 手机控制台
+ * BattleStar · Web / 手机控制台
  * 零依赖、无构建，原生 JS。所有用户数据一律通过 textContent / DOM 节点渲染，避免 XSS。
  * 接口契约见 docs/PROTOCOL.md（v1）。
  */
@@ -472,7 +472,7 @@
     scrubUrlToken();
     scheduleRelativeRefresh();
     setTimeout(() => maybeAutoOpen(), 60);
-    toast('已连接到 Super Butler', 'success');
+    toast('已连接到 BattleStar', 'success');
   }
 
   async function handleAuthLost(message) {
@@ -1941,7 +1941,7 @@
   function diagnostics() {
     const view = statsView();
     return [
-      'Super Butler 控制台诊断',
+      'BattleStar 控制台诊断',
       `Hub: ${state.baseUrl || window.location.origin}`,
       `连接: ${state.connected ? '已连接' : '未连接'}`,
       `实时通道: ${SSE_TEXT[state.sse.status] || state.sse.status}`,
@@ -2016,7 +2016,7 @@
         if (!info.enabled) return '未开启。开启后通知栏会常驻显示管家状态。';
         return info.permissionGranted
           ? '已开启：通知栏会常驻显示任务进度或在线/待命统计。'
-          : '已开启，但通知权限未授予；请在系统设置中允许「超级管家」通知。';
+          : '已开启，但通知权限未授予；请在系统设置中允许「BattleStar」通知。';
       };
       try {
         const info = JSON.parse(appBridge.getNotificationSettings());
@@ -2045,7 +2045,7 @@
 
     const about = el('section', { className: 'settings-section' },
       el('h3', { text: '关于' }),
-      el('p', { className: 'settings-note', text: 'Super Butler 控制台 · 零依赖静态前端，同源加载 Hub 资源。设备能力、任务路由与事件流遵循协议 v1。' }),
+      el('p', { className: 'settings-note', text: 'BattleStar 控制台 · 零依赖静态前端，同源加载 Hub 资源。设备能力、任务路由与事件流遵循协议 v1。' }),
       el('p', { className: 'settings-note', text: '手机端：底部 Tab 切换「状态 / 任务 / 指令 / 设置」，桌面端可通过右上角设置按钮打开本面板。' }),
     );
     wrap.appendChild(about);

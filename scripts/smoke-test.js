@@ -2,7 +2,7 @@
 'use strict';
 
 /**
- * Super Butler 端到端冒烟测试（零依赖，约 15-25 秒）。
+ * BattleStar 端到端冒烟测试（零依赖，约 15-25 秒）。
  *
  *   node scripts/smoke-test.js
  *

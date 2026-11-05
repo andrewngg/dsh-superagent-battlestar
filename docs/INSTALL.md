@@ -1,6 +1,6 @@
 # 安装指南：母机与工作机
 
-超级管家采用「一台母机 + 多台工作机」结构：
+BattleStar采用「一台母机 + 多台工作机」结构：
 
 | 角色 | 跑什么 | 作用 |
 | --- | --- | --- |
@@ -10,7 +10,7 @@
 | **手机控制端** | APK / 浏览器 | 查看设备状态、发指令、看任务进度（不执行 AI 任务） |
 
 母机可以是一台常开的 NAS、小主机或旧笔记本；工作机是实际跑 AI/ComfyUI/Mika 的电脑或手机桥。
-**Mika 手机属于工作机**；Super Butler APK 属于控制端，两者是不同角色（可以在同一部手机上）。
+**Mika 手机属于工作机**；BattleStar APK 属于控制端，两者是不同角色（可以在同一部手机上）。
 所有组件零 npm 依赖，只需 Node.js ≥ 18。
 
 ---
@@ -74,7 +74,7 @@ http://192.168.1.10:7317/m?token=<管理员令牌>
 
 ```ini
 [Unit]
-Description=Super Butler Hub
+Description=BattleStar Hub
 After=network-online.target
 
 [Service]
@@ -96,7 +96,7 @@ WantedBy=multi-user.target
 plugin_manager(action: "install_bundle", target: "<abs>/super-butler/dsh-plugin")
 ```
 
-刷新 DSH 页面后，侧边栏出现「超级管家」，可在插件面板里：
+刷新 DSH 页面后，侧边栏出现「BattleStar」，可在插件面板里：
 - 启动/停止/查看 Hub；
 - 管理设备与任务、发指令；
 - 保存 GitHub / 模型 API 密钥（Harness credentials，非项目文件）。

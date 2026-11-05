@@ -2,7 +2,7 @@
 'use strict';
 
 /**
- * Super Butler Hub 启动入口（零依赖）。
+ * BattleStar Hub 启动入口（零依赖）。
  *
  * 用法：
  *   node hub/server.js [--port 7317] [--host 0.0.0.0] [--data-dir hub/data]
@@ -81,7 +81,7 @@ function parseArgs(argv) {
 
 function printHelp(version) {
   const lines = [
-    `Super Butler Hub v${version}`,
+    `BattleStar Hub v${version}`,
     '',
     '用法：node hub/server.js [选项]',
     '',
@@ -103,7 +103,7 @@ function printStartup(hub, version) {
   const lan = hub.lanUrl;
   const lines = [
     '',
-    `  Super Butler Hub v${version}`,
+    `  BattleStar Hub v${version}`,
     `  监听地址    ${hub.host}:${hub.port}`,
     `  管理员令牌  ${hub.adminToken}`,
     `  加入码      ${hub.joinCode}`,

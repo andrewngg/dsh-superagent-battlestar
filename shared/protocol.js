@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Super Butler 协议 v1 共享实现（零依赖，CommonJS）。
+ * BattleStar 协议 v1 共享实现（零依赖，CommonJS）。
  * Hub 与 Device Agent 都可以 require 本模块，保证能力匹配规则一致。
  * 契约见 docs/PROTOCOL.md。
  */

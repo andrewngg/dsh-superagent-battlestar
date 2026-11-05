@@ -2,7 +2,7 @@
 'use strict';
 
 /**
- * Super Butler 一键 Demo。
+ * BattleStar 一键 Demo。
  *
  * 流程：
  *   1. 探测 Hub（默认 http://127.0.0.1:7317）；未运行则 spawn hub/server.js
@@ -125,7 +125,7 @@ function parseArgs(argv = []) {
 function printHelp() {
   console.log(
     [
-      'Super Butler 一键 Demo',
+      'BattleStar 一键 Demo',
       '',
       '用法：node scripts/demo.js [选项]',
       '',
@@ -360,7 +360,7 @@ function printBanner(context) {
   const phoneUrl = `http://${lanIp}:${port}/m?token=${encodeURIComponent(adminToken)}`;
   const lines = [
     '',
-    '════════════════ Super Butler Demo ════════════════',
+    '════════════════ BattleStar Demo ════════════════',
     `  桌面控制台   ${desktopUrl}`,
     `  手机控制台   ${phoneUrl}`,
     `  加入码       ${joinCode}   （新设备用 --join-code 接入）`,

@@ -1,6 +1,6 @@
-# 超级管家 · 架构设计
+# BattleStar · 架构设计
 
-> Super Butler 把「一个管家 + 多台家里的 AI 设备」组织成一个可观测、可指挥的私有集群。
+> BattleStar 把「一个管家 + 多台家里的 AI 设备」组织成一个可观测、可指挥的私有集群。
 > 设计概念参考 [dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype)（目标—授权—执行—回报），
 > 手机端交互参考 [dsh-Go](https://github.com/ccch1mneyyy/dsh-Go)（掌上查看与控制）。
 
@@ -17,7 +17,7 @@
 ```mermaid
 flowchart LR
   subgraph Phone["手机 / 平板"]
-    APK["Super Butler APK<br/>WebView + JS Bridge"]
+    APK["BattleStar APK<br/>WebView + JS Bridge"]
     WEB["移动 Web / PWA<br/>/m?token=..."]
   end
 

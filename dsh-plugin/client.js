@@ -1,5 +1,5 @@
-/* Super Butler · DSH Web Client
- * 侧边栏「超级管家」入口 + 主面板：设备/任务控制台与私人密钥设置。
+/* BattleStar · DSH Web Client
+ * 侧边栏「BattleStar」入口 + 主面板：设备/任务控制台与私人密钥设置。
  * 纯 JS（无 TS 构建），React 由 Harness 模块表提供。
  */
 window.__ModuleLoader__.load({
@@ -14,7 +14,7 @@ window.__ModuleLoader__.load({
     const API = '/super-butler/api'
 
     const zh = {
-      panel: '超级管家', title: '超级管家', subtitle: '多设备 AI 管家 · 控制台与密钥',
+      panel: 'BattleStar', title: 'BattleStar', subtitle: '多设备 AI 管家 · 控制台与密钥',
       edit: '编辑', rename: '重命名', saveName: '保存', cancelEdit: '取消',
       hubNickname: '母机昵称', connection: '连接', outbound: '主动连接', endpoint: '端点',
       deviceRenamed: '设备名称已更新', hubNicknameSaved: '母机昵称已更新', nameRequired: '名称不能为空',
@@ -46,7 +46,7 @@ window.__ModuleLoader__.load({
       emptySecrets: '尚未配置任何私人密钥',
     }
     const en = {
-      panel: 'Super Butler', title: 'Super Butler', subtitle: 'Multi-device AI butler · console and keys',
+      panel: 'BattleStar', title: 'BattleStar', subtitle: 'Multi-device AI butler · console and keys',
       edit: 'Edit', rename: 'Rename', saveName: 'Save', cancelEdit: 'Cancel',
       hubNickname: 'Hub nickname', connection: 'Connection', outbound: 'outbound', endpoint: 'endpoint',
       deviceRenamed: 'Device renamed', hubNicknameSaved: 'Hub nickname saved', nameRequired: 'Name is required',
@@ -423,7 +423,7 @@ window.__ModuleLoader__.load({
           h('h3', { style: { fontSize: 14, margin: '0 0 12px' } }, t('hubSettings')),
           h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 12 } },
             h(Field, { label: t('projectRoot') }, h('input', { value: form.projectRoot, onChange: (e) => set('projectRoot', e.target.value), style: inputStyle })),
-            h(Field, { label: t('hubNickname') }, h('input', { value: form.hubNickname, onChange: (e) => set('hubNickname', e.target.value), style: inputStyle, placeholder: '超级管家母机' })),
+            h(Field, { label: t('hubNickname') }, h('input', { value: form.hubNickname, onChange: (e) => set('hubNickname', e.target.value), style: inputStyle, placeholder: 'BattleStar母机' })),
             h(Field, { label: t('hubPort') }, h('input', { value: form.hubPort, onChange: (e) => set('hubPort', e.target.value), style: inputStyle, inputMode: 'numeric' })),
             h(Field, { label: t('githubUser') }, h('input', { value: form.githubUser, onChange: (e) => set('githubUser', e.target.value), style: inputStyle, placeholder: 'octocat' })),
             h(Field, { label: t('defaultModel') }, h('input', { value: form.defaultModel, onChange: (e) => set('defaultModel', e.target.value), style: inputStyle, placeholder: 'deepseek-chat' })),
