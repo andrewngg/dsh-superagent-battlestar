@@ -6,9 +6,11 @@
 | --- | --- | --- |
 | **母机（Hub）** | `hub/server.js` | 设备注册、能力清单、在线检测、任务路由、任务历史、Web/手机控制台、SSE |
 | **工作机（Worker）** | `device-agent/agent.js` | 申报自己的能力（models/profiles/gateways/skills），领任务并通过本机执行器执行 |
-| **手机** | APK / 浏览器 | 查看设备状态、发指令、看任务进度 |
+| **手机工作机（Mika）** | 手机上的 Mika + 电脑上的桥接代理 | 作为工作机，执行 App / 网页 / 手机操作任务 |
+| **手机控制端** | APK / 浏览器 | 查看设备状态、发指令、看任务进度（不执行 AI 任务） |
 
 母机可以是一台常开的 NAS、小主机或旧笔记本；工作机是实际跑 AI/ComfyUI/Mika 的电脑或手机桥。
+**Mika 手机属于工作机**；Super Butler APK 属于控制端，两者是不同角色（可以在同一部手机上）。
 所有组件零 npm 依赖，只需 Node.js ≥ 18。
 
 ---
@@ -164,9 +166,9 @@ curl -X POST http://<母机IP>:7317/api/tasks \
 
 图片保存在 ComfyUI 工作机的 `outputDir`，任务结果列出本地路径；详见 [SECOND-MACHINE.md](SECOND-MACHINE.md)。
 
-### 工作机 C：手机（Mika）
+### 工作机 C：手机工作机（Mika）
 
-适合用 [Mika](https://github.com/wangzan101/Mika) 操作 Android 手机。手机本身运行 Mika；
+适合用 [Mika](https://github.com/wangzan101/Mika) 操作 Android 手机。**这里是工作机**：手机本身运行 Mika，
 一台连着手机（USB/ADB）或同一 Wi-Fi 的电脑运行「Mika 桥」设备代理。
 
 1. 手机安装 Mika APK，配置模型，按需完成手机控制；打开 Settings › Connect a computer；
@@ -196,7 +198,9 @@ curl -X POST http://<母机IP>:7317/api/tasks \
 
 ---
 
-## 三、手机/APK 接入
+## 三、手机控制端（APK / 浏览器）接入
+
+> 这里只是控制端，不执行任务；手机工作机是上面的 Mika。
 
 两种方式：
 

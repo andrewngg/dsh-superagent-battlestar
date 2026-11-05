@@ -16,7 +16,7 @@
 - 📋 **任务闭环**：`queued → assigned → running → completed`，支持进度、超时、取消、重试、改派；
 - 🖥️ **多种工作机**：本机 CLI（Hermes / OpenCode / shell）、ComfyUI 图像生成、Ollama、HTTP 服务；
 - 📱 **手机工作机**：通过 [Mika](https://github.com/wangzan101/Mika) 指挥 Android 手机执行 App/网页任务；
-- 📲 **手机控制台**：Android APK（WebView + 本地配置页）加载 `/m`，看设备、发指令、看任务；
+- 📲 **手机控制端**：Android APK（WebView + 本地配置页）加载 `/m`，看设备、发指令、看任务；它只是控制端，不执行 AI 任务；
 - 🧩 **DSH 插件**：在 DeepSeek Harness 侧边栏打开原生控制台，统一管理 Hub、设备与私人 API 密钥；
 - 🪶 **零依赖**：Hub / 设备代理 / 前端全部零 npm 依赖，Node.js 单进程即可跑；APK 约 0.11 MB。
 
@@ -48,9 +48,8 @@ node scripts/demo.js
 
 ```mermaid
 flowchart LR
-  subgraph Phone["手机"]
+  subgraph Phone["手机控制端"]
     APK["Super Butler APK<br/>WebView + JS Bridge"]
-    MIKA["Mika<br/>手机上的 AI Agent"]
   end
   subgraph HubBox["母机（Hub）"]
     HUB["Hub 中枢<br/>Node.js 零依赖"]
@@ -63,6 +62,7 @@ flowchart LR
     CLI["CLI 工作机<br/>Hermes / OpenCode / shell"]
     COMFY["ComfyUI 工作机<br/>图像 / 视频生成"]
     OLLAMA["Ollama / HTTP 工作机"]
+    MIKA["手机工作机 · Mika<br/>Android Agent（执行任务）"]
   end
   APK -->|"REST + SSE"| HUB
   UI --> HUB
@@ -88,6 +88,11 @@ flowchart LR
 每个任务保存 `route.candidates` 与 `route.excluded`，控制台与手机端直接展示，方便排查「为什么没派给我的设备」。
 
 ## 安装：母机 + 工作机
+
+> **角色区分（容易混淆）**
+> - **手机工作机（Mika）**：属于「工作机」，负责在 Android 手机上执行 App / 网页任务，由管家下发指令。
+> - **Super Butler APK / 浏览器**：属于「控制端」，只用来查看设备、发指令、看进度，本身不执行 AI 任务。
+> 两者可以是同一部手机上的两个不同应用/角色。
 
 完整的逐步说明在 **[docs/INSTALL.md](docs/INSTALL.md)**，下面是总览。
 
@@ -134,14 +139,16 @@ node device-agent/agent.js \
 | --- | --- | --- | --- |
 | **本机 AI CLI** | `cli` | [cli-machine.example.json](device-agent/configs/cli-machine.example.json) | Hermes / OpenCode / shell；代码、调研、办公等任务 |
 | **ComfyUI** | `comfyui` | [comfyui-machine.example.json](device-agent/configs/comfyui-machine.example.json) | 文生图、图生图、放大、视频；见 [SECOND-MACHINE.md](docs/SECOND-MACHINE.md) |
-| **手机（Mika）** | `mika` | [phone-mika.example.json](device-agent/configs/phone-mika.example.json) | 通过 PC 上的 `mika` CLI 指挥手机；见 [MIKA-PHONE.md](docs/MIKA-PHONE.md) |
+| **手机工作机（Mika）** | `mika` | [phone-mika.example.json](device-agent/configs/phone-mika.example.json) | 手机运行 Mika，PC 上的 `mika` CLI 作为桥；见 [MIKA-PHONE.md](docs/MIKA-PHONE.md) |
 | **Ollama / HTTP** | `ollama` / `http` | [config.example.json](device-agent/config.example.json) | 本地模型或已有 Agent 服务 |
 | **演示** | `simulate` | — | 无需外部服务，用于联调 |
 
 工作机上线后，母机控制台会显示设备名、在线状态、models / profiles / gateways / skills chips 与负载。
 所有执行器都是可配置、可插拔的；设备主人决定允许执行什么。
 
-### 手机 / APK
+### 手机控制端（APK / 浏览器）
+
+> 这里是**控制端**，不是工作机。手机工作机是 Mika，见上面的工作机表格与 [docs/MIKA-PHONE.md](docs/MIKA-PHONE.md)。
 
 - 浏览器直接打开 `http://<母机IP>:7317/m?token=<管理员令牌>`，可添加到主屏幕；
 - 或安装 [dist/SuperButler-0.1.0.apk](dist/SuperButler-0.1.0.apk)（Android 8+，测试签名；构建/安装见 [docs/APK.md](docs/APK.md)）。

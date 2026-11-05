@@ -1,5 +1,8 @@
 # 手机工作机：Mika（通过管家指挥手机）
 
+> **Mika 手机属于「工作机」**，负责执行手机任务；Super Butler APK 是「控制端」，只用来查看/发指令。
+> 两者是不同角色，可以在同一部手机上。
+
 [Mika](https://github.com/wangzan101/Mika) 是 Android 上的开源 AI Agent（Apache-2.0），可以在后台屏幕操作 App、
 浏览网页、处理文件，并提供 **CLI + Skill / MCP** 给电脑调用。本项目把 Mika 接入管家，作为「手机工作机」设备：
 
