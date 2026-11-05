@@ -187,7 +187,8 @@ node device-agent/agent.js \
 
 `dsh-plugin/` 是一个 DeepSeek Harness bundle，安装后侧边栏出现「超级管家」：
 
-- 原生面板显示 Hub 状态、设备能力、任务流与指令发送；
+- 原生面板显示 **母机状态与可编辑的母机昵称**、工作机连接方式/在线状态、任务流与指令发送；
+- 工作机卡片可直接重命名；母机昵称与 Hub 设置一起保存；
 - 「设置」里统一保存 GitHub 账号/Token 与各模型 API Key，写入 **Harness credentials 服务**（不写项目文件、不回显）；
 - 插件自动检测/启动 Hub，通过 `/super-butler/api/*` 同源代理，页面不接触管理员令牌。
 

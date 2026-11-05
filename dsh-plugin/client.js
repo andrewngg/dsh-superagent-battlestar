@@ -15,6 +15,9 @@ window.__ModuleLoader__.load({
 
     const zh = {
       panel: '超级管家', title: '超级管家', subtitle: '多设备 AI 管家 · 控制台与密钥',
+      edit: '编辑', rename: '重命名', saveName: '保存', cancelEdit: '取消',
+      hubNickname: '母机昵称', connection: '连接', outbound: '主动连接', endpoint: '端点',
+      deviceRenamed: '设备名称已更新', hubNicknameSaved: '母机昵称已更新', nameRequired: '名称不能为空',
       console: '控制台', settings: '设置', refresh: '刷新', start: '启动 Hub', stop: '停止 Hub',
       running: '运行中', stopped: '未运行', owned: '插件托管', external: '外部进程',
       devices: '设备', tasks: '任务', online: '在线', offline: '离线',
@@ -43,6 +46,9 @@ window.__ModuleLoader__.load({
     }
     const en = {
       panel: 'Super Butler', title: 'Super Butler', subtitle: 'Multi-device AI butler · console and keys',
+      edit: 'Edit', rename: 'Rename', saveName: 'Save', cancelEdit: 'Cancel',
+      hubNickname: 'Hub nickname', connection: 'Connection', outbound: 'outbound', endpoint: 'endpoint',
+      deviceRenamed: 'Device renamed', hubNicknameSaved: 'Hub nickname saved', nameRequired: 'Name is required',
       console: 'Console', settings: 'Settings', refresh: 'Refresh', start: 'Start hub', stop: 'Stop hub',
       running: 'Running', stopped: 'Stopped', owned: 'plugin-managed', external: 'external process',
       devices: 'Devices', tasks: 'Tasks', online: 'online', offline: 'offline',
@@ -174,21 +180,48 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function DeviceCard({ device, t }) {
+    function DeviceCard({ device, t, hubOrigin, onRename }) {
       const caps = device.capabilities || {}
       const models = (caps.models || []).slice(0, 4)
       const skills = (caps.skills || []).slice(0, 6)
+      const [editing, setEditing] = useState(false)
+      const [name, setName] = useState(device.name || '')
+      useEffect(() => { setName(device.name || '') }, [device.name])
+      const saveName = async () => {
+        const next = String(name || '').trim()
+        if (!next) return
+        await onRename(device.id, next)
+        setEditing(false)
+      }
+      const connection = device.endpoint
+        ? `${t('endpoint')}: ${device.endpoint}`
+        : `${t('outbound')} → ${hubOrigin || '-'}`
       return h('div', { style: { ...card, minWidth: 240, flex: '1 1 300px' } },
         h('div', { style: { ...row, justifyContent: 'space-between' } },
-          h('div', { style: { ...row } },
+          h('div', { style: { ...row, flex: 1, minWidth: 0 } },
             h('span', {
-              style: { width: 9, height: 9, borderRadius: 999, background: device.online ? COLORS.ok : COLORS.idle, display: 'inline-block' },
+              style: { width: 9, height: 9, borderRadius: 999, background: device.online ? COLORS.ok : COLORS.idle, display: 'inline-block', flex: 'none' },
             }),
-            h('strong', { style: { fontSize: 14 } }, device.name),
+            editing
+              ? h('input', {
+                  value: name, autoFocus: true,
+                  onChange: (e) => setName(e.target.value),
+                  onKeyDown: (e) => { if (e.key === 'Enter') void saveName(); if (e.key === 'Escape') setEditing(false) },
+                  style: { ...inputStyle, padding: '4px 8px', fontSize: 13 },
+                })
+              : h('strong', { style: { fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, device.name),
           ),
-          h(Badge, { tone: device.online ? 'ok' : 'idle' }, device.online ? t('online') : t('offline')),
+          h('div', { style: { ...row, gap: 6 } },
+            editing
+              ? h('button', { style: { ...btn(true), padding: '3px 8px', fontSize: 12 }, onClick: () => void saveName() }, t('saveName'))
+              : h('button', { style: { ...btn(false), padding: '3px 8px', fontSize: 12 }, onClick: () => setEditing(true) }, t('edit')),
+            editing
+              ? h('button', { style: { ...btn(false), padding: '3px 8px', fontSize: 12 }, onClick: () => setEditing(false) }, t('cancelEdit'))
+              : h(Badge, { tone: device.online ? 'ok' : 'idle' }, device.online ? t('online') : t('offline')),
+          ),
         ),
-        h('div', { style: { ...muted, marginTop: 6 } },
+        h('div', { style: { ...muted, marginTop: 6, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, connection),
+        h('div', { style: { ...muted, marginTop: 4 } },
           `${device.platform || '-'} · ${device.kind || '-'} · ${device.status || '-'} · ${t('load')} ${device.load && device.load.running != null ? `${device.load.running}/${device.load.max}` : '-'}`,
         ),
         h('div', { style: { ...muted, marginTop: 2 } }, `${t('lastSeen')} ${timeAgo(device.lastSeenAt, t)}`),
@@ -238,7 +271,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function ConsoleTab({ status, snapshot, t, onRefresh, onHub, onTaskAction, onSend, busy, message }) {
+    function ConsoleTab({ status, snapshot, t, onRefresh, onHub, onTaskAction, onSend, onRenameDevice, hubOrigin, busy, message }) {
       const devices = (snapshot && snapshot.devices) || []
       const tasks = (snapshot && snapshot.tasks) || []
       const stats = (snapshot && snapshot.stats) || {}
@@ -294,7 +327,7 @@ window.__ModuleLoader__.load({
         h('section', null,
           h('h3', { style: { fontSize: 14, margin: '0 0 10px' } }, `${t('devices')} (${devices.length})`),
           devices.length
-            ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 12 } }, ...devices.map((d) => h(DeviceCard, { key: d.id, device: d, t })))
+            ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 12 } }, ...devices.map((d) => h(DeviceCard, { key: d.id, device: d, t, hubOrigin, onRename: onRenameDevice })))
             : h('div', { style: { ...card, ...muted } }, t('noDevices')),
         ),
         h('section', { style: card },
@@ -345,6 +378,7 @@ window.__ModuleLoader__.load({
       const [form, setForm] = useState({
         projectRoot: s.projectRoot || '', hubPort: s.hubPort || 7317, autoStart: s.autoStart !== false,
         githubUser: s.githubUser || '', defaultModel: s.defaultModel || 'deepseek-chat',
+        hubNickname: s.hubNickname || '',
       })
       const [keys, setKeys] = useState({ githubToken: '', deepseekApiKey: '', agnesApiKey: '', doubaoApiKey: '', opencodeApiKey: '' })
       const [localMsg, setLocalMsg] = useState('')
@@ -352,8 +386,9 @@ window.__ModuleLoader__.load({
         setForm({
           projectRoot: s.projectRoot || '', hubPort: s.hubPort || 7317, autoStart: s.autoStart !== false,
           githubUser: s.githubUser || '', defaultModel: s.defaultModel || 'deepseek-chat',
+          hubNickname: s.hubNickname || '',
         })
-      }, [s.projectRoot, s.hubPort, s.autoStart, s.githubUser, s.defaultModel])
+      }, [s.projectRoot, s.hubPort, s.autoStart, s.githubUser, s.defaultModel, s.hubNickname])
       const set = (k, v) => setForm((prev) => ({ ...prev, [k]: v }))
       const save = async () => {
         const payload = { settings: { ...form, hubPort: Number(form.hubPort) || 7317 }, secrets: {} }
@@ -376,6 +411,7 @@ window.__ModuleLoader__.load({
           h('h3', { style: { fontSize: 14, margin: '0 0 12px' } }, t('hubSettings')),
           h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 12 } },
             h(Field, { label: t('projectRoot') }, h('input', { value: form.projectRoot, onChange: (e) => set('projectRoot', e.target.value), style: inputStyle })),
+            h(Field, { label: t('hubNickname') }, h('input', { value: form.hubNickname, onChange: (e) => set('hubNickname', e.target.value), style: inputStyle, placeholder: '超级管家母机' })),
             h(Field, { label: t('hubPort') }, h('input', { value: form.hubPort, onChange: (e) => set('hubPort', e.target.value), style: inputStyle, inputMode: 'numeric' })),
             h(Field, { label: t('githubUser') }, h('input', { value: form.githubUser, onChange: (e) => set('githubUser', e.target.value), style: inputStyle, placeholder: 'octocat' })),
             h(Field, { label: t('defaultModel') }, h('input', { value: form.defaultModel, onChange: (e) => set('defaultModel', e.target.value), style: inputStyle, placeholder: 'deepseek-chat' })),
@@ -423,6 +459,11 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = useState(false)
       const [message, setMessage] = useState('')
       const [error, setError] = useState('')
+      const [editingHub, setEditingHub] = useState(false)
+      const [hubName, setHubName] = useState('')
+      const hubDisplayName = (settingsData && settingsData.settings && settingsData.settings.hubNickname) || t('title')
+
+      useEffect(() => { setHubName(hubDisplayName) }, [hubDisplayName])
 
       const load = useCallback(async () => {
         try {
@@ -476,6 +517,13 @@ window.__ModuleLoader__.load({
         await call(`/tasks/${encodeURIComponent(id)}/${action}`, { method: 'POST', body: '{}' })
         await load()
       })
+      const onRenameDevice = (id, name) => withBusy(async () => {
+        const next = String(name || '').trim()
+        if (!next) throw new Error(t('nameRequired'))
+        await call(`/devices/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ name: next }) })
+        await load()
+        setMessage(t('deviceRenamed'))
+      })
       const onSave = async (payload) => {
         setBusy(true)
         try {
@@ -490,6 +538,12 @@ window.__ModuleLoader__.load({
           setBusy(false)
         }
       }
+      const saveHubName = async () => {
+        const next = String(hubName || '').trim()
+        if (!next) return
+        const res = await onSave({ settings: { hubNickname: next } })
+        if (res) { setEditingHub(false); setMessage(t('hubNicknameSaved')) }
+      }
 
       const header = h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' } },
         h('div', { style: { ...row, gap: 12 } },
@@ -497,7 +551,20 @@ window.__ModuleLoader__.load({
             h(ButlerIcon, { size: 24 }),
           ),
           h('div', null,
-            h('h1', { style: { fontSize: 20, margin: 0 } }, t('title')),
+            h('div', { style: { ...row, gap: 8 } },
+              editingHub
+                ? h('input', {
+                    value: hubName, autoFocus: true,
+                    onChange: (e) => setHubName(e.target.value),
+                    onKeyDown: (e) => { if (e.key === 'Enter') void saveHubName(); if (e.key === 'Escape') setEditingHub(false) },
+                    style: { ...inputStyle, width: 220, padding: '4px 8px', fontSize: 18 },
+                  })
+                : h('h1', { style: { fontSize: 20, margin: 0 } }, hubDisplayName),
+              editingHub
+                ? h('button', { style: { ...btn(true), padding: '3px 8px', fontSize: 12 }, onClick: () => void saveHubName() }, t('saveName'))
+                : h('button', { style: { ...btn(false), padding: '3px 8px', fontSize: 12 }, onClick: () => setEditingHub(true) }, t('edit')),
+              editingHub ? h('button', { style: { ...btn(false), padding: '3px 8px', fontSize: 12 }, onClick: () => setEditingHub(false) }, t('cancelEdit')) : null,
+            ),
             h('div', { style: { ...muted } }, t('subtitle')),
           ),
         ),
@@ -526,6 +593,7 @@ window.__ModuleLoader__.load({
               ? h(ConsoleTab, {
                   status, snapshot, t, busy, message,
                   onRefresh: () => void load(), onHub, onTaskAction, onSend,
+                  onRenameDevice, hubOrigin: status && status.hub ? status.hub.origin : '',
                 })
               : h(SettingsTab, {
                   settings: settingsData && settingsData.settings, secrets: settingsData && settingsData.secrets, status, t, busy, message, onSave,

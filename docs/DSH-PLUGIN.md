@@ -24,8 +24,10 @@ plugin_manager(action: "install_bundle", target: "<abs>/super-butler/dsh-plugin"
 ### 控制台
 
 - Hub 状态：运行中/未运行、端口、是否由插件托管、设备加入码；
+- **母机昵称**：标题旁「编辑」可修改并保存（插件设置）；
 - 启动 / 停止 Hub（仅停止插件自己启动的 Hub；外部终端启动的 Hub 需在终端停止）；
-- 设备卡：在线状态、平台/kind、负载、最后心跳、models / skills chips；
+- 设备卡：在线状态、**连接方式**（设备申报的 `endpoint`，或 `outbound → Hub`）、平台/kind、负载、
+  最后心跳、models / skills chips；**点「编辑」可直接修改工作机昵称**；
 - 任务列表：状态、执行设备、耗时、输出、取消/重试；
 - 指令区：输入指令，可选 `profile`（hermes / opencode / cli-shell / 设备自定义 profile）、
   模型、目标设备、技能列表，发送后显示路由结果；

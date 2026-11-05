@@ -33,7 +33,7 @@ const SECRET_FIELDS = [
   { key: 'opencodeApiKey', ref: 'SUPER_BUTLER_OPENCODE_API_KEY', label: 'OpenCode API Key', env: 'OPENCODE_API_KEY' },
 ]
 
-const SETTING_KEYS = ['projectRoot', 'hubPort', 'hubHost', 'autoStart', 'dataDir', 'githubUser', 'adminToken', 'joinCode', 'defaultModel']
+const SETTING_KEYS = ['projectRoot', 'hubPort', 'hubHost', 'autoStart', 'dataDir', 'githubUser', 'adminToken', 'joinCode', 'defaultModel', 'hubNickname']
 
 function defaultProjectRoot() {
   return process.env.SUPER_BUTLER_PROJECT_ROOT
@@ -52,6 +52,7 @@ function defaults() {
     adminToken: '',
     joinCode: '',
     defaultModel: 'deepseek-chat',
+    hubNickname: '超级管家母机',
   }
 }
 
@@ -176,6 +177,7 @@ export function apply(ctx, rawConfig = {}) {
       dataDir: s.dataDir,
       githubUser: s.githubUser,
       defaultModel: s.defaultModel,
+      hubNickname: s.hubNickname,
       adminTokenMasked: mask(s.adminToken),
       joinCodeMasked: mask(s.joinCode),
     }
@@ -200,6 +202,7 @@ export function apply(ctx, rawConfig = {}) {
       dataDir: state.settings.dataDir,
       githubUser: state.settings.githubUser,
       defaultModel: state.settings.defaultModel,
+      hubNickname: state.settings.hubNickname,
       adminToken: state.settings.adminToken,
       joinCode: state.settings.joinCode,
     }
@@ -461,6 +464,15 @@ export function apply(ctx, rawConfig = {}) {
         })
         return json(res, out.status, out.data)
       }
+      const devicePath = /^\/api\/devices\/([^/]+)$/.exec(sub)
+      if (devicePath && method === 'PATCH') {
+        const body = await readBody(req)
+        const out = await hubRequest(`/api/devices/${encodeURIComponent(devicePath[1])}`, {
+          method: 'PATCH',
+          body,
+        })
+        return json(res, out.status, out.data)
+      }
       if (method === 'POST' && sub === '/api/hub/start') {
         await ensureHub()
         return json(res, 200, { ok: true, hub: (await statusPayload()).hub })
@@ -472,7 +484,7 @@ export function apply(ctx, rawConfig = {}) {
       if (method === 'GET' && (sub === '/' || sub === '')) {
         return json(res, 200, {
           name: 'super-butler',
-          routes: ['/api/status', '/api/settings', '/api/snapshot', '/api/tasks', '/api/hub/start', '/api/hub/stop'],
+          routes: ['/api/status', '/api/settings', '/api/snapshot', '/api/tasks', '/api/devices/:id', '/api/hub/start', '/api/hub/stop'],
         })
       }
       return json(res, 404, { error: { code: 'not_found', message: `未知路由：${method} ${sub}` } })
