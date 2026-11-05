@@ -1,8 +1,14 @@
 package com.superbutler.app;
 
+import android.Manifest;
 import android.app.Activity;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
@@ -53,6 +59,11 @@ public class MainActivity extends Activity {
     private static final String KEY_HUB = "hub_url";
     private static final String KEY_TOKEN = "admin_token";
 
+    private static final String TASK_PROGRESS_CHANNEL = "butler_task_progress";
+    private static final String TASK_DONE_CHANNEL = "butler_task_done";
+    private static final int REQ_POST_NOTIFICATIONS = 7301;
+    private static final int TASK_NOTIFY_BASE = 7300;
+
     private static final int BRAND_BG = Color.parseColor("#141026");
     private static final int BRAND_DARK = Color.parseColor("#0B0818");
 
@@ -86,6 +97,8 @@ public class MainActivity extends Activity {
         applyEdgeToEdgeInsets(root);
         setContentView(root);
 
+        createNotificationChannels();
+        requestNotificationPermissionIfNeeded();
         loadInitial();
     }
 
@@ -346,6 +359,116 @@ public class MainActivity extends Activity {
     }
 
     // ------------------------------------------------------------------
+    // 任务通知（进度条 / 完成通知）
+    // ------------------------------------------------------------------
+
+    private NotificationManager notificationManager() {
+        return getSystemService(NotificationManager.class);
+    }
+
+    private void createNotificationChannels() {
+        if (Build.VERSION.SDK_INT < 26) return;
+        NotificationManager nm = notificationManager();
+        if (nm == null) return;
+        NotificationChannel progress = new NotificationChannel(
+                TASK_PROGRESS_CHANNEL, "管家任务进度", NotificationManager.IMPORTANCE_LOW);
+        progress.setDescription("正在执行的任务进度（常驻通知栏）");
+        progress.setShowBadge(false);
+        NotificationChannel done = new NotificationChannel(
+                TASK_DONE_CHANNEL, "管家任务完成", NotificationManager.IMPORTANCE_DEFAULT);
+        done.setDescription("任务完成、失败或超时提醒");
+        nm.createNotificationChannel(progress);
+        nm.createNotificationChannel(done);
+    }
+
+    private void requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < 33) return;
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return;
+        try {
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_POST_NOTIFICATIONS);
+        } catch (Exception e) {
+            Log.w(TAG, "request notification permission failed", e);
+        }
+    }
+
+    private static String taskStatusLabel(String status) {
+        if ("queued".equals(status)) return "排队中";
+        if ("assigned".equals(status)) return "已派发";
+        if ("running".equals(status)) return "执行中";
+        if ("completed".equals(status)) return "任务完成";
+        if ("failed".equals(status)) return "任务失败";
+        if ("timeout".equals(status)) return "任务超时";
+        if ("cancelled".equals(status)) return "已取消";
+        return "任务进行中";
+    }
+
+    private static String truncateText(String text, int max) {
+        String s = text == null ? "" : text.replace('\n', ' ').trim();
+        return s.length() > max ? s.substring(0, max) + "…" : s;
+    }
+
+    private PendingIntent taskPendingIntent(int id) {
+        Intent intent = new Intent(this, MainActivity.class);
+        intent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
+        return PendingIntent.getActivity(this, id, intent, flags);
+    }
+
+    /** 由 JS Bridge 调用；只更新本应用的任务通知，不影响其它通知。 */
+    private void postTaskNotification(JSONObject obj, boolean finished) {
+        try {
+            if (Build.VERSION.SDK_INT >= 33
+                    && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                return;
+            }
+            String taskId = obj.optString("id", "");
+            if (taskId.isEmpty()) return;
+            String status = obj.optString("status", "running");
+            String instruction = obj.optString("instruction", "");
+            String message = obj.optString("message", "");
+            String device = obj.optString("device", "");
+            int percent = obj.optInt("percent", -1);
+            if (percent > 100) percent = 100;
+            int notifyId = TASK_NOTIFY_BASE + (Math.abs(taskId.hashCode()) % 10000);
+            String label = taskStatusLabel(status);
+            String channel = finished ? TASK_DONE_CHANNEL : TASK_PROGRESS_CHANNEL;
+            int icon = finished
+                    ? ("completed".equals(status) ? android.R.drawable.stat_sys_download_done
+                    : android.R.drawable.stat_notify_error)
+                    : android.R.drawable.stat_sys_download;
+            String detail = truncateText(instruction, 110);
+            if (!device.isEmpty()) detail = detail + " · " + device;
+            if (!message.isEmpty()) detail = detail + "\n" + truncateText(message, 110);
+
+            Notification.Builder b = new Notification.Builder(this, channel)
+                    .setSmallIcon(icon)
+                    .setContentTitle("超级管家 · " + label)
+                    .setContentText(truncateText(instruction, 90))
+                    .setStyle(new Notification.BigTextStyle().bigText(detail))
+                    .setContentIntent(taskPendingIntent(notifyId))
+                    .setCategory(finished ? Notification.CATEGORY_STATUS : Notification.CATEGORY_PROGRESS)
+                    .setVisibility(Notification.VISIBILITY_PUBLIC)
+                    .setShowWhen(true)
+                    .setWhen(System.currentTimeMillis());
+            if (!finished) {
+                b.setOngoing(true).setOnlyAlertOnce(true);
+                if (percent >= 0) {
+                    b.setProgress(100, percent, false).setSubText(percent + "%");
+                } else {
+                    b.setProgress(0, 0, true).setSubText("等待中…");
+                }
+            } else {
+                b.setOngoing(false).setAutoCancel(true).setOnlyAlertOnce(false).setProgress(0, 0, false);
+                if ("completed".equals(status)) b.setDefaults(Notification.DEFAULT_SOUND);
+            }
+            NotificationManager nm = notificationManager();
+            if (nm != null) nm.notify(notifyId, b.build());
+        } catch (Exception e) {
+            Log.w(TAG, "postTaskNotification failed", e);
+        }
+    }
+
+    // ------------------------------------------------------------------
     // JS Bridge（仅本地页面/同主机 Hub 页面可调用）
     // ------------------------------------------------------------------
 
@@ -444,6 +567,26 @@ public class MainActivity extends Activity {
                     Toast.makeText(MainActivity.this, msg, Toast.LENGTH_SHORT).show();
                 }
             });
+        }
+
+        @JavascriptInterface
+        public void taskProgress(String json) {
+            if (!bridgeAllowed) return;
+            try {
+                postTaskNotification(new JSONObject(json), false);
+            } catch (Exception e) {
+                Log.w(TAG, "taskProgress bridge failed", e);
+            }
+        }
+
+        @JavascriptInterface
+        public void taskFinished(String json) {
+            if (!bridgeAllowed) return;
+            try {
+                postTaskNotification(new JSONObject(json), true);
+            } catch (Exception e) {
+                Log.w(TAG, "taskFinished bridge failed", e);
+            }
         }
     }
 

@@ -1,6 +1,6 @@
 # Android APK：安装、使用与构建
 
-产物：`dist/SuperButler-0.1.0.apk`（111,540 bytes，约 0.11 MB）
+产物：`dist/SuperButler-0.1.0.apk`（115,636 bytes，约 0.11 MB）
 包名：`com.superbutler.app` · minSdk 26（Android 8.0+）· targetSdk 36 · versionName 0.1.0
 
 App 是一个轻量原生 WebView 壳：首次启动配置 Hub 地址与管理员令牌，之后直接加载 Hub 的手机控制台 `/m?token=...`。
@@ -46,7 +46,15 @@ adb install -r dist/SuperButler-0.1.0.apk
 - **状态**：在线/离线设备、负载、最后心跳、models / profiles / gateways / skills 能力标签。
 - **指令**：输入自然语言指令，可选要求（模型 / 技能 / 目标设备 / 优先级 / 超时），发送后显示路由到哪台设备及原因；无匹配时显示排队与排除原因。
 - **任务**：实时进度、输出、事件时间线、取消/重试。
+- **任务通知**：
+  - 任务进入 `queued / assigned / running` 时，手机通知栏出现**常驻进度条**（有百分比显示百分比，否则为不确定进度）；
+  - 任务 `completed / failed / timeout / cancelled` 时更新为完成/失败通知，完成时播放提示音；
+  - Android 13+ 首次启动会请求通知权限；拒绝后可在系统设置中开启；
+  - 点击通知回到 APK 控制台。
 - **实时**：SSE 推送，断线自动重连；不可用时降级 5 秒轮询。
+
+> 通知由 WebView 页面通过 `ButlerBridge.taskProgress / taskFinished` 驱动，App 进程被系统杀掉后不会继续更新；
+> 当前不是前台服务，也不做服务端推送。
 
 ## 4. 从源码构建
 
@@ -132,7 +140,7 @@ toolchain\android-sdk\build-tools\36.0.0\zipalign.exe -c -v 4 dist\SuperButler-0
 | INTERNET / cleartext / exported | 均正确 |
 | apksigner verify | v1/v2/v3 有效 |
 | zipalign | Verification successful |
-| 体积 | 111,540 bytes |
+| 体积 | 115,636 bytes |
 
 ## 5. 实现说明
 
@@ -159,6 +167,7 @@ toolchain\android-sdk\build-tools\36.0.0\zipalign.exe -c -v 4 dist\SuperButler-0
 ## 7. 已知限制
 
 - 自签名/私有 CA 的 HTTPS 会被 WebView 拒绝；家庭内网建议直接用 http（APK 已允许 cleartext）。
-- 无推送通知、离线缓存、下拉刷新、自适应图标、扫码配对（v1 范围）。
+- 无服务端推送、离线缓存、下拉刷新、自适应图标、扫码配对（v1 范围）；任务通知依赖 WebView 页面运行，App 被系统彻底杀死后不再更新。
+- 通知权限（Android 13+）需用户在首次启动时允许；未授权时任务照常执行，只是不显示通知。
 - 无 AndroidX，UI 依赖系统 Material 主题。
 - 本机无 Android 真机/模拟器，仅完成静态校验与代码审查；首次真机安装后建议按第 2 节点验一遍。

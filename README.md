@@ -16,7 +16,7 @@
 - 📋 **任务闭环**：`queued → assigned → running → completed`，支持进度、超时、取消、重试、改派；
 - 🖥️ **多种工作机**：本机 CLI（Hermes / OpenCode / shell）、ComfyUI 图像生成、Ollama、HTTP 服务；
 - 📱 **手机工作机**：通过 [Mika](https://github.com/wangzan101/Mika) 指挥 Android 手机执行 App/网页任务；
-- 📲 **手机控制端**：Android APK（WebView + 本地配置页）加载 `/m`，看设备、发指令、看任务；它只是控制端，不执行 AI 任务；
+- 📲 **手机控制端**：Android APK（WebView + 本地配置页）加载 `/m`，看设备、发指令、看任务；它只是控制端，不执行 AI 任务；任务进度/完成/失败可在 Android 通知栏以进度条和提醒显示；
 - 🧩 **DSH 插件**：在 DeepSeek Harness 侧边栏打开原生控制台，统一管理 Hub、设备与私人 API 密钥；
 - 🪶 **零依赖**：Hub / 设备代理 / 前端全部零 npm 依赖，Node.js 单进程即可跑；APK 约 0.11 MB。
 
@@ -182,6 +182,7 @@ node device-agent/agent.js \
 - 浏览器直接打开 `http://<母机IP>:7317/m?token=<管理员令牌>`，可添加到主屏幕；
 - 或安装 [dist/SuperButler-0.1.0.apk](dist/SuperButler-0.1.0.apk)（Android 8+，测试签名；构建/安装见 [docs/APK.md](docs/APK.md)）。
 - 首次打开填写 Hub 地址与管理员令牌，点「测试连接」→「进入管家」。
+- 任务执行时通知栏显示**常驻进度条**，完成后推送完成/失败提醒；Android 13+ 首次启动需允许通知权限。
 
 ### DSH 插件（可选，推荐）
 
@@ -286,7 +287,7 @@ node scripts/demo.js
 - 当前路由是**确定性能力评分**，不是 LLM 规划器；多设备子任务 DAG 在 Roadmap。
 - DSH/CLI 接口因版本而异；`dsh-cli` 与 `cli` 执行器使用可配置命令模板，需按实际环境调整。
 - ComfyUI 生成的图片保存在工作机本地，暂不回传 Web 控制台（任务结果含路径）。
-- APK 是 WebView 壳：自签名 HTTPS 会被拒绝（家庭内网建议 http）；无推送/离线缓存/自适应图标。
+- APK 是 WebView 壳：自签名 HTTPS 会被拒绝（家庭内网建议 http）；无服务端推送/离线缓存/自适应图标；任务通知依赖页面保持运行，App 被系统彻底杀死后不再更新。
 - 手机端 UI 截图未生成（浏览器沙箱限制）；功能已通过真实 Hub 的 DOM 级验证。
 
 ## Roadmap

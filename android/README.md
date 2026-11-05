@@ -116,7 +116,7 @@ Signer #1 certificate DN: CN=Super Butler, OU=Home Lab, O=Super Butler, L=KL, C=
 Signer #1 certificate SHA-256 digest: 45658ac253be038ab8dc6da60a99743afc7a3a5ac9c6b04d9f498cb7f914bb5a
 
 APK : dist\SuperButler-0.1.0.apk
-大小: 111540 bytes (0.11 MB)    # 上限目标 5 MB
+大小: 115636 bytes (0.11 MB)    # 上限目标 5 MB
 ```
 
 APK 关键条目（`jar tf dist/SuperButler-0.1.0.apk`）：

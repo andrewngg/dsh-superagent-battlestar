@@ -8,6 +8,7 @@
 
     <!-- 家庭内网 HTTP Hub 需要网络；usesCleartextTraffic 允许明文 http -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:label="@string/app_name"

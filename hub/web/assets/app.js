@@ -209,6 +209,7 @@
     relTimer: 0,
     sigs: { stats: '', devices: '', tasks: '', composer: '', activity: '', settings: '' },
   };
+  const taskNotifyState = new Map();
 
   /* ==================================================================
    * 会话与 API
@@ -703,6 +704,56 @@
     renderAll();
     maybeAutoOpen();
     if (state.drawer.open) refreshOpenDrawer();
+    syncTaskNotifications();
+  }
+
+  /** 把任务进度/完成事件桥接给 Android APK（浏览器中不存在 ButlerBridge，自动忽略）。 */
+  function syncTaskNotifications() {
+    let bridge = null;
+    try {
+      bridge = window.ButlerBridge;
+    } catch (e) {
+      bridge = null;
+    }
+    if (!bridge || typeof bridge.taskProgress !== 'function' || typeof bridge.taskFinished !== 'function') {
+      taskNotifyState.clear();
+      return;
+    }
+    const terminal = new Set(['completed', 'failed', 'timeout', 'cancelled']);
+    for (const task of state.tasks.slice(0, 40)) {
+      if (!task || !task.id) continue;
+      const status = normStatus(task.status);
+      const progress = taskProgressOf(task) || {};
+      const percent = Number.isFinite(progress.percent) ? Math.round(Math.max(0, Math.min(100, progress.percent))) : -1;
+      const message = progress.message || '';
+      const payload = {
+        id: task.id,
+        status,
+        instruction: task.instruction || '',
+        percent,
+        message,
+        device: deviceName(task.assignedDeviceId),
+      };
+      const prev = taskNotifyState.get(task.id);
+      try {
+        if (ACTIVE_STATUS.has(status)) {
+          const changed = !prev || prev.status !== status || prev.percent !== percent || prev.message !== message;
+          if (changed) bridge.taskProgress(JSON.stringify(payload));
+          taskNotifyState.set(task.id, { status, percent, message });
+        } else if (terminal.has(status)) {
+          if (prev && !prev.finished) {
+            bridge.taskFinished(JSON.stringify({ ...payload, message: task.error || message || '' }));
+          }
+          taskNotifyState.set(task.id, { status, finished: true, percent, message });
+        }
+      } catch (e) {
+        // 通知失败不能影响主界面
+      }
+    }
+    if (taskNotifyState.size > 100) {
+      const keep = new Set(state.tasks.slice(0, 100).map((t) => t.id));
+      for (const id of taskNotifyState.keys()) if (!keep.has(id)) taskNotifyState.delete(id);
+    }
   }
 
   function upsertTask(task) {
@@ -748,6 +799,7 @@
     }
     renderAll();
     if (state.drawer.open && state.drawer.kind === 'task' && state.drawer.id === current.id) refreshOpenDrawer();
+    syncTaskNotifications();
   }
 
   function onDeviceUpdated(device) {
