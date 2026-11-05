@@ -1,0 +1,64 @@
+{
+  "name": "ComfyUI 工作机 · Hermes 调度",
+  "platform": "windows",
+  "kind": "multi",
+  "agentVersion": "0.1.0",
+  "tags": ["ComfyUI", "Hermes", "图像生成", "视频生成", "GPU"],
+  "models": [
+    {
+      "id": "comfyui",
+      "provider": "comfyui",
+      "strengths": ["image", "video", "workflow"],
+      "available": true
+    },
+    {
+      "id": "minimax-h3",
+      "provider": "comfyui",
+      "strengths": ["video", "audio", "text-to-video", "reference-to-video"],
+      "available": true
+    }
+  ],
+  "profiles": [
+    {
+      "id": "hermes",
+      "name": "Hermes + comfyui-workflow",
+      "plugins": ["comfyui", "theodore-director", "minimax-h3"]
+    }
+  ],
+  "gateways": [
+    {
+      "id": "comfyui",
+      "kind": "comfyui",
+      "baseUrl": "http://127.0.0.1:8188",
+      "models": ["comfyui", "minimax-h3"]
+    }
+  ],
+  "skills": [
+    { "id": "comfyui-workflow", "name": "ComfyUI 工作流执行", "version": "1.0.0" },
+    { "id": "image-generation", "name": "文生图 / 图生图", "version": "1.0.0" },
+    { "id": "video-generation", "name": "文生视频 / 参考图生视频", "version": "1.0.0" },
+    { "id": "director-multishot", "name": "多分镜连续生成", "version": "1.0.0" }
+  ],
+  "resources": {
+    "cpuCores": 12,
+    "memoryGB": 32,
+    "gpu": "NVIDIA GeForce RTX 3060 12GB",
+    "os": "Windows 11"
+  },
+  "limits": { "maxConcurrentTasks": 1 },
+  "executor": {
+    "type": "cli",
+    "cli": {
+      "mode": "hermes",
+      "workdir": "C:/Users/you/comfyui-worker",
+      "timeoutMs": 900000,
+      "hermes": {
+        "home": "C:/Users/you/AppData/Local/hermes",
+        "exe": "C:/Users/you/AppData/Local/hermes/bin/hermes.exe"
+      },
+      "skills": ["comfyui-workflow"],
+      "promptPrefix": "你是 BattleStar 的 ComfyUI 工作机。必须优先使用 comfyui-workflow skill 调用本机 ComfyUI 完成生成任务；先理解用户对图片/视频的题材、风格、时长、比例和数量要求，选择正确的工作流执行，完成后返回生成文件的绝对路径、工作流名称和 prompt_id。不要只回复计划，不要声称已生成却没有实际调用 ComfyUI。"
+    }
+  },
+  "discovery": { "dsh": false, "ollama": false, "gateway": false, "skills": false }
+}

@@ -660,6 +660,11 @@ function createCliExecutor(options = {}) {
       if (requirements.profile) args.push('--profile', String(requirements.profile));
       if (requirements.model) args.push('--model', String(requirements.model));
       if (nonEmptyString(opencode.model)) args.push('--opencode-model', opencode.model);
+      const skillList = Array.isArray(cfg.skills)
+        ? cfg.skills.map((x) => nonEmptyString(x)).filter(Boolean).join(',')
+        : nonEmptyString(cfg.skills);
+      if (skillList) args.push('--skills', skillList);
+      if (nonEmptyString(cfg.promptPrefix)) args.push('--prompt-prefix', cfg.promptPrefix);
       if (isPlainObject(cfg.modelProviders) && Object.keys(cfg.modelProviders).length) {
         args.push('--model-providers', JSON.stringify(cfg.modelProviders));
       }

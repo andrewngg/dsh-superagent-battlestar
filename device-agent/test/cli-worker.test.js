@@ -55,6 +55,15 @@ test('providerForModel：按模型/显式映射选择 provider', () => {
   assert.equal(worker.providerForModel('unknown', { unknown: 'my-provider' }), 'my-provider');
 });
 
+test('Hermes 技能：--skills 透传，promptPrefix 只包在用户任务前', () => {
+  const args = worker.buildHermesArgs({
+    instruction: '生成一段视频',
+    skills: 'comfyui-workflow',
+  });
+  assert.deepEqual(args.slice(-4), ['--skills', 'comfyui-workflow', '-z', '生成一段视频']);
+  assert.equal(worker.composePrompt('必须使用 comfyui-workflow', '生成一张图'), '必须使用 comfyui-workflow\n\n用户任务：\n生成一张图');
+});
+
 test('buildOpencodeArgs：非交互 JSON 输出与模型参数', () => {
   const args = worker.buildOpencodeArgs({
     instruction: '写一个 hello.js',

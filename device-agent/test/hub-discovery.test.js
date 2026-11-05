@@ -6,9 +6,9 @@ const assert = require('node:assert/strict');
 const { hubPortFromUrl, buildCandidates } = require('../lib/hub-discovery');
 
 test('hubPortFromUrl：从 Hub URL 解析扫描端口', () => {
-  assert.equal(hubPortFromUrl('http://192.168.1.6:7317'), 7317);
+  assert.equal(hubPortFromUrl('http://192.0.2.10:7317'), 7317);
   assert.equal(hubPortFromUrl('https://hub.example:9443/'), 9443);
-  assert.equal(hubPortFromUrl('http://192.168.1.6'), 7317);
+  assert.equal(hubPortFromUrl('http://192.0.2.10'), 7317);
   assert.equal(hubPortFromUrl('not a url', 8123), 8123);
 });
 

@@ -134,14 +134,22 @@ function chooseBackend({ mode = 'auto', profile = '', instruction = '', allowShe
   return 'hermes';
 }
 
-function buildHermesArgs({ instruction, model = '', provider = '', workdir = '', yolo = true }) {
+function buildHermesArgs({ instruction, model = '', provider = '', skills = '', workdir = '', yolo = true }) {
   const args = ['--cli'];
   if (yolo) args.push('--yolo');
   if (model) args.push('-m', model);
   if (provider) args.push('--provider', provider);
+  if (skills) args.push('--skills', skills);
   if (workdir) args.push('--in', workdir);
   args.push('-z', String(instruction || ''));
   return args;
+}
+
+/** 把工作机的前缀要求放在用户指令前，确保 Hermes 优先使用指定 skill。 */
+function composePrompt(prefix, instruction) {
+  const head = nonEmptyString(prefix);
+  const body = String(instruction || '');
+  return head ? `${head}\n\n用户任务：\n${body}` : body;
 }
 
 /** 根据模型名/显式映射选择 Hermes provider，避免把 Agnes 模型发给 DeepSeek。 */
@@ -236,6 +244,14 @@ function parseCliArgs(argv) {
         break;
       case '--model':
         out.model = value();
+        if (inline === undefined) i += 1;
+        break;
+      case '--skills':
+        out.skills = value();
+        if (inline === undefined) i += 1;
+        break;
+      case '--prompt-prefix':
+        out.promptPrefix = value();
         if (inline === undefined) i += 1;
         break;
       case '--provider':
@@ -393,9 +409,10 @@ async function runHermes(ctx) {
   const exe = ctx.hermesExe;
   const profileHome = hermesProfileHome(home, ctx.profile);
   const args = buildHermesArgs({
-    instruction: ctx.instruction,
+    instruction: composePrompt(ctx.promptPrefix, ctx.instruction),
     model: ctx.model || '',
     provider: ctx.provider || '',
+    skills: ctx.skills || '',
     workdir: ctx.workdir,
     yolo: ctx.yolo !== false,
   });
@@ -498,6 +515,8 @@ async function runTask(options) {
     instruction,
     profile: nonEmptyString(options.profile),
     model: nonEmptyString(options.model),
+    skills: nonEmptyString(options.skills),
+    promptPrefix: nonEmptyString(options.promptPrefix),
     provider: nonEmptyString(options.provider) || providerForModel(options.model, options.modelProviders),
     workdir,
     timeoutMs,
@@ -534,7 +553,8 @@ async function main(argv) {
   if (options.help) {
     process.stdout.write(
       '用法：node cli-worker.js --instruction <指令> [--mode auto|hermes|opencode|shell] '
-      + '[--profile <profile>] [--model <model>] [--workdir <dir>] [--allow-shell] [--fallback-hermes]\n',
+      + '[--profile <profile>] [--model <model>] [--skills <skills>] [--prompt-prefix <text>] '
+      + '[--workdir <dir>] [--allow-shell] [--fallback-hermes]\n',
     );
     return 0;
   }
@@ -545,6 +565,10 @@ async function main(argv) {
   }
   if (!options.opencodeModel && process.env.BUTLER_CLI_OPENCODE_MODEL) {
     options.opencodeModel = process.env.BUTLER_CLI_OPENCODE_MODEL;
+  }
+  if (!options.skills && process.env.BUTLER_CLI_SKILLS) options.skills = process.env.BUTLER_CLI_SKILLS;
+  if (!options.promptPrefix && process.env.BUTLER_CLI_PROMPT_PREFIX) {
+    options.promptPrefix = process.env.BUTLER_CLI_PROMPT_PREFIX;
   }
   options.hermesHome = process.env.BUTLER_CLI_HERMES_HOME || options.hermesHome;
   options.hermesExe = process.env.BUTLER_CLI_HERMES_EXE || options.hermesExe;
@@ -595,6 +619,7 @@ module.exports = {
   chooseBackend,
   buildHermesArgs,
   providerForModel,
+  composePrompt,
   buildOpencodeArgs,
   extractOpencodeText,
   stripAnsi,
