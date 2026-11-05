@@ -38,6 +38,9 @@ plugin_manager(action: "install_bundle", target: "<abs>/super-butler/dsh-plugin"
 - **Hub**：项目目录、端口、是否随 DSH 启动自动启动、默认模型、GitHub 用户名；
 - **私人账号与密钥**：GitHub Token、DeepSeek API Key、Agnes AI API Key、
   豆包/火山方舟 API Key、OpenCode API Key；
+- 每个已配置密钥旁有 **「测试 Token」**：调用各自的只读接口（GitHub `/user`、
+  模型服务 `/models`）检查 Token 是否可用，显示 HTTP 状态、耗时与结果
+  （`可用` / `无效` / `无法判定`，无法判定表示服务不支持该只读接口）；
 - 密钥保存在 Harness **credentials 服务**（profile 的加密/私有存储，`source: file`），
   不写入项目文件、不在页面回显；留空表示不修改，点「清除」删除已保存条目；
 - 插件启动 Hub 时会把已配置密钥解析为子进程环境变量：

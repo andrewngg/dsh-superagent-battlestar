@@ -35,6 +35,7 @@ window.__ModuleLoader__.load({
       githubToken: 'GitHub Token', deepseekApiKey: 'DeepSeek API Key', agnesApiKey: 'Agnes AI API Key',
       doubaoApiKey: '豆包 / 火山方舟 API Key', opencodeApiKey: 'OpenCode API Key',
       configured: '已配置', notConfigured: '未配置', clear: '清除', save: '保存设置', saving: '保存中…',
+      testToken: '测试 Token', testing: '测试中…', testOk: '可用', testInvalid: '无效', testUnverified: '无法判定',
       saved: '设置已保存', joinCode: '设备加入码', copy: '复制', copied: '已复制',
       openExternal: '在浏览器打开', loadFailed: '加载失败', retryLoad: '重试', apiUnavailable: '无法连接管家 Hub',
       startHubFailed: '启动 Hub 失败', stopHubFailed: '停止 Hub 失败', settingsFailed: '保存设置失败',
@@ -66,6 +67,7 @@ window.__ModuleLoader__.load({
       githubToken: 'GitHub token', deepseekApiKey: 'DeepSeek API key', agnesApiKey: 'Agnes AI API key',
       doubaoApiKey: 'Doubao / Ark API key', opencodeApiKey: 'OpenCode API key',
       configured: 'configured', notConfigured: 'not configured', clear: 'Clear', save: 'Save settings', saving: 'Saving…',
+      testToken: 'Test token', testing: 'Testing…', testOk: 'valid', testInvalid: 'invalid', testUnverified: 'unverified',
       saved: 'Settings saved', joinCode: 'Device join code', copy: 'Copy', copied: 'Copied',
       openExternal: 'Open in browser', loadFailed: 'Load failed', retryLoad: 'Retry', apiUnavailable: 'Cannot reach the butler hub',
       startHubFailed: 'Failed to start hub', stopHubFailed: 'Failed to stop hub', settingsFailed: 'Failed to save settings',
@@ -381,6 +383,7 @@ window.__ModuleLoader__.load({
         hubNickname: s.hubNickname || '',
       })
       const [keys, setKeys] = useState({ githubToken: '', deepseekApiKey: '', agnesApiKey: '', doubaoApiKey: '', opencodeApiKey: '' })
+      const [tests, setTests] = useState({})
       const [localMsg, setLocalMsg] = useState('')
       useEffect(() => {
         setForm({
@@ -400,6 +403,15 @@ window.__ModuleLoader__.load({
       const clear = async (key) => {
         await onSave({ settings: {}, secrets: {}, clearSecrets: [key] })
         setLocalMsg(`${key} ${t('clear')}`)
+      }
+      const testKey = async (key) => {
+        setTests((prev) => ({ ...prev, [key]: { loading: true } }))
+        try {
+          const result = await call('/test-credential', { method: 'POST', body: JSON.stringify({ key }) })
+          setTests((prev) => ({ ...prev, [key]: result }))
+        } catch (err) {
+          setTests((prev) => ({ ...prev, [key]: { ok: false, status: 'error', message: err.message || String(err) } }))
+        }
       }
       const keyFields = [
         ['githubToken', 'githubToken'], ['deepseekApiKey', 'deepseekApiKey'],
@@ -427,11 +439,19 @@ window.__ModuleLoader__.load({
           h('div', { style: { ...muted, marginBottom: 12 } }, t('keysHint')),
           ...keyFields.map(([key, labelKey]) => {
             const info = secretMap[key] || {}
+            const tested = tests[key]
             return h('div', { key, style: { marginBottom: 12 } },
               h('div', { style: { ...row, justifyContent: 'space-between', marginBottom: 4 } },
                 h('span', { style: { fontSize: 13, fontWeight: 500 } }, t(labelKey)),
                 h('span', { style: { ...row, gap: 6 } },
                   h(Badge, { tone: info.configured ? 'ok' : 'idle' }, info.configured ? t('configured') : t('notConfigured')),
+                  info.configured
+                    ? h('button', {
+                        style: { ...btn(false), padding: '2px 8px', fontSize: 12 },
+                        disabled: Boolean(tested && tested.loading),
+                        onClick: () => void testKey(key),
+                      }, tested && tested.loading ? t('testing') : t('testToken'))
+                    : null,
                   info.configured ? h('button', { style: btn(false), onClick: () => clear(key) }, t('clear')) : null,
                 ),
               ),
@@ -439,6 +459,14 @@ window.__ModuleLoader__.load({
                 type: 'password', value: keys[key], autoComplete: 'off', placeholder: info.configured ? '••••••••' : '',
                 onChange: (e) => setKeys((prev) => ({ ...prev, [key]: e.target.value })), style: inputStyle,
               }),
+              tested && !tested.loading
+                ? h('div', {
+                    style: {
+                      ...muted, marginTop: 4,
+                      color: tested.ok ? COLORS.ok : tested.status === 'invalid' ? COLORS.err : COLORS.warn,
+                    },
+                  }, `${tested.ok ? t('testOk') : tested.status === 'unverified' ? t('testUnverified') : t('testInvalid')}${tested.httpStatus ? ` (HTTP ${tested.httpStatus})` : ''}${tested.latencyMs != null ? ` · ${tested.latencyMs}ms` : ''}${tested.message ? ` · ${tested.message}` : ''}`)
+                : null,
             )
           }),
         ),

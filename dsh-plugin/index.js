@@ -33,6 +33,45 @@ const SECRET_FIELDS = [
   { key: 'opencodeApiKey', ref: 'SUPER_BUTLER_OPENCODE_API_KEY', label: 'OpenCode API Key', env: 'OPENCODE_API_KEY' },
 ]
 
+/**
+ * 每个密钥的测试端点（只发只读请求，不产生模型费用）。
+ * 若服务不支持 /models，会返回 unverified 而不是误报 token 无效。
+ */
+const CREDENTIAL_TESTS = {
+  githubToken: {
+    url: 'https://api.github.com/user',
+    headers: (token) => ({
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'super-butler-token-test',
+    }),
+    describe: (data) => (data && data.login ? `GitHub 用户：${data.login}` : 'GitHub Token 有效'),
+  },
+  deepseekApiKey: {
+    url: 'https://api.deepseek.com/models',
+    headers: (token) => ({ Authorization: `Bearer ${token}` }),
+    describe: (data) => {
+      const count = data && Array.isArray(data.data) ? data.data.length : 0
+      return count ? `DeepSeek Token 有效（可用模型 ${count} 个）` : 'DeepSeek Token 有效'
+    },
+  },
+  agnesApiKey: {
+    url: 'https://apihub.agnes-ai.com/v1/models',
+    headers: (token) => ({ Authorization: `Bearer ${token}` }),
+    describe: () => 'Agnes AI Token 有效',
+  },
+  doubaoApiKey: {
+    url: 'https://ark.cn-beijing.volces.com/api/v3/models',
+    headers: (token) => ({ Authorization: `Bearer ${token}` }),
+    describe: () => '豆包 / 火山方舟 Token 有效',
+  },
+  opencodeApiKey: {
+    url: 'https://opencode.ai/zen/v1/models',
+    headers: (token) => ({ Authorization: `Bearer ${token}` }),
+    describe: () => 'OpenCode Token 有效',
+  },
+}
+
 const SETTING_KEYS = ['projectRoot', 'hubPort', 'hubHost', 'autoStart', 'dataDir', 'githubUser', 'adminToken', 'joinCode', 'defaultModel', 'hubNickname']
 
 function defaultProjectRoot() {
@@ -396,6 +435,71 @@ export function apply(ctx, rawConfig = {}) {
     return { key, cleared: true }
   }
 
+  async function testCredential(key) {
+    const field = SECRET_FIELDS.find((item) => item.key === key)
+    if (!field) return { ok: false, status: 'unknown', message: `未知密钥：${key}` }
+    const spec = CREDENTIAL_TESTS[key]
+    if (!spec) return { ok: false, status: 'unsupported', message: '该密钥没有测试端点' }
+    if (!credentials) return { ok: false, status: 'error', message: 'credentials 服务不可用' }
+    let resolved
+    try {
+      resolved = await credentials.resolve(field.ref)
+    } catch (err) {
+      return { ok: false, status: 'error', message: `读取密钥失败：${err.message}` }
+    }
+    if (!resolved || !resolved.value) {
+      return { ok: false, status: 'missing', message: '未配置 Token', configured: false }
+    }
+    const startedAt = Date.now()
+    try {
+      const res = await fetch(spec.url, {
+        method: 'GET',
+        headers: spec.headers(resolved.value),
+        signal: AbortSignal.timeout(15000),
+      })
+      const latencyMs = Date.now() - startedAt
+      const text = await res.text()
+      let data = null
+      try {
+        data = text ? JSON.parse(text) : null
+      } catch {
+        data = null
+      }
+      if (res.ok) {
+        return {
+          ok: true,
+          status: 'ok',
+          httpStatus: res.status,
+          latencyMs,
+          message: spec.describe(data),
+        }
+      }
+      if (res.status === 401 || res.status === 403) {
+        return {
+          ok: false,
+          status: 'invalid',
+          httpStatus: res.status,
+          latencyMs,
+          message: `Token 无效或权限不足（HTTP ${res.status}）`,
+        }
+      }
+      return {
+        ok: false,
+        status: 'unverified',
+        httpStatus: res.status,
+        latencyMs,
+        message: `端点返回 HTTP ${res.status}，无法仅凭此判定 Token（服务可能不支持该只读接口）`,
+      }
+    } catch (err) {
+      return {
+        ok: false,
+        status: 'error',
+        latencyMs: Date.now() - startedAt,
+        message: `测试请求失败：${err && err.message ? err.message : String(err)}`,
+      }
+    }
+  }
+
   async function statusPayload() {
     const health = await hubHealth()
     const joinCode = health ? await hubJoinCode() : ''
@@ -446,6 +550,11 @@ export function apply(ctx, rawConfig = {}) {
         }
         return json(res, 200, { settings: updated, secrets: await secretStatus(), results })
       }
+      if (method === 'POST' && sub === '/api/test-credential') {
+        const body = await readBody(req)
+        const key = typeof body.key === 'string' ? body.key : ''
+        return json(res, 200, await testCredential(key))
+      }
       if (method === 'GET' && sub === '/api/snapshot') {
         const limit = clampInt(Number(url.searchParams.get('limit')), 50, 1, 200)
         const out = await hubRequest(`/api/snapshot?limit=${limit}`)
@@ -484,7 +593,7 @@ export function apply(ctx, rawConfig = {}) {
       if (method === 'GET' && (sub === '/' || sub === '')) {
         return json(res, 200, {
           name: 'super-butler',
-          routes: ['/api/status', '/api/settings', '/api/snapshot', '/api/tasks', '/api/devices/:id', '/api/hub/start', '/api/hub/stop'],
+          routes: ['/api/status', '/api/settings', '/api/snapshot', '/api/tasks', '/api/devices/:id', '/api/test-credential', '/api/hub/start', '/api/hub/stop'],
         })
       }
       return json(res, 404, { error: { code: 'not_found', message: `未知路由：${method} ${sub}` } })
