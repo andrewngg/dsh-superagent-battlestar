@@ -47,6 +47,14 @@ test('buildHermesArgs：包含一次性提示、模型、工作目录与自动�
   assert.equal(noYolo[noYolo.length - 1], 'hi');
 });
 
+test('providerForModel：按模型/显式映射选择 provider', () => {
+  assert.equal(worker.providerForModel('deepseek-chat'), 'deepseek');
+  assert.equal(worker.providerForModel('agnes-2.5-flash'), 'custom');
+  assert.equal(worker.providerForModel('custom-model'), '');
+  assert.equal(worker.providerForModel('agnes-2.5-flash', { 'agnes-2.5-flash': 'agnes' }), 'agnes');
+  assert.equal(worker.providerForModel('unknown', { unknown: 'my-provider' }), 'my-provider');
+});
+
 test('buildOpencodeArgs：非交互 JSON 输出与模型参数', () => {
   const args = worker.buildOpencodeArgs({
     instruction: '写一个 hello.js',

@@ -144,6 +144,21 @@ function buildHermesArgs({ instruction, model = '', provider = '', workdir = '',
   return args;
 }
 
+/** 根据模型名/显式映射选择 Hermes provider，避免把 Agnes 模型发给 DeepSeek。 */
+function providerForModel(model, modelProviders = {}) {
+  const name = nonEmptyString(model);
+  if (!name) return '';
+  const map = modelProviders && typeof modelProviders === 'object' ? modelProviders : {};
+  if (nonEmptyString(map[name])) return map[name].trim();
+  const lower = name.toLowerCase();
+  for (const [key, value] of Object.entries(map)) {
+    if (String(key).toLowerCase() === lower && nonEmptyString(value)) return String(value).trim();
+  }
+  if (lower.startsWith('deepseek')) return 'deepseek';
+  if (lower.startsWith('agnes')) return 'custom';
+  return '';
+}
+
 function buildOpencodeArgs({ instruction, model, workdir = '', auto = true }) {
   const args = ['run', String(instruction || ''), '-m', model, '--format', 'json'];
   if (workdir) args.push('--dir', workdir);
@@ -195,7 +210,7 @@ function extractOpencodeText(stdout) {
 }
 
 function parseCliArgs(argv) {
-  const out = { mode: DEFAULTS.mode, allowShell: false, fallbackHermes: false, json: true };
+  const out = { mode: DEFAULTS.mode, allowShell: false, fallbackHermes: false, json: true, modelProviders: {} };
   const take = (index, key) => {
     if (!argv[index + 1]) throw new Error(`${key} 缺少值`);
     return argv[index + 1];
@@ -241,6 +256,14 @@ function parseCliArgs(argv) {
         break;
       case '--opencode-model':
         out.opencodeModel = value();
+        if (inline === undefined) i += 1;
+        break;
+      case '--model-providers':
+        try {
+          out.modelProviders = JSON.parse(value());
+        } catch {
+          throw new Error('--model-providers 必须是 JSON 对象');
+        }
         if (inline === undefined) i += 1;
         break;
       case '--allow-shell':
@@ -475,7 +498,7 @@ async function runTask(options) {
     instruction,
     profile: nonEmptyString(options.profile),
     model: nonEmptyString(options.model),
-    provider: nonEmptyString(options.provider) || (nonEmptyString(options.model) ? 'deepseek' : ''),
+    provider: nonEmptyString(options.provider) || providerForModel(options.model, options.modelProviders),
     workdir,
     timeoutMs,
     hermesHome,
@@ -571,6 +594,7 @@ module.exports = {
   parseCliArgs,
   chooseBackend,
   buildHermesArgs,
+  providerForModel,
   buildOpencodeArgs,
   extractOpencodeText,
   stripAnsi,

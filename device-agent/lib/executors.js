@@ -660,6 +660,9 @@ function createCliExecutor(options = {}) {
       if (requirements.profile) args.push('--profile', String(requirements.profile));
       if (requirements.model) args.push('--model', String(requirements.model));
       if (nonEmptyString(opencode.model)) args.push('--opencode-model', opencode.model);
+      if (isPlainObject(cfg.modelProviders) && Object.keys(cfg.modelProviders).length) {
+        args.push('--model-providers', JSON.stringify(cfg.modelProviders));
+      }
 
       const env = { ...process.env, ...options.env, ...extraEnv };
       if (nonEmptyString(hermes.home)) env.BUTLER_CLI_HERMES_HOME = hermes.home;
