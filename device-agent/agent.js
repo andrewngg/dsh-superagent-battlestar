@@ -25,6 +25,7 @@ const { createExecutor, makeProgressThrottle } = require('./lib/executors');
 const { createLogger } = require('./lib/logger');
 const { HubClient, ApiError } = require('./lib/hub-client');
 const { normalizeBaseUrl } = require('./lib/http');
+const { discoverHub, hubPortFromUrl } = require('./lib/hub-discovery');
 const { resolveStateDir, resolveStateFile, loadState, saveState } = require('./lib/state');
 const { createMetricsSampler } = require('./lib/metrics');
 const { normalizeManifest } = require('../shared/protocol.js');
@@ -41,6 +42,15 @@ const DEFAULTS = Object.freeze({
   backoffBaseMs: 1000,
   backoffMaxMs: 30000,
 });
+
+function isNetworkError(err) {
+  if (!err) return false;
+  if (err.isNetworkError) return true;
+  if (err.name === 'AbortError') return false;
+  return /fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|network|socket hang up/i.test(
+    `${err.code || ''} ${err.message || ''}`,
+  );
+}
 
 /** 配置/参数错误：不可重试，CLI 以退出码 2 结束。 */
 class FatalSetupError extends Error {
@@ -108,6 +118,12 @@ class Agent {
 
     this.hubUrl = normalizeBaseUrl(options.hub || this.config.hub || DEFAULTS.hub);
     this.joinCode = options.joinCode || this.config.joinCode || this.env.BUTLER_JOIN_CODE || null;
+    this.autoDiscover = options.discoverHub !== undefined
+      ? options.discoverHub !== false
+      : this.config.discoverHub !== false;
+    if (this.env.BUTLER_DISCOVER_HUB === '0') this.autoDiscover = false;
+    this.needsDiscovery = false;
+    this.lastDiscoveryAt = 0;
     this.intervalMs = clampInt(
       options.intervalMs !== undefined ? options.intervalMs : this.config.intervalMs,
       DEFAULTS.minHeartbeatMs,
@@ -268,7 +284,36 @@ class Agent {
     return this.connecting;
   }
 
+  async _discoverHub() {
+    if (!this.autoDiscover) return false;
+    const now = Date.now();
+    if (now - this.lastDiscoveryAt < 15000) return false;
+    this.lastDiscoveryAt = now;
+    const port = hubPortFromUrl(this.hubUrl, 7317);
+    this.log.info(`Hub 不可达，正在局域网自动发现 :${port} …`);
+    try {
+      const found = await discoverHub({ port, timeoutMs: 700, concurrency: 48 });
+      if (!found) {
+        this.log.warn(`局域网未发现 Hub（端口 ${port}），继续使用 ${this.hubUrl}`);
+        return false;
+      }
+      if (found.baseUrl !== this.hubUrl) {
+        this.log.info(`自动发现 Hub：${found.baseUrl}（${found.name}）`);
+        this.hubUrl = found.baseUrl;
+      }
+      this.needsDiscovery = false;
+      return true;
+    } catch (err) {
+      this.log.warn(`局域网发现 Hub 失败：${err && err.message ? err.message : err}`);
+      return false;
+    }
+  }
+
   async _establish() {
+    if (this.needsDiscovery) {
+      await this._discoverHub();
+      this.needsDiscovery = false;
+    }
     // 2.1 有本地令牌：先用 POST /:id/manifest 更新并恢复
     if (this.state && this.state.deviceId && this.state.deviceToken) {
       const resumeClient = new HubClient({
@@ -282,6 +327,14 @@ class Agent {
         this.client = resumeClient;
         this.device = this._deviceFromManifest(res.json && res.json.device);
         this.stats.registeredAt = this.stats.registeredAt || this.state.registeredAt || new Date().toISOString();
+        if (this.state.hub !== this.hubUrl) {
+          this.state.hub = this.hubUrl;
+          try {
+            await saveState(this.stateFile, this.state);
+          } catch (err) {
+            this.log.warn(`保存自动发现的新 Hub 地址失败：${err.message}`);
+          }
+        }
         this.log.info(`已用本地令牌恢复设备 ${this.state.deviceId}，manifest 已更新`);
         this._onConnected();
         return this.device;
@@ -391,6 +444,11 @@ class Agent {
       this.device = null;
       if (this.state) this.state = { ...this.state, deviceId: null, deviceToken: null };
     } else {
+      if (isNetworkError(err)) {
+        this.device = null;
+        this.client = null;
+        this.needsDiscovery = true;
+      }
       this.log.warn(`${label}失败：${err && err.message ? err.message : err}`);
     }
     this.failures += 1;
@@ -714,7 +772,15 @@ class Agent {
 
   async start() {
     await this.init();
-    await this.connect();
+    try {
+      await this.connect();
+    } catch (err) {
+      if (isNetworkError(err) && this.autoDiscover && (await this._discoverHub())) {
+        await this.connect();
+      } else {
+        throw err;
+      }
+    }
     this._startHeartbeatLoop();
     this._startPollLoop();
     this.log.info(

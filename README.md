@@ -147,6 +147,7 @@ node device-agent/agent.js \
 | **演示** | `simulate` | — | 无需外部服务，用于联调 |
 
 工作机上线后，母机控制台会显示设备名、在线状态、models / profiles / gateways / skills chips 与负载。
+- 工作机会自动补连：配置的 Hub IP 失效时，代理会扫描本机 IPv4 `/24` 网段的 `7317` 端口，发现 BattleStar Hub 后自动重连；跨 VLAN/不同网段请使用 DHCP 固定 IP 或主机名。
 所有执行器都是可配置、可插拔的；设备主人决定允许执行什么。
 
 ### 让 AI 自动配置工作机（WORKER-SETUP）

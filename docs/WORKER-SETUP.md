@@ -102,6 +102,7 @@ Invoke-RestMethod http://<HUB_URL>/api/health
 - 工作机与母机是否同网段 / 同一 VPN（Tailscale、WireGuard）；
 - 母机防火墙是否放行 7317（Windows 专用网络）；
 - `HUB_URL` 是否写成了 `127.0.0.1`（工作机上不能用回环地址访问母机）。
+- 若母机 IP 变化：代理会自动扫描本机 IPv4 `/24` 网段的 `7317` 端口补连；跨网段/VLAN 仍需 DHCP 固定 IP 或主机名。
 
 ---
 
