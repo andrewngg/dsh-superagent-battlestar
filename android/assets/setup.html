@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="color-scheme" content="dark">
-<title>超级管家 · 连接 Hub</title>
+<title>BattleStar · 连接母机</title>
 <style>
   :root{
     --accent:#8b6bff;
@@ -74,21 +74,44 @@
     margin-top:14px;padding:10px 12px;border-radius:11px;font-size:11.5px;line-height:1.55;
     background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.28);color:#fcd34d;display:none;
   }
+  .row2{display:grid;grid-template-columns:1fr 108px;gap:10px}
+  .discovery{display:flex;flex-direction:column;gap:8px;margin:0 0 14px}
+  .discovery button{
+    width:100%;text-align:left;padding:10px 12px;border-radius:11px;cursor:pointer;
+    background:rgba(139,107,255,.12);border:1px solid rgba(139,107,255,.34);color:#e7e1ff;
+    font-size:12.5px;line-height:1.45;
+  }
+  .discovery button:active{transform:scale(.99)}
+  .discovery .meta{display:block;color:#9c93c8;font-size:11px;margin-top:2px}
+  .scan-row{margin:0 0 10px}
 </style>
 </head>
 <body>
 <div class="wrap">
   <div class="brand">
-    <div class="logo">S</div>
-    <h1>超级管家</h1>
+    <div class="logo">B</div>
+    <h1>BattleStar</h1>
     <p class="tagline">Super Butler · 家庭 AI 控制台</p>
   </div>
 
   <div class="card">
-    <label for="hub">Hub 地址</label>
-    <input id="hub" type="url" inputmode="url" autocomplete="url" spellcheck="false"
-           placeholder="http://192.168.1.10:7317">
-    <p class="hint">运行 <code>node hub/server.js</code> 的电脑的局域网地址，默认端口 <code>7317</code>。</p>
+    <div class="row2">
+      <div>
+        <label for="hub">母机地址（自动发现可留空）</label>
+        <input id="hub" type="url" inputmode="url" autocomplete="url" spellcheck="false"
+               placeholder="http://192.168.1.10:7317">
+      </div>
+      <div>
+        <label for="port">端口</label>
+        <input id="port" type="number" inputmode="numeric" min="1" max="65535" value="7317">
+      </div>
+    </div>
+    <p class="hint">打开后自动扫描同一 Wi-Fi 网段的母机；默认端口 <code>7317</code>。也可以手动填写地址。</p>
+
+    <div class="scan-row">
+      <button id="scanBtn" class="btn ghost" type="button" style="width:100%">扫描局域网，自动发现母机</button>
+    </div>
+    <div id="discovery" class="discovery"></div>
 
     <label for="token">管理员令牌</label>
     <input id="token" type="password" autocomplete="off" spellcheck="false"
@@ -104,7 +127,7 @@
     <div id="warn" class="warn">未检测到 App 桥接（直接在浏览器打开时只能试用「测试连接」，且 Hub 需允许 CORS）。请把本页放进 APK 的 assets 中使用。</div>
   </div>
 
-  <p class="foot">v<span id="ver">0.1.0</span> · 令牌仅保存在本机应用私有存储，不会上传</p>
+  <p class="foot">BattleStar v<span id="ver">0.1.0</span> · 令牌仅保存在本机应用私有存储，不会上传</p>
 </div>
 
 <script>
@@ -137,6 +160,103 @@
   function setBusy(busy) {
     $("testBtn").disabled = busy;
     $("saveBtn").disabled = busy;
+  }
+
+  var discoveryPoll = 0;
+  var discoveryStop = 0;
+
+  function portValue() {
+    var value = parseInt($("port").value, 10);
+    if (!value || value < 1 || value > 65535) value = 7317;
+    return value;
+  }
+
+  function renderDiscovery(data) {
+    var box = $("discovery");
+    var list = (data && data.results) || [];
+    box.innerHTML = "";
+    if (!list.length) return;
+    for (var i = 0; i < list.length; i++) {
+      (function (item) {
+        var btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = item.url || ("http://" + item.ip + ":" + (data.port || 7317));
+        var meta = document.createElement("span");
+        meta.className = "meta";
+        meta.textContent = (item.name || "Hub") + (item.version ? " · v" + item.version : "") + " · 点击使用";
+        btn.appendChild(meta);
+        btn.addEventListener("click", function () {
+          $("hub").value = item.url;
+          setStatus("已选择 " + item.url + "，请输入管理员令牌", "ok");
+        });
+        box.appendChild(btn);
+      })(list[i]);
+    }
+    if (list.length === 1 && !$("hub").value.trim()) {
+      $("hub").value = list[0].url;
+      setStatus("自动发现母机 " + list[0].url + "，请输入管理员令牌", "ok");
+    } else if (list.length > 1) {
+      setStatus("发现 " + list.length + " 台母机，请点选一台", "info");
+    }
+  }
+
+  function pollDiscovery() {
+    if (!bridge || typeof bridge.getDiscovery !== "function") return;
+    var data;
+    try {
+      data = JSON.parse(bridge.getDiscovery());
+    } catch (e) {
+      $("scanBtn").disabled = false;
+      setStatus("扫描状态读取失败，请手动填写母机地址", "err");
+      return;
+    }
+    if (data.error && !data.running && !(data.results || []).length) {
+      setStatus(data.error, "err");
+    } else if (!data.running && (data.results || []).length) {
+      renderDiscovery(data);
+    }
+    if (data.running) {
+      discoveryPoll = setTimeout(pollDiscovery, 450);
+    } else {
+      $("scanBtn").disabled = false;
+      clearTimeout(discoveryStop);
+      if (!(data.results || []).length) {
+        setStatus(data.error || "未发现母机，请手动填写地址或检查端口", "err");
+      }
+    }
+  }
+
+  function scanLan() {
+    var port = portValue();
+    $("port").value = String(port);
+    if (!bridge || typeof bridge.startDiscovery !== "function") {
+      setStatus("当前为浏览器环境，不能自动扫描；请手动填写母机地址", "info");
+      return;
+    }
+    clearTimeout(discoveryPoll);
+    clearTimeout(discoveryStop);
+    $("discovery").innerHTML = "";
+    $("scanBtn").disabled = true;
+    setStatus("正在扫描局域网 " + port + " 端口…", "info");
+    try {
+      var started = JSON.parse(bridge.startDiscovery(String(port)));
+      if (!started.ok) {
+        $("scanBtn").disabled = false;
+        setStatus((started && started.message) || "无法启动扫描", "err");
+        return;
+      }
+    } catch (e) {
+      $("scanBtn").disabled = false;
+      setStatus("无法启动扫描：" + String(e), "err");
+      return;
+    }
+    discoveryPoll = setTimeout(pollDiscovery, 300);
+    discoveryStop = setTimeout(function () {
+      if ($("scanBtn").disabled) {
+        $("scanBtn").disabled = false;
+        setStatus("扫描超时，请确认手机与母机在同一 Wi-Fi，或手动填写地址", "err");
+      }
+    }, 25000);
   }
 
   function testConnection() {
@@ -209,7 +329,7 @@
     }
     $("hub").value = base;
     if (!bridge || typeof bridge.saveConfig !== "function") {
-      setStatus("请在「超级管家」APK 内保存配置（当前为浏览器环境）", "err");
+      setStatus("请在「BattleStar」APK 内保存配置（当前为浏览器环境）", "err");
       return;
     }
     setBusy(true);
@@ -252,6 +372,7 @@
         var cfg = JSON.parse(bridge.getConfig());
         if (cfg.hubUrl) $("hub").value = cfg.hubUrl;
         if (cfg.token) $("token").value = cfg.token;
+        if (cfg.hubPort) $("port").value = String(cfg.hubPort);
         if (typeof bridge.appVersion === "function") {
           var v = bridge.appVersion();
           if (v) $("ver").textContent = v;
@@ -260,11 +381,21 @@
       } catch (e) {}
     }
     var saved = normalizeUrl($("hub").value);
-    if (saved) $("hub").value = saved;
+    if (saved) {
+      $("hub").value = saved;
+      try {
+        var parsed = new URL(saved);
+        if (parsed.port) $("port").value = parsed.port;
+      } catch (e) {}
+    }
 
     $("testBtn").addEventListener("click", testConnection);
     $("saveBtn").addEventListener("click", saveAndEnter);
     $("resetBtn").addEventListener("click", resetConfig);
+    $("scanBtn").addEventListener("click", scanLan);
+    $("port").addEventListener("change", function () {
+      if (!$("hub").value.trim()) scanLan();
+    });
     $("token").addEventListener("keydown", function (e) {
       if (e.key === "Enter") { e.preventDefault(); saveAndEnter(); }
     });
@@ -273,8 +404,18 @@
     });
     $("hub").addEventListener("blur", function () {
       var base = normalizeUrl($("hub").value);
-      if (base) $("hub").value = base;
+      if (base) {
+        try {
+          var u = new URL(base);
+          if (!u.port && u.protocol === "http:") base += ":" + portValue();
+        } catch (e) {}
+        $("hub").value = base;
+      }
     });
+    if (!bridge) return;
+    if (!$("hub").value.trim()) {
+      setTimeout(scanLan, 250);
+    }
   }
 
   if (document.readyState === "loading") {

@@ -71,6 +71,7 @@ public class MainActivity extends Activity {
     private SharedPreferences prefs;
     private WebView webView;
     private Bridge bridge;
+    private final HubDiscovery hubDiscovery = new HubDiscovery();
     private volatile boolean bridgeAllowed = false;
     private boolean bridgeAdded = false;
     private boolean showingError = false;
@@ -375,11 +376,11 @@ public class MainActivity extends Activity {
         NotificationManager nm = notificationManager();
         if (nm == null) return;
         NotificationChannel progress = new NotificationChannel(
-                TASK_PROGRESS_CHANNEL, "管家任务进度", NotificationManager.IMPORTANCE_LOW);
+                TASK_PROGRESS_CHANNEL, "BattleStar 任务进度", NotificationManager.IMPORTANCE_LOW);
         progress.setDescription("正在执行的任务进度（常驻通知栏）");
         progress.setShowBadge(false);
         NotificationChannel done = new NotificationChannel(
-                TASK_DONE_CHANNEL, "管家任务完成", NotificationManager.IMPORTANCE_DEFAULT);
+                TASK_DONE_CHANNEL, "BattleStar 任务完成", NotificationManager.IMPORTANCE_DEFAULT);
         done.setDescription("任务完成、失败或超时提醒");
         nm.createNotificationChannel(progress);
         nm.createNotificationChannel(done);
@@ -475,7 +476,7 @@ public class MainActivity extends Activity {
 
             Notification.Builder b = new Notification.Builder(this, channel)
                     .setSmallIcon(icon)
-                    .setContentTitle("超级管家 · " + label)
+                    .setContentTitle("BattleStar · " + label)
                     .setContentText(truncateText(instruction, 90))
                     .setStyle(new Notification.BigTextStyle().bigText(detail))
                     .setContentIntent(taskPendingIntent(notifyId))
@@ -521,6 +522,16 @@ public class MainActivity extends Activity {
                 o.put("hubUrl", hub == null ? "" : hub);
                 o.put("token", token == null ? "" : token);
                 o.put("appVersion", APP_VERSION);
+                int hubPort = 7317;
+                try {
+                    if (hub != null && !hub.isEmpty()) {
+                        URL parsed = new URL(hub);
+                        if (parsed.getPort() > 0) hubPort = parsed.getPort();
+                    }
+                } catch (Exception ignored) {
+                    // keep default port
+                }
+                o.put("hubPort", hubPort);
             } catch (Exception e) {
                 return errorJson("internal", "读取配置失败");
             }
@@ -586,6 +597,28 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public String appVersion() {
             return APP_VERSION;
+        }
+
+        @JavascriptInterface
+        public String startDiscovery(String port) {
+            if (!bridgeAllowed) return errorJson("forbidden", "仅允许在本地配置页调用");
+            int value = 7317;
+            try {
+                if (port != null && !port.trim().isEmpty()) value = Integer.parseInt(port.trim());
+            } catch (Exception ignored) {
+                value = 7317;
+            }
+            try {
+                return hubDiscovery.start(value);
+            } catch (Exception e) {
+                return errorJson("internal", "启动局域网扫描失败");
+            }
+        }
+
+        @JavascriptInterface
+        public String getDiscovery() {
+            if (!bridgeAllowed) return errorJson("forbidden", "仅允许在本地配置页调用");
+            return hubDiscovery.snapshot();
         }
 
         @JavascriptInterface

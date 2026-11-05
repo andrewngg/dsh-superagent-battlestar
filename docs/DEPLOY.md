@@ -173,11 +173,11 @@ node device-agent/agent.js --hub http://192.168.1.10:7317 --join-code <joinCode>
 
 ### 4.1 安装 APK
 
-把 `dist/SuperButler-0.1.0.apk` 传到手机安装（允许「安装未知来源应用」）。
+把 `dist/BattleStar-0.1.0.apk` 传到手机安装（允许「安装未知来源应用」）。
 或使用 adb：
 
 ```bash
-adb install -r dist/SuperButler-0.1.0.apk
+adb install -r dist/BattleStar-0.1.0.apk
 ```
 
 ### 4.2 首次连接

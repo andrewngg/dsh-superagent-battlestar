@@ -47,7 +47,7 @@ public class ButlerNotificationService extends Service {
         prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         notificationManager = getSystemService(NotificationManager.class);
         createChannel();
-        startForegroundCompat(buildNotification("超级管家", "正在连接管家…", "常驻通知已开启", -1));
+        startForegroundCompat(buildNotification("BattleStar", "正在连接管家…", "常驻通知已开启", -1));
         worker = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -80,7 +80,7 @@ public class ButlerNotificationService extends Service {
     private void createChannel() {
         if (notificationManager == null) return;
         NotificationChannel channel = new NotificationChannel(
-                CHANNEL_ID, "超级管家常驻状态", NotificationManager.IMPORTANCE_LOW);
+                CHANNEL_ID, "BattleStar 常驻状态", NotificationManager.IMPORTANCE_LOW);
         channel.setDescription("任务进度、在线与待命主机数量");
         channel.setShowBadge(false);
         channel.setSound(null, null);
@@ -101,7 +101,7 @@ public class ButlerNotificationService extends Service {
                 updateFromHub();
             } catch (Exception e) {
                 Log.w(TAG, "poll failed", e);
-                publish("超级管家", "无法连接 Hub", "点击打开控制台", -1);
+                publish("BattleStar", "无法连接 Hub", "点击打开控制台", -1);
             }
             try {
                 Thread.sleep(POLL_MS);
@@ -116,13 +116,13 @@ public class ButlerNotificationService extends Service {
         String token = prefs.getString(KEY_TOKEN, "");
         hub = normalizeHub(hub);
         if (hub == null || token == null || token.trim().isEmpty()) {
-            publish("超级管家", "未配置 Hub，请打开 App 连接", "常驻通知已开启", -1);
+            publish("BattleStar", "未配置 Hub，请打开 App 连接", "常驻通知已开启", -1);
             return;
         }
 
         JSONObject snapshot = fetchSnapshot(hub, token.trim());
         if (snapshot == null) {
-            publish("超级管家", "无法连接 Hub", hub, -1);
+            publish("BattleStar", "无法连接 Hub", hub, -1);
             return;
         }
 
@@ -135,7 +135,7 @@ public class ButlerNotificationService extends Service {
             int percent = progressOf(active);
             String sub = (percent >= 0 ? percent + "%" : statusLabel(status))
                     + (device.isEmpty() ? "" : " · " + device);
-            publish("超级管家 · 任务执行中", instruction, sub, percent);
+            publish("BattleStar · 任务执行中", instruction, sub, percent);
             return;
         }
 
@@ -157,7 +157,7 @@ public class ButlerNotificationService extends Service {
         if (total <= 0) total = online;
         String text = online + " 台在线 · " + idle + " 台待命";
         if (total > online) text += "（共 " + total + " 台）";
-        publish("超级管家 · 待命中", text, "无进行中任务", -1);
+        publish("BattleStar · 待命中", text, "无进行中任务", -1);
     }
 
     private JSONObject fetchSnapshot(String hub, String token) {

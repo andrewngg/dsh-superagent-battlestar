@@ -84,7 +84,7 @@ function defaults() {
   return {
     projectRoot,
     hubPort: 7317,
-    hubHost: '127.0.0.1',
+    hubHost: '0.0.0.0',
     autoStart: true,
     dataDir: path.join(projectRoot, 'hub', 'data'),
     githubUser: '',
@@ -307,7 +307,7 @@ export function apply(ctx, rawConfig = {}) {
     const args = [
       script,
       '--port', String(state.settings.hubPort),
-      '--host', String(state.settings.hubHost || '127.0.0.1'),
+      '--host', String(state.settings.hubHost || '0.0.0.0'),
       '--data-dir', state.settings.dataDir,
     ]
     if (state.settings.adminToken) args.push('--admin-token', String(state.settings.adminToken))

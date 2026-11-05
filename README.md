@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%E2%89%A518-339933)](package.json)
 [![DSH Plugin](https://img.shields.io/badge/DeepSeek%20Harness-plugin-4B67B4)](docs/DSH-PLUGIN.md)
-[![Android](https://img.shields.io/badge/Android-8.0%2B-3DDC84)](dist/SuperButler-0.1.0.apk)
+[![Android](https://img.shields.io/badge/Android-8.0%2B-3DDC84)](dist/BattleStar-0.1.0.apk)
 
 一个可私有部署的**多设备 AI 编排中枢**：
 
@@ -178,10 +178,12 @@ node device-agent/agent.js \
 ### 手机控制端（APK / 浏览器）
 
 > 这里是**控制端**，不是工作机。手机工作机是 Mika，见上面的工作机表格与 [docs/MIKA-PHONE.md](docs/MIKA-PHONE.md)。
+> APK 品牌名已改为 **BattleStar**（包名仍为 `com.superbutler.app`，可直接覆盖安装旧版）。
 
 - 浏览器直接打开 `http://<母机IP>:7317/m?token=<管理员令牌>`，可添加到主屏幕；
-- 或安装 [dist/SuperButler-0.1.0.apk](dist/SuperButler-0.1.0.apk)（Android 8+，测试签名；构建/安装见 [docs/APK.md](docs/APK.md)）。
-- 首次打开填写 Hub 地址与管理员令牌，点「测试连接」→「进入管家」。
+- 或安装 [dist/BattleStar-0.1.0.apk](dist/BattleStar-0.1.0.apk)（Android 8+，测试签名；构建/安装见 [docs/APK.md](docs/APK.md)）。
+- APK 首次打开会自动扫描同一 Wi-Fi 网段的 Hub（默认端口 7317），发现后只需填管理员令牌，不用记母机 IP；也可改端口手动扫描。
+- 首次打开自动发现母机（或手动填 Hub 地址），再填管理员令牌，点「测试连接」→「进入管家」。
 - 任务执行时通知栏显示**常驻进度条**，完成后推送完成/失败提醒；Android 13+ 首次启动需允许通知权限。
 - APK「设置 → 手机通知（APK）」可开启**常驻通知**：有任务时显示任务进度，没有任务时显示 `X 台在线 · Y 台待命`。
 
@@ -221,7 +223,7 @@ super-butler/
 ├─ shared/                 # manifest 规范化 / 匹配 / 评分（Hub 与代理共用）
 ├─ dsh-plugin/             # DSH 插件：侧边栏控制台 + 私人密钥设置
 ├─ android/                # APK 工程 + 手工构建流水线
-├─ dist/                   # 构建产物：SuperButler-0.1.0.apk、icon-512.png
+├─ dist/                   # 构建产物：BattleStar-0.1.0.apk、icon-512.png
 ├─ scripts/                # demo.js / smoke-test.js / simulate-devices.js
 ├─ docs/                   # INSTALL / WORKER-SETUP / PROTOCOL / ARCHITECTURE / DEPLOY / APK / SECOND-MACHINE / MIKA-PHONE / DSH-PLUGIN
 ├─ CREDITS.md              # 第三方来源、许可证、商标与 AGPL 合规说明
@@ -297,7 +299,7 @@ node scripts/demo.js
 2. **设备产物回传**：ComfyUI 图片/文件上传到 Hub 并在手机端预览。
 3. **DSH 深度适配**：直接对接 DSH Web API / 插件协议。
 4. **家庭成员与权限**：查看 / 发指令 / 管理设备分级。
-5. **通知与 APK 增强**：任务完成推送、扫码配对、mDNS 自动发现、离线缓存。
+5. **通知与 APK 增强**：更完善的自动发现（mDNS/跨网段）、扫码配对、离线缓存。
 
 ## 许可证与致谢
 

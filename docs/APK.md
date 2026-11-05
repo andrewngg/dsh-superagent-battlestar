@@ -1,9 +1,10 @@
 # Android APK：安装、使用与构建
 
-产物：`dist/SuperButler-0.1.0.apk`（115,636 bytes，约 0.11 MB）
+产物：`dist/BattleStar-0.1.0.apk`（115,635 bytes，约 0.11 MB）
 包名：`com.superbutler.app` · minSdk 26（Android 8.0+）· targetSdk 36 · versionName 0.1.0
 
-App 是一个轻量原生 WebView 壳：首次启动配置 Hub 地址与管理员令牌，之后直接加载 Hub 的手机控制台 `/m?token=...`。
+App 名称：**BattleStar**（包名仍为 `com.superbutler.app`，可覆盖安装旧版）。
+App 是一个轻量原生 WebView 壳：首次启动自动扫描局域网中的 Hub；发现后填管理员令牌，之后直接加载 `/m?token=...`。
 所有设备/任务/指令功能都在 Hub 的 Web 控制台里，APK 负责安全保存配置、免 CORS 测试连接与快速进入。
 
 ---
@@ -14,7 +15,7 @@ App 是一个轻量原生 WebView 壳：首次启动配置 Hub 地址与管理�
 
 ```bash
 adb devices
-adb install -r dist/SuperButler-0.1.0.apk
+adb install -r dist/BattleStar-0.1.0.apk
 ```
 
 ### 方式 B：手机直接安装
@@ -41,7 +42,26 @@ adb install -r dist/SuperButler-0.1.0.apk
 > Hub 地址必须是手机能直接访问的地址：不要填 `127.0.0.1`（那是手机自己）；
 > Windows 防火墙首次运行需允许「专用网络」。
 
-## 3. 功能
+## 3. 自动发现母机
+
+首次打开（或清除配置后）BattleStar 会自动扫描**同一 Wi-Fi 局域网**：
+
+1. 读取手机当前 IPv4 地址与 `/24` 网段；
+2. 并发请求该网段 `1..254` 的 `http://<ip>:<port>/api/health`；
+3. 识别返回 `ok:true` 且带 `protocol` 的 Hub，显示“已发现母机”；
+4. 只有一台时自动填入地址，用户只需填写管理员令牌；多台时点选。
+
+- 端口默认 `7317`，可在配置页修改后重新扫描；
+- Hub 必须监听 `0.0.0.0:7317`，不能只监听 `127.0.0.1`；
+- Windows 防火墙需放行 7317（专用网络）：
+  ```powershell
+  # 管理员 PowerShell，只需执行一次
+  New-NetFirewallRule -DisplayName "BattleStar Hub 7317" -Direction Inbound -Action Allow `
+    -Protocol TCP -LocalPort 7317 -Profile Private,Domain
+  ```
+- 扫描只访问局域网 `/api/health`，不需要令牌、不会访问公网；手机和母机必须在同一 Wi-Fi/热点。
+
+## 3.1 功能
 
 - **状态**：在线/离线设备、负载、最后心跳、models / profiles / gateways / skills 能力标签。
 - **指令**：输入自然语言指令，可选要求（模型 / 技能 / 目标设备 / 优先级 / 超时），发送后显示路由到哪台设备及原因；无匹配时显示排队与排除原因。
@@ -58,8 +78,8 @@ adb install -r dist/SuperButler-0.1.0.apk
   - 关闭开关会停止前台服务并移除常驻通知。
 - **实时**：SSE 推送，断线自动重连；不可用时降级 5 秒轮询。
 
-> 通知由 WebView 页面通过 `ButlerBridge.taskProgress / taskFinished` 驱动，App 进程被系统杀掉后不会继续更新；
-> 当前不是前台服务，也不做服务端推送。
+> 任务通知由 WebView 页面通过 `ButlerBridge.taskProgress / taskFinished` 驱动；常驻通知由原生前台服务轮询 Hub。
+> 系统强行停止 App 后，两者都会停止更新。
 
 ## 4. 从源码构建
 
@@ -105,7 +125,7 @@ powershell -ExecutionPolicy Bypass -File android\build-apk.ps1
 ```
 
 脚本会：`aapt2 compile` → `aapt2 link` → `javac` → `d8` → `jar` 写入 `classes.dex` → `zipalign` → `apksigner sign`，
-输出 `dist/SuperButler-0.1.0.apk`，并打印 badging、签名校验与大小。首次运行会自动生成测试 keystore。
+输出 `dist/BattleStar-0.1.0.apk`，并打印 badging、签名校验与大小。首次运行会自动生成测试 keystore。
 
 可选参数：
 
@@ -127,13 +147,13 @@ python android\generate-icons.py
 
 ```powershell
 # 包名 / 版本 / SDK / launcher
-toolchain\android-sdk\build-tools\36.0.0\aapt2.exe dump badging dist\SuperButler-0.1.0.apk
+toolchain\android-sdk\build-tools\36.0.0\aapt2.exe dump badging dist\BattleStar-0.1.0.apk
 
 # 签名
-toolchain\jdk\bin\java.exe -jar toolchain\android-sdk\build-tools\36.0.0\lib\apksigner.jar verify --print-certs --verbose dist\SuperButler-0.1.0.apk
+toolchain\jdk\bin\java.exe -jar toolchain\android-sdk\build-tools\36.0.0\lib\apksigner.jar verify --print-certs --verbose dist\BattleStar-0.1.0.apk
 
 # 对齐
-toolchain\android-sdk\build-tools\36.0.0\zipalign.exe -c -v 4 dist\SuperButler-0.1.0.apk
+toolchain\android-sdk\build-tools\36.0.0\zipalign.exe -c -v 4 dist\BattleStar-0.1.0.apk
 ```
 
 本机实测（2026-11-05）：
@@ -145,13 +165,13 @@ toolchain\android-sdk\build-tools\36.0.0\zipalign.exe -c -v 4 dist\SuperButler-0
 | INTERNET / cleartext / exported | 均正确 |
 | apksigner verify | v1/v2/v3 有效 |
 | zipalign | Verification successful |
-| 体积 | 115,636 bytes |
+| 体积 | 115,635 bytes |
 
 ## 5. 实现说明
 
 - 单 Activity + WebView，纯 Java（无 Kotlin/AndroidX）。
 - 首启加载 `file:///android_asset/setup.html`；配置保存到应用私有 `SharedPreferences`。
-- JS Bridge：`getConfig / saveConfig / clearConfig / openDashboard / openSetup / testConnection / appVersion / toast`；
+- JS Bridge：`getConfig / saveConfig / clearConfig / openDashboard / openSetup / testConnection / appVersion / toast / startDiscovery / getDiscovery / taskProgress / taskFinished / getNotificationSettings / setPersistentNotification`；
   只在本地配置页与「已配置 Hub 的同主机页面」注入，方法内部再次校验来源，URL 仅接受 http(s)。
 - 测试连接走原生 `HttpURLConnection`，避免 `file://` → `http://` 的 CORS 问题。
 - WebView 开启 JS / DOM storage / 宽视口 / mixed content；UA 追加 `SuperButlerApp/0.1.0`。
@@ -173,6 +193,7 @@ toolchain\android-sdk\build-tools\36.0.0\zipalign.exe -c -v 4 dist\SuperButler-0
 
 - 自签名/私有 CA 的 HTTPS 会被 WebView 拒绝；家庭内网建议直接用 http（APK 已允许 cleartext）。
 - 无服务端推送、离线缓存、下拉刷新、自适应图标、扫码配对（v1 范围）；任务通知依赖 WebView 页面运行，App 被系统彻底杀死后不再更新。
+- 自动发现只扫描当前 Wi-Fi 的 `/24` 网段和指定端口；不同网段/VLAN 或防火墙拦截时需手动填写或放行 7317。
 - 通知权限（Android 13+）需用户在首次启动时允许；未授权时任务照常执行，只是不显示通知。
 - 常驻通知依赖前台服务轮询 Hub（默认 5 秒）；Hub 不可达时通知会显示“无法连接 Hub”。
 - 无 AndroidX，UI 依赖系统 Material 主题。

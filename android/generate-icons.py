@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""超级管家（Super Butler）启动图标生成器（仅依赖 Pillow）。
+"""BattleStar 启动图标生成器（仅依赖 Pillow）。
 
 产物：
   android/res/mipmap-{mdpi,hdpi,xhdpi,xxhdpi,xxxhdpi}/ic_launcher.png  (48/72/96/144/192)
   dist/icon-512.png                                                  (512x512 商店展示图)
 
-风格：深蓝紫渐变圆角方块 + 白色衬线「S」管家字标 + 淡光晕与细描边。
+风格：深蓝紫渐变圆角方块 + 白色衬线「B」字标 + 淡光晕与细描边。
 """
 
 import os
@@ -86,7 +86,7 @@ def add_glow(img):
     return base
 
 
-def add_monogram(img, text="S"):
+def add_monogram(img, text="B"):
     size = img.size[0]
     font_path = find_font()
     font_size = int(size * 0.60)

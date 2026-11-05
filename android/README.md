@@ -1,12 +1,14 @@
-# 超级管家 Android APK（WebView 客户端）
+# BattleStar Android APK（WebView 客户端）
 
-纯 Java、无 Gradle / 无 Android Studio / 无 AndroidX 的 Android 客户端：首次启动配置 Hub 地址与管理员令牌，
+纯 Java、无 Gradle / 无 Android Studio / 无 AndroidX 的 Android 客户端：首次启动自动扫描局域网 Hub，
 之后直接加载 Hub 的手机控制台 `/m?token=<token>`。构建完全基于本地已下载的 Android 工具链，可离线重复执行。
 
 - 包名：`com.superbutler.app`
+- 名称：**BattleStar**
 - 版本：`versionCode 1` / `versionName 0.1.0`
 - minSdk **26**（Android 8.0）/ targetSdk **36**
-- 产物：`dist/SuperButler-0.1.0.apk`（约 **0.11 MB**，远低于 5 MB 目标）
+- 产物：`dist/BattleStar-0.1.0.apk`（约 **0.11 MB**，远低于 5 MB 目标）
+- 自动发现：扫描当前 Wi-Fi `/24` 的 7317 端口，找到 Hub 后只填令牌
 - 任务通知：通知栏进度条、完成/失败提醒；设置中可开启**常驻通知**，空闲时显示在线/待命主机数
 
 ---
@@ -31,7 +33,7 @@ android/
 └─ build/                       # 中间产物（可删除，构建时重建）
 
 dist/
-├─ SuperButler-0.1.0.apk        # 可安装 APK
+├─ BattleStar-0.1.0.apk        # 可安装 APK
 └─ icon-512.png                 # 512×512 商店/展示图
 ```
 
@@ -117,11 +119,11 @@ launchable-activity: name='com.superbutler.app.MainActivity'  label='超级管�
 Signer #1 certificate DN: CN=Super Butler, OU=Home Lab, O=Super Butler, L=KL, C=MY
 Signer #1 certificate SHA-256 digest: 45658ac253be038ab8dc6da60a99743afc7a3a5ac9c6b04d9f498cb7f914bb5a
 
-APK : dist\SuperButler-0.1.0.apk
-大小: 115636 bytes (0.11 MB)    # 上限目标 5 MB
+APK : dist\BattleStar-0.1.0.apk
+大小: 115635 bytes (0.12 MB)    # 上限目标 5 MB
 ```
 
-APK 关键条目（`jar tf dist/SuperButler-0.1.0.apk`）：
+APK 关键条目（`jar tf dist/BattleStar-0.1.0.apk`）：
 
 ```
 AndroidManifest.xml
@@ -142,18 +144,18 @@ Verified using v2 scheme (APK Signature Scheme v2): true
 Verified using v3 scheme (APK Signature Scheme v3): true
 ```
 
-对齐校验：`zipalign -c -v 4 dist\SuperButler-0.1.0.apk` → `Verification successful`。
+对齐校验：`zipalign -c -v 4 dist\BattleStar-0.1.0.apk` → `Verification successful`。
 
 > 每次重新构建 APK 的 SHA-256 可能不同（zip 时间戳/签名块），以 `build-apk.ps1` 末尾打印的值为准。
 
 ## 5. 安装与使用
 
-APK 在本目录 `dist/SuperButler-0.1.0.apk`。安装方式（任选其一）：
+APK 在本目录 `dist/BattleStar-0.1.0.apk`。安装方式（任选其一）：
 
 ```powershell
 # 手机开启「开发者选项 → USB 调试」并连接后：
 adb devices
-adb install -r "dist\SuperButler-0.1.0.apk"
+adb install -r "dist\BattleStar-0.1.0.apk"
 ```
 
 - 也可以把 APK 拷到手机（微信/网盘/数据线）直接点击安装，需允许「安装未知来源应用」。
