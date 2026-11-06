@@ -1414,28 +1414,36 @@
       if (!availableSkillIds.has(id)) state.selectedSkills.delete(id);
     }
 
-    const wrap = $('#skill-chips');
-    wrap.replaceChildren();
-    if (!agg.skills.length) {
-      wrap.appendChild(el('span', { className: 'chip-empty', text: '当前在线设备未申报技能，可发送不带技能要求的指令。' }));
-    } else {
-      for (const skill of agg.skills) {
-        const selected = state.selectedSkills.has(skill.id);
-        const chip = el('button', {
-          type: 'button',
-          className: 'chip',
-          dataset: { kind: 'skill', skillId: skill.id },
-          attrs: { 'aria-pressed': selected ? 'true' : 'false', title: `${skill.id} · ${skill.count} 台在线设备可用` },
-          text: skill.name,
-        });
-        chip.addEventListener('click', () => {
-          if (state.selectedSkills.has(skill.id)) state.selectedSkills.delete(skill.id);
-          else state.selectedSkills.add(skill.id);
-          chip.setAttribute('aria-pressed', state.selectedSkills.has(skill.id) ? 'true' : 'false');
-          updateComposerTarget();
+    const skillSelect = $('#skill-select');
+    if (skillSelect) {
+      const selected = Array.from(state.selectedSkills).filter((id) => availableSkillIds.has(id));
+      const jq = window.jQuery;
+      const $select = jq && jq.fn && jq.fn.select2 ? jq(skillSelect) : null;
+      if ($select && $select.hasClass('select2-hidden-accessible')) $select.select2('destroy');
+      skillSelect.replaceChildren(...agg.skills.map((skill) => el('option', {
+        value: skill.id,
+        text: `${skill.name || skill.id}${skill.count > 1 ? ` · ${skill.count} 台` : ''}`,
+      })));
+      skillSelect.disabled = agg.skills.length === 0;
+      if (!skillSelect.dataset.bound) {
+        skillSelect.addEventListener('change', () => {
+          state.selectedSkills = new Set(Array.from(skillSelect.selectedOptions).map((option) => option.value));
           state.sigs.composer = '';
+          updateComposerTarget();
         });
-        wrap.appendChild(chip);
+        skillSelect.dataset.bound = '1';
+      }
+      if ($select) {
+        $select.select2({
+          width: '100%',
+          placeholder: '选择技能（可多选）',
+          allowClear: true,
+          closeOnSelect: false,
+          language: { noResults: () => '没有可用技能' },
+        });
+        $select.val(selected).trigger('change.select2');
+      } else {
+        for (const option of Array.from(skillSelect.options)) option.selected = selected.includes(option.value);
       }
     }
     setText('#skills-hint', agg.skills.length ? `可多选 · ${agg.skills.length} 项可用` : '暂无可选技能');

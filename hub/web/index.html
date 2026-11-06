@@ -7,7 +7,8 @@
   <meta name="color-scheme" content="dark">
   <meta name="description" content="BattleStar 多设备智能管家控制台">
   <title>BattleStar · 控制台</title>
-  <link rel="stylesheet" href="assets/style.css?v=20261106b">
+  <link rel="stylesheet" href="assets/vendor/select2.min.css">
+  <link rel="stylesheet" href="assets/style.css?v=20261106c">
 </head>
 <body>
   <!-- 静态图标库（仅常量路径，不承载用户数据） -->
@@ -195,10 +196,10 @@
 
               <div class="field">
                 <div class="field-label-row">
-                  <label>技能要求</label>
+                  <label for="skill-select">技能要求</label>
                   <span class="muted" id="skills-hint">可多选</span>
                 </div>
-                <div id="skill-chips" class="chip-select" role="group" aria-label="技能要求"></div>
+                <select id="skill-select" multiple></select>
               </div>
 
               <div class="field-row">
@@ -307,6 +308,8 @@
     <p id="loading-text">正在连接中枢…</p>
   </div>
 
-  <script src="assets/app.js?v=20261106b" defer></script>
+  <script src="assets/vendor/jquery.min.js" defer></script>
+  <script src="assets/vendor/select2.min.js" defer></script>
+  <script src="assets/app.js?v=20261106c" defer></script>
 </body>
 </html>
