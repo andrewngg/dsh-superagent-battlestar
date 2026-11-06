@@ -12,6 +12,7 @@ const TASK_STATUS = Object.freeze({
   QUEUED: 'queued',
   ASSIGNED: 'assigned',
   RUNNING: 'running',
+  WAITING: 'waiting',
   COMPLETED: 'completed',
   FAILED: 'failed',
   CANCELLED: 'cancelled',

@@ -60,6 +60,7 @@ test('注册后设备出现在快照中，能力与运行字段按协议规范�
     tasksQueued: 0,
     tasksAssigned: 0,
     tasksRunning: 0,
+    tasksWaiting: 0,
     tasksCompleted: 0,
     tasksFailed: 0,
   });

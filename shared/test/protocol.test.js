@@ -25,6 +25,7 @@ test('协议版本与状态常量稳定', () => {
     'queued',
     'running',
     'timeout',
+    'waiting',
   ]);
   assert.equal(LIMITS.HEARTBEAT_TTL_MS, 30000);
 });

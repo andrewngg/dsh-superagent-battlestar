@@ -629,6 +629,17 @@ class Agent {
     return (this.device && this.device.id) || (this.client && this.client.deviceId) || null;
   }
 
+  _answerTask(taskId, text) {
+    if (!taskId) return;
+    const record = this.running.get(taskId);
+    if (!record) {
+      this.log.warn(`回答命令：任务 ${taskId} 当前未在执行`);
+      return;
+    }
+    if (record.answerResolve) record.answerResolve(text);
+    else record.pendingAnswer = String(text || '');
+  }
+
   _cancelTask(taskId, reason = 'cancelled') {
     if (!taskId) return;
     const record = this.running.get(taskId);
@@ -638,6 +649,7 @@ class Agent {
     }
     this.log.info(`收到取消指令，正在中止任务 ${taskId}`);
     record.cancelled = true;
+    if (record.answerReject) record.answerReject(new Error('任务已取消'));
     record.controller.abort(reason);
   }
 
@@ -648,6 +660,10 @@ class Agent {
 
     if (type === 'cancel_task' || type === 'cancel') {
       this._cancelTask(taskId, 'cancelled');
+      return;
+    }
+    if (type === 'answer_task') {
+      this._answerTask(taskId, payload.text);
       return;
     }
     if (type !== 'run_task') {
@@ -691,7 +707,46 @@ class Agent {
       timedOut: false,
       cancelled: false,
       finished: false,
+      waiting: false,
+      pendingAnswer: null,
+      answerResolve: null,
+      answerReject: null,
     };
+    const requestAnswer = (question, mikaTaskId) => new Promise((resolve, reject) => {
+      const deliver = (text) => {
+        record.waiting = false;
+        record.answerResolve = null;
+        record.answerReject = null;
+        record.pendingAnswer = null;
+        if (record.timeoutTimer) record.timeoutTimer.refresh();
+        this.client.progress(taskId, { message: '收到回答，继续执行…', waiting: false }).catch(() => {});
+        resolve(String(text || ''));
+      };
+      if (record.pendingAnswer !== null && record.pendingAnswer !== undefined) {
+        deliver(record.pendingAnswer);
+        return;
+      }
+      record.waiting = true;
+      record.answerResolve = deliver;
+      record.answerReject = (err) => {
+        record.answerResolve = null;
+        record.answerReject = null;
+        record.waiting = false;
+        reject(err instanceof Error ? err : new Error(String(err)));
+      };
+      const onAbort = () => {
+        if (record.answerReject) record.answerReject(new Error('任务已中止'));
+      };
+      if (controller.signal.aborted) onAbort();
+      else controller.signal.addEventListener('abort', onAbort, { once: true });
+      this.client.progress(taskId, {
+        message: '等待回答',
+        waiting: true,
+        question: String(question || ''),
+        mikaTaskId: String(mikaTaskId || ''),
+        percent: undefined,
+      }).catch(() => {});
+    });
     this.running.set(taskId, record);
     this.stats.commands += 1;
     this.log.info(`开始执行任务 ${taskId}：${shorten(task.instruction, 40)}`);
@@ -724,6 +779,7 @@ class Agent {
         },
         signal: controller.signal,
         progress,
+        requestAnswer,
         log: this.log,
       });
       if (record.finished) return;

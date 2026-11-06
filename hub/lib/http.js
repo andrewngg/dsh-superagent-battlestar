@@ -19,6 +19,7 @@ const { LIMITS } = protocol;
 const TASK_ACTION_RE = /^tasks\/([^/]+)\/(ack|progress|result)$/;
 const TASK_ADMIN_RE = /^\/api\/tasks\/([^/]+)(?:\/(cancel|retry|archive|unarchive))?$/;
 const TASK_FOLLOW_RE = /^\/api\/tasks\/([^/]+)\/follow-up$/;
+const TASK_ANSWER_RE = /^\/api\/tasks\/([^/]+)\/answer$/;
 const TASK_BODY_BYTES = 8 * 1024 * 1024;
 const MAX_ATTACHMENT_COUNT = 3;
 const MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024;
@@ -261,6 +262,22 @@ async function handleRequest(hub, req, res) {
       return sendJson(res, 200, { tasks });
     }
     throw notFound('接口不存在');
+  }
+
+  const answerMatch = TASK_ANSWER_RE.exec(pathname);
+  if (answerMatch) {
+    requireAdmin(hub, req, url);
+    if (method !== 'POST') throw notFound('接口不存在');
+    let taskId;
+    try {
+      taskId = decodeURIComponent(answerMatch[1]);
+    } catch {
+      throw badRequest('任务 ID 非法');
+    }
+    const body = await readJsonBody(req);
+    const task = hub._requireTask(taskId);
+    const answered = hub.answerTask(task, body.text);
+    return sendJson(res, 200, { task: hub.taskToJson(answered) });
   }
 
   const followMatch = TASK_FOLLOW_RE.exec(pathname);

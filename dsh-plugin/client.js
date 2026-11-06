@@ -34,6 +34,7 @@ window.__ModuleLoader__.load({
       archive: '归档', unarchive: '取消归档', delete: '删除', deleteConfirm: '确定删除这个任务吗？删除后不可恢复。',
       archived: '已归档', subtasks: 'Agnes 子任务', plan: 'Agnes 长任务拆分',
       followUp: '继续', followUpPrompt: '输入下一步或修正要求（会带上一步上下文）：', followUpCreated: '已创建下一步任务', thread: '任务线程',
+      answer: '回答 Mika', answerPrompt: 'Mika 需要你的回答：', answerSent: '回答已发送，Mika 继续执行', waitingAnswer: '等待回答',
       hubSettings: 'Hub 设置', projectRoot: '项目目录', hubPort: 'Hub 端口', autoStart: 'DSH 启动时自动启动 Hub',
       defaultModel: '默认模型', githubUser: 'GitHub 用户名', keys: '私人账号与密钥',
       keysHint: '密钥保存在 Harness credentials 服务，不写入项目文件；留空表示不修改。',
@@ -71,6 +72,7 @@ window.__ModuleLoader__.load({
       archive: 'Archive', unarchive: 'Unarchive', delete: 'Delete', deleteConfirm: 'Delete this task permanently?',
       archived: 'Archived', subtasks: 'Agnes subtasks', plan: 'Agnes task split',
       followUp: 'Continue', followUpPrompt: 'Enter the next step or correction (previous context will be included):', followUpCreated: 'Follow-up task created', thread: 'Task thread',
+      answer: 'Answer Mika', answerPrompt: 'Mika needs your answer:', answerSent: 'Answer sent; Mika continues', waitingAnswer: 'Waiting for answer',
       hubSettings: 'Hub settings', projectRoot: 'Project root', hubPort: 'Hub port', autoStart: 'Start hub with DSH',
       defaultModel: 'Default model', githubUser: 'GitHub username', keys: 'Private accounts and keys',
       keysHint: 'Keys are stored in the Harness credential service, not project files. Leave blank to keep.',
@@ -163,7 +165,7 @@ window.__ModuleLoader__.load({
     function statusTone(status) {
       if (status === 'completed') return 'ok'
       if (status === 'failed' || status === 'timeout' || status === 'cancelled') return 'err'
-      if (status === 'running' || status === 'assigned') return 'warn'
+      if (status === 'running' || status === 'assigned' || status === 'waiting') return 'warn'
       return 'idle'
     }
 
@@ -271,7 +273,7 @@ window.__ModuleLoader__.load({
         h('div', { style: { ...row, justifyContent: 'space-between', alignItems: 'flex-start' } },
           h('div', { style: { flex: 1, minWidth: 0 } },
             h('div', { style: { ...row, gap: 8 } },
-              h(Badge, { tone: statusTone(task.status) }, task.status),
+              h(Badge, { tone: statusTone(task.status) }, task.status === 'waiting' ? t('waitingAnswer') : task.status),
               task.archived ? h(Badge, { tone: 'idle' }, t('archived')) : null,
               h('strong', { style: { fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, task.instruction),
             ),
@@ -282,6 +284,9 @@ window.__ModuleLoader__.load({
           h('div', { style: { ...row, gap: 6 } },
             task.status === 'running' || task.status === 'assigned' || task.status === 'queued'
               ? h('button', { style: btn(false), onClick: () => onAction(task.id, 'cancel') }, t('cancel'))
+              : null,
+            task.status === 'waiting'
+              ? h('button', { style: btn(true), onClick: () => onAction(task.id, 'answer') }, t('answer'))
               : null,
             task.status === 'failed' || task.status === 'timeout' || task.status === 'cancelled'
               ? h('button', { style: btn(false), onClick: () => onAction(task.id, 'retry') }, t('retry'))
@@ -336,6 +341,15 @@ window.__ModuleLoader__.load({
                 maxHeight: 180, overflow: 'auto', lineHeight: 1.5,
               },
             }, task.output.text)
+          : null,
+        task.status === 'waiting' && task.progress && task.progress.question
+          ? h('div', {
+              style: {
+                marginTop: 8, padding: 9, borderRadius: 8, background: 'rgba(255,191,90,0.08)',
+                border: '1px solid rgba(255,191,90,0.28)', color: '#ffe2ad', whiteSpace: 'pre-wrap',
+                fontSize: 12, lineHeight: 1.5,
+              },
+            }, `${t('answerPrompt')}\n${task.progress.question}`)
           : null,
         task.error ? h('div', { style: { ...muted, color: COLORS.err, marginTop: 6 } }, `${t('error')}: ${task.error}`) : null,
       )
@@ -621,6 +635,17 @@ window.__ModuleLoader__.load({
           })
           await load()
           setMessage(t('followUpCreated'))
+          return
+        }
+        if (action === 'answer') {
+          const text = window.prompt(t('answerPrompt'))
+          if (!text || !text.trim()) return
+          await call(`/tasks/${encodeURIComponent(id)}/answer`, {
+            method: 'POST',
+            body: JSON.stringify({ text: text.trim() }),
+          })
+          await load()
+          setMessage(t('answerSent'))
           return
         }
         if (action === 'delete') {

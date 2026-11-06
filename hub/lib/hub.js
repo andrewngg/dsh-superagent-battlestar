@@ -15,7 +15,7 @@ const { createPlan } = require('./planner');
 const util = require('./util');
 
 const { LIMITS, TASK_STATUS } = protocol;
-const ACTIVE_TASK_STATUSES = new Set([TASK_STATUS.ASSIGNED, TASK_STATUS.RUNNING]);
+const ACTIVE_TASK_STATUSES = new Set([TASK_STATUS.ASSIGNED, TASK_STATUS.RUNNING, TASK_STATUS.WAITING]);
 const TERMINAL_TASK_STATUSES = new Set([
   TASK_STATUS.COMPLETED,
   TASK_STATUS.FAILED,
@@ -483,6 +483,7 @@ class Hub {
     let tasksQueued = 0;
     let tasksAssigned = 0;
     let tasksRunning = 0;
+    let tasksWaiting = 0;
     let tasksCompleted = 0;
     let tasksFailed = 0;
     for (const task of this.tasks.values()) {
@@ -490,6 +491,7 @@ class Hub {
       if (task.status === TASK_STATUS.QUEUED) tasksQueued += 1;
       else if (task.status === TASK_STATUS.ASSIGNED) tasksAssigned += 1;
       else if (task.status === TASK_STATUS.RUNNING) tasksRunning += 1;
+      else if (task.status === TASK_STATUS.WAITING) tasksWaiting += 1;
       else if (task.status === TASK_STATUS.COMPLETED) tasksCompleted += 1;
       else if (task.status === TASK_STATUS.FAILED || task.status === TASK_STATUS.TIMEOUT) tasksFailed += 1;
     }
@@ -499,6 +501,7 @@ class Hub {
       tasksQueued,
       tasksAssigned,
       tasksRunning,
+      tasksWaiting,
       tasksCompleted,
       tasksFailed,
     };
@@ -1286,7 +1289,7 @@ class Hub {
       this._dispatchFailure(task, device, 'ack timeout');
     }, this.ackTimeoutMs);
     this._setTaskTimer(task.id, 'timeout', () => {
-      if (task.status !== TASK_STATUS.ASSIGNED && task.status !== TASK_STATUS.RUNNING) return;
+      if (task.status !== TASK_STATUS.ASSIGNED && task.status !== TASK_STATUS.RUNNING && task.status !== TASK_STATUS.WAITING) return;
       this._timeoutTask(task);
     }, this._timeoutMsFor(task));
     this.broadcast('task.updated', { task: this.taskToJson(task) });
@@ -1376,13 +1379,13 @@ class Hub {
 
   /** 派发失败（ack 超时/设备离线）：maxAttempts 内重排，否则 failed。 */
   _dispatchFailure(task, device, reason) {
-    if (task.status !== TASK_STATUS.ASSIGNED && task.status !== TASK_STATUS.RUNNING) return;
-    const wasRunning = task.status === TASK_STATUS.RUNNING;
+    if (task.status !== TASK_STATUS.ASSIGNED && task.status !== TASK_STATUS.RUNNING && task.status !== TASK_STATUS.WAITING) return;
+    const wasActive = task.status === TASK_STATUS.RUNNING || task.status === TASK_STATUS.WAITING;
     this._clearTaskTimers(task.id);
     this._removeTaskCommand(device, task.id);
 
     if (task.attempts < task.maxAttempts) {
-      if (wasRunning) this._adjustLoad(device.id, -1);
+      if (wasActive) this._adjustLoad(device.id, -1);
       const avoid = new Set(task._avoidDeviceIds || []);
       avoid.add(device.id);
       task._avoidDeviceIds = [...avoid];
@@ -1427,14 +1430,14 @@ class Hub {
   }
 
   _finishTask(task, status, { output, error, eventMessage } = {}) {
-    const wasRunning = task.status === TASK_STATUS.RUNNING;
+    const wasActive = task.status === TASK_STATUS.RUNNING || task.status === TASK_STATUS.WAITING;
     this._clearTaskTimers(task.id);
     task.status = status;
     task.finishedAt = protocol.nowIso();
     task.updatedAt = task.finishedAt;
     if (output !== undefined) task.output = output;
     if (error !== undefined) task.error = error;
-    if (wasRunning) this._adjustLoad(task.assignedDeviceId, -1);
+    if (wasActive) this._adjustLoad(task.assignedDeviceId, -1);
     if (status === TASK_STATUS.COMPLETED) {
       task.progress = { message: '任务完成', percent: 100, logs: [], at: task.finishedAt };
     }
@@ -1481,12 +1484,37 @@ class Hub {
     return task;
   }
 
+  answerTask(task, text) {
+    if (!task) throw notFound('任务不存在');
+    if (task.status !== TASK_STATUS.WAITING) throw conflict('任务当前不在等待回答');
+    const value = util.str(text, 4000);
+    if (!value) throw badRequest('回答内容不能为空');
+    const device = this.devices.get(task.assignedDeviceId);
+    if (!device) throw conflict('任务执行设备已不存在');
+    if (!device.online) throw conflict('设备当前离线，无法发送回答');
+    this.enqueueCommand(device, {
+      id: protocol.randomId('cmd'),
+      type: 'answer_task',
+      taskId: task.id,
+      createdAt: protocol.nowIso(),
+      payload: { taskId: task.id, text: value },
+    });
+    task.updatedAt = protocol.nowIso();
+    this._pushTaskEvent(task, 'progress', '回答已发送，等待设备继续执行');
+    this.broadcast('task.updated', { task: this.taskToJson(task) });
+    this.schedulePersist();
+    return task;
+  }
+
   handleProgress(device, taskId, body) {
     const task = this._requireTask(taskId);
     if (task.assignedDeviceId !== device.id) throw conflict('任务未分配给该设备');
     if (!ACTIVE_TASK_STATUSES.has(task.status)) throw conflict(`任务状态 ${task.status} 不接受进度`);
     const input = util.isPlainObject(body) ? body : {};
     const message = util.str(input.message, 500);
+    const waiting = input.waiting === true;
+    if (waiting) task.status = TASK_STATUS.WAITING;
+    else if (task.status === TASK_STATUS.WAITING) task.status = TASK_STATUS.RUNNING;
     task.progress = {
       message,
       percent: Number.isFinite(input.percent) ? util.clampInt(input.percent, 0, 0, 100) : null,
@@ -1495,10 +1523,13 @@ class Hub {
         .slice(-20)
         .map((line) => util.str(line, 300))
         .filter(Boolean),
+      waiting,
+      question: waiting ? util.str(input.question, 4000) : '',
+      mikaTaskId: util.str(input.mikaTaskId, 120),
       at: protocol.nowIso(),
     };
     task.updatedAt = task.progress.at;
-    this._pushTaskEvent(task, 'progress', message || `进度 ${task.progress.percent == null ? '' : `${task.progress.percent}%`}`.trim());
+    this._pushTaskEvent(task, 'progress', message || (waiting ? '等待回答' : `进度 ${task.progress.percent == null ? '' : `${task.progress.percent}%`}`.trim()));
     this.broadcast('task.updated', { task: this.taskToJson(task) });
     this.schedulePersist();
     return task;
@@ -1528,7 +1559,7 @@ class Hub {
     if (task.isPlan) {
       for (const childId of task.childTaskIds || []) {
         const child = this.tasks.get(childId);
-        if (child && [TASK_STATUS.QUEUED, TASK_STATUS.ASSIGNED, TASK_STATUS.RUNNING].includes(child.status)) {
+        if (child && [TASK_STATUS.QUEUED, TASK_STATUS.ASSIGNED, TASK_STATUS.RUNNING, TASK_STATUS.WAITING].includes(child.status)) {
           try {
             this.cancelTask(child);
           } catch {
@@ -1539,7 +1570,7 @@ class Hub {
       this._finishTask(task, TASK_STATUS.CANCELLED, { error: null, eventMessage: '长任务已取消' });
       return task;
     }
-    if (![TASK_STATUS.QUEUED, TASK_STATUS.ASSIGNED, TASK_STATUS.RUNNING].includes(task.status)) {
+    if (![TASK_STATUS.QUEUED, TASK_STATUS.ASSIGNED, TASK_STATUS.RUNNING, TASK_STATUS.WAITING].includes(task.status)) {
       throw conflict(`任务状态 ${task.status} 不可取消`);
     }
     const device = task.assignedDeviceId ? this.devices.get(task.assignedDeviceId) : null;
@@ -1609,3 +1640,6 @@ module.exports = {
   TERMINAL_TASK_STATUSES,
   ACTIVE_TASK_STATUSES,
 };
+
+
+

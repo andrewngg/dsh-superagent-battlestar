@@ -1295,6 +1295,7 @@ function createMikaExecutor(options = {}) {
     async run(ctx = {}) {
       const signal = ctx.signal || null;
       const progress = typeof ctx.progress === 'function' ? ctx.progress : async () => {};
+      const requestAnswer = typeof ctx.requestAnswer === 'function' ? ctx.requestAnswer : null;
       const task = ctx.task || {};
       const instruction = String(task.instruction || '').trim();
       if (!instruction) return { output: { text: '' }, error: '任务指令为空' };
@@ -1329,6 +1330,22 @@ function createMikaExecutor(options = {}) {
           if (status === 'failed' || status === 'cancelled') break;
           if (status === 'waiting_for_answer' || status === 'waiting_on_phone') {
             const question = snapshot.question || (snapshot.options ? JSON.stringify(snapshot.options) : '');
+            if (status === 'waiting_for_answer' && requestAnswer) {
+              const answer = await requestAnswer(question || 'Mika 需要你的回答', taskId);
+              if (answer) {
+                await progress('回答已收到，正在让 Mika 继续…', Math.min(90, 20 + waits * 6));
+                const answered = await runCli(
+                  [...connectionArgs(), '--json', 'task', 'answer', taskId, '--text', answer],
+                  { timeout: 120000, signal },
+                );
+                const answerError = mikaErrorText(answered.payload);
+                if (answerError) {
+                  return { output: { text: truncate(answered.stdout || answered.stderr, 2000) }, error: `Mika：${answerError}` };
+                }
+                if (answered.payload && answered.payload.task_id) snapshot = answered.payload;
+                continue;
+              }
+            }
             return {
               output: {
                 text: truncate(extractMikaAnswer(snapshot) || JSON.stringify(snapshot), maxOutputChars),

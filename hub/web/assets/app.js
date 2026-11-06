@@ -22,8 +22,9 @@
     failed: { label: '失败', tone: 'failed' },
     cancelled: { label: '已取消', tone: 'cancelled' },
     timeout: { label: '超时', tone: 'timeout' },
+    waiting: { label: '等待回答', tone: 'waiting' },
   };
-  const ACTIVE_STATUS = new Set(['queued', 'assigned', 'running']);
+  const ACTIVE_STATUS = new Set(['queued', 'assigned', 'running', 'waiting']);
   const RETRYABLE_STATUS = new Set(['failed', 'timeout', 'cancelled']);
 
   const DEVICE_STATUS = { idle: '空闲', busy: '忙碌', degraded: '降级', offline: '离线', disabled: '已禁用' };
@@ -1816,6 +1817,13 @@
     );
     card.appendChild(top);
     card.appendChild(el('p', { className: 'task-instruction', text: task.instruction || '（无指令内容）' }));
+    const waitingQuestion = status === 'waiting' && task.progress && task.progress.question ? String(task.progress.question) : '';
+    if (waitingQuestion) {
+      card.appendChild(el('div', { className: 'task-question' },
+        el('strong', { text: 'Mika 需要你的回答' }),
+        el('div', { className: 'task-question-text', text: waitingQuestion }),
+      ));
+    }
     const taskAttachments = Array.isArray(task.attachments) ? task.attachments : [];
     if (taskAttachments.length) {
       card.appendChild(el('div', { className: 'task-attachments' },
@@ -1879,6 +1887,10 @@
     if (!ACTIVE_STATUS.has(status)) {
       actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'follow-up' } },
         icon('send'), el('span', { text: '继续此任务' })));
+    }
+    if (status === 'waiting') {
+      actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'answer' } },
+        icon('send'), el('span', { text: '回答 Mika' })));
     }
     actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'copy-instruction' } },
       icon('copy'), el('span', { text: '复制指令' })));
@@ -2791,6 +2803,12 @@
     if (ACTIVE_STATUS.has(status)) {
       nodes.push(el('button', { type: 'button', className: 'btn btn-danger btn-sm', onclick: () => cancelTask(task.id) }, icon('x'), '取消任务'));
     }
+    if (status === 'waiting') {
+      nodes.push(el('button', {
+        type: 'button', className: 'btn btn-primary btn-sm',
+        onclick: () => { hideDrawer(); answerMikaTask(task.id); },
+      }, icon('send'), '回答 Mika'));
+    }
     if (RETRYABLE_STATUS.has(status)) {
       nodes.push(el('button', { type: 'button', className: 'btn btn-primary btn-sm', onclick: () => retryTask(task.id) }, icon('refresh'), '重新排队'));
     }
@@ -2936,8 +2954,34 @@
     toast('已载入原指令，修改后点发送即可重新创建任务', 'info');
   }
 
-  function startFollowUp(id) {
+  async function answerMikaTask(id) {
     const task = state.tasks.find((item) => item.id === id);
+    if (!task) return;
+    const question = task.progress && task.progress.question ? task.progress.question : 'Mika 需要你的回答';
+    const text = window.prompt(`Mika 需要你的回答：\n\n${question}\n\n请输入回答内容：`, '');
+    if (text === null) return;
+    const answer = String(text).trim();
+    if (!answer) {
+      toast('回答内容不能为空', 'warn');
+      return;
+    }
+    try {
+      const res = await api(`/api/tasks/${encodeURIComponent(id)}/answer`, {
+        method: 'POST',
+        body: { text: answer },
+        timeout: 15000,
+      });
+      if (res && res.task) upsertTask(res.task);
+      state.sigs.tasks = '';
+      scheduleSnapshot(300);
+      toast('回答已发送，Mika 继续执行', 'success');
+    } catch (err) {
+      if (err.status === 401) return handleAuthLost(err.message);
+      toast(err.message || '发送回答失败', 'error');
+    }
+  }
+
+  function startFollowUp(id) {    const task = state.tasks.find((item) => item.id === id);
     if (!task) return;
     state.followUpTaskId = id;
     const step = Number.isFinite(task.threadStep) ? task.threadStep + 1 : 2;
@@ -3114,6 +3158,7 @@
           if (task) copyText(task.instruction || '', '指令已复制');
         } else if (action === 'edit-instruction') editTaskInstruction(id);
         else if (action === 'follow-up') startFollowUp(id);
+        else if (action === 'answer') answerMikaTask(id);
         else if (action === 'toggle-events') {
           if (state.expandedEvents.has(id)) state.expandedEvents.delete(id);
           else state.expandedEvents.add(id);

@@ -112,3 +112,30 @@ test('任务附件：元数据与设备命令回传', async (t) => {
   assert.equal(command.payload.attachments[0].data, data);
   await request(env.base, 'DELETE', `/api/tasks/${res.json.task.id}`, { headers: adminHeaders(env) });
 });
+
+test('Mika 等待回答：waiting 状态与 answer 命令', async (t) => {
+  const env = await startTestHub(t);
+  const device = await registerDevice(env, makeManifest({ skills: [{ id: 'phone-control', name: '手机操控' }] }));
+  const deviceObj = env.hub.devices.get(device.deviceId);
+  const task = env.hub.createTask({ instruction: '手机上执行任务', requirements: { skills: ['phone-control'] }, timeoutSec: 60 });
+  env.hub.handleAck(deviceObj, task.id);
+  env.hub.handleProgress(deviceObj, task.id, {
+    message: '等待回答',
+    waiting: true,
+    question: '请回答问题',
+    mikaTaskId: 'mika-task-1',
+  });
+  assert.equal(env.hub.getTask(task.id).status, 'waiting');
+  assert.equal(env.hub.getTask(task.id).progress.question, '请回答问题');
+  const answer = await request(env.base, 'POST', `/api/tasks/${task.id}/answer`, {
+    headers: adminHeaders(env),
+    body: { text: '我的回答' },
+  });
+  assert.equal(answer.status, 200);
+  const command = env.hub.devices.get(device.deviceId).commands.find((item) => item.type === 'answer_task');
+  assert.equal(command.payload.text, '我的回答');
+  env.hub.handleProgress(deviceObj, task.id, { message: '回答已收到', waiting: false });
+  assert.equal(env.hub.getTask(task.id).status, 'running');
+  env.hub.handleResult(deviceObj, task.id, { ok: true, output: { text: '完成' } });
+  assert.equal(env.hub.getTask(task.id).status, 'completed');
+});
