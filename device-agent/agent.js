@@ -252,6 +252,7 @@ class Agent {
       hubUrl: this.hubUrl,
       env: this.env,
       cwd: this.options.cwd,
+      stateDir: this.stateDir,
       log: this.log,
     });
 
@@ -588,6 +589,9 @@ class Agent {
       priority: Number.isFinite(payload.priority) ? payload.priority : 5,
       timeoutSec: Number.isFinite(payload.timeoutSec) ? payload.timeoutSec : 300,
       context: isPlainObject(payload.context) ? payload.context : {},
+      threadId: typeof payload.threadId === 'string' ? payload.threadId : '',
+      replyToTaskId: typeof payload.replyToTaskId === 'string' ? payload.replyToTaskId : null,
+      threadStep: Number.isFinite(payload.threadStep) ? payload.threadStep : 1,
       createdAt: command.createdAt || null,
     };
   }
@@ -640,6 +644,17 @@ class Agent {
     }
 
     const task = this._taskFromCommand(command);
+    const context = isPlainObject(task.context) ? task.context : {};
+    if (context.previousInstruction || context.previousOutput || context.previousError) {
+      const parts = ['【BattleStar 任务线程上下文】'];
+      if (Number.isFinite(context.step)) parts.push(`当前是第 ${context.step} 步。`);
+      if (context.previousInstruction) parts.push(`上一步任务：\n${String(context.previousInstruction).slice(0, 6000)}`);
+      if (context.previousOutput) parts.push(`上一步输出：\n${String(context.previousOutput).slice(0, 8000)}`);
+      if (context.previousError) parts.push(`上一步错误：\n${String(context.previousError).slice(0, 2000)}`);
+      if (context.historySummary) parts.push(`更早的步骤：\n${String(context.historySummary).slice(0, 4000)}`);
+      parts.push('【当前任务】');
+      task.instruction = `${parts.join('\n\n')}\n\n${task.instruction}`;
+    }
     const controller = new AbortController();
     const record = {
       taskId,

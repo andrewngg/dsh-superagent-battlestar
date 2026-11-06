@@ -397,6 +397,10 @@ class Hub {
         .slice(-this.taskEventLimit),
       parentTaskId: util.str(raw.parentTaskId, 80) || null,
       childTaskIds: util.arr(raw.childTaskIds).map((id) => util.str(id, 80)).filter(Boolean),
+      threadId: util.str(raw.threadId, 80) || id,
+      replyToTaskId: util.str(raw.replyToTaskId, 80) || null,
+      threadStep: util.clampInt(raw.threadStep, 1, 1, 10000),
+      context: util.isPlainObject(raw.context) ? raw.context : null,
       isPlan: raw.isPlan === true,
       archived: raw.archived === true,
       archivedAt: util.str(raw.archivedAt, 40) || null,
@@ -447,6 +451,10 @@ class Hub {
       progress: task.progress ? { ...task.progress } : null,
       parentTaskId: task.parentTaskId || null,
       childTaskIds: [...(task.childTaskIds || [])],
+      threadId: task.threadId || task.id,
+      replyToTaskId: task.replyToTaskId || null,
+      threadStep: Number.isFinite(task.threadStep) ? task.threadStep : 1,
+      context: task.context ? { ...task.context } : null,
       isPlan: Boolean(task.isPlan),
       archived: Boolean(task.archived),
       archivedAt: task.archivedAt || null,
@@ -897,8 +905,9 @@ class Hub {
     const { ok, errors, value } = protocol.normalizeTaskRequest(input);
     if (!ok) throw badRequest(errors.join('；'));
     const now = protocol.nowIso();
+    const taskId = protocol.randomId('task');
     const task = {
-      id: protocol.randomId('task'),
+      id: taskId,
       instruction: value.instruction,
       requirements: value.requirements,
       priority: value.priority,
@@ -917,6 +926,10 @@ class Hub {
       progress: null,
       parentTaskId: input.parentTaskId ? String(input.parentTaskId) : null,
       childTaskIds: [],
+      threadId: typeof input.threadId === 'string' && input.threadId ? input.threadId : taskId,
+      replyToTaskId: typeof input.replyToTaskId === 'string' && input.replyToTaskId ? input.replyToTaskId : null,
+      threadStep: Number.isFinite(Number(input.threadStep)) ? Math.max(1, Math.trunc(Number(input.threadStep))) : 1,
+      context: util.isPlainObject(input.context) ? input.context : null,
       isPlan: false,
       archived: false,
       archivedAt: null,
@@ -930,6 +943,58 @@ class Hub {
     this.routeTask(task);
     this.schedulePersist();
     return task;
+  }
+
+  createFollowUp(source, input = {}) {
+    if (!source) throw notFound('源任务不存在');
+    if (!TERMINAL_TASK_STATUSES.has(source.status)) {
+      throw conflict('只能对已完成/失败/超时/已取消的任务继续');
+    }
+    const normalized = protocol.normalizeTaskRequest(input);
+    if (!normalized.ok) throw badRequest(normalized.errors.join('；'));
+    const value = normalized.value;
+    const threadTasks = [...this.tasks.values()]
+      .filter((task) => (task.threadId || task.id) === (source.threadId || source.id))
+      .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+    const previousOutput = source.output
+      ? (source.output.text || source.output.markdown || '')
+      : '';
+    const context = {
+      sourceTaskId: source.id,
+      threadId: source.threadId || source.id,
+      step: threadTasks.length + 1,
+      previousInstruction: source.instruction,
+      previousOutput: String(previousOutput).slice(0, 8000),
+      previousError: source.error || null,
+      previousStatus: source.status,
+      previousArtifacts: source.output && Array.isArray(source.output.artifacts)
+        ? source.output.artifacts.slice(0, 10)
+        : [],
+      historySummary: threadTasks
+        .slice(0, 10)
+        .map((task) => `${task.threadStep || 1}. [${task.status}] ${util.truncate(task.instruction, 120)}`)
+        .join('\n'),
+    };
+    const mergedRequirements = {
+      ...source.requirements,
+      skills: value.requirements.skills.length ? value.requirements.skills : source.requirements.skills,
+      tags: value.requirements.tags.length ? value.requirements.tags : source.requirements.tags,
+    };
+    if (value.requirements.model) mergedRequirements.model = value.requirements.model;
+    if (value.requirements.profile) mergedRequirements.profile = value.requirements.profile;
+    if (value.requirements.gateway) mergedRequirements.gateway = value.requirements.gateway;
+    if (value.requirements.deviceId) mergedRequirements.deviceId = value.requirements.deviceId;
+    return this.createTask({
+      instruction: value.instruction,
+      requirements: mergedRequirements,
+      priority: input.priority !== undefined ? value.priority : source.priority,
+      timeoutSec: input.timeoutSec !== undefined ? value.timeoutSec : source.timeoutSec,
+      maxAttempts: input.maxAttempts !== undefined ? value.maxAttempts : source.maxAttempts,
+      threadId: source.threadId || source.id,
+      replyToTaskId: source.id,
+      threadStep: context.step,
+      context,
+    });
   }
 
   shouldAutoSplit(input) {
@@ -965,6 +1030,7 @@ class Hub {
     if (!normalized.ok) throw badRequest(normalized.errors.join('；'));
     const value = normalized.value;
     const now = protocol.nowIso();
+    const parentThreadId = protocol.randomId('thread');
     const parent = {
       id: protocol.randomId('task'),
       instruction: value.instruction,
@@ -985,6 +1051,10 @@ class Hub {
       progress: { message: `Agnes 已拆分为 ${plan.subtasks.length} 个子任务`, percent: 0, logs: [], at: now },
       parentTaskId: null,
       childTaskIds: [],
+      threadId: parentThreadId,
+      replyToTaskId: null,
+      threadStep: 1,
+      context: null,
       isPlan: true,
       archived: false,
       archivedAt: null,
@@ -1010,6 +1080,8 @@ class Hub {
         timeoutSec: subtask.timeoutSec,
         maxAttempts: parent.maxAttempts,
         parentTaskId: parent.id,
+        threadId: parent.threadId,
+        threadStep: 1,
       });
       parent.childTaskIds.push(child.id);
     }
@@ -1053,9 +1125,10 @@ class Hub {
   }
 
   archiveTask(task, archived = true) {
-    const targets = task.isPlan
-      ? [task, ...(task.childTaskIds || []).map((id) => this.tasks.get(id)).filter(Boolean)]
-      : [task];
+    const threadTasks = [...this.tasks.values()].filter(
+      (item) => (item.threadId || item.id) === (task.threadId || task.id),
+    );
+    const targets = [...new Set([task, ...threadTasks, ...(task.childTaskIds || []).map((id) => this.tasks.get(id)).filter(Boolean)])];
     const at = protocol.nowIso();
     for (const item of targets) {
       item.archived = archived;
@@ -1068,7 +1141,14 @@ class Hub {
   }
 
   deleteTask(task) {
-    const ids = task.isPlan ? [task.id, ...(task.childTaskIds || [])] : [task.id];
+    const threadTasks = [...this.tasks.values()].filter(
+      (item) => (item.threadId || item.id) === (task.threadId || task.id),
+    );
+    const ids = [...new Set([
+      task.id,
+      ...threadTasks.map((item) => item.id),
+      ...(task.childTaskIds || []),
+    ])];
     for (const id of ids) {
       const item = this.tasks.get(id);
       if (!item) continue;
@@ -1220,7 +1300,14 @@ class Hub {
         requirements: { ...task.requirements },
         priority: task.priority,
         timeoutSec: task.timeoutSec,
-        context: { deviceName: device.name, requestedAt: protocol.nowIso() },
+        threadId: task.threadId,
+        replyToTaskId: task.replyToTaskId || null,
+        threadStep: task.threadStep || 1,
+        context: {
+          deviceName: device.name,
+          requestedAt: protocol.nowIso(),
+          ...(task.context || {}),
+        },
       },
     };
   }

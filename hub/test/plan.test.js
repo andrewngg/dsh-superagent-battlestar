@@ -46,8 +46,7 @@ test('长任务拆分：父任务包含子任务，子任务全部完成后父�
 
 test('任务归档与删除 API', async (t) => {
   const env = await startTestHub(t);
-  const task = await env.hub.createTask({ instruction: '普通任务', requirements: { skills: [] }, timeoutSec: 60 });
-  const archived = await request(env.base, 'POST', `/api/tasks/${task.id}/archive`, {
+  const task = await env.hub.createTask({ instruction: '普通任务', requirements: { skills: [] }, timeoutSec: 60 });  const archived = await request(env.base, 'POST', `/api/tasks/${task.id}/archive`, {
     headers: adminHeaders(env),
     body: {},
   });
@@ -61,4 +60,33 @@ test('任务归档与删除 API', async (t) => {
   const deleted = await request(env.base, 'DELETE', `/api/tasks/${task.id}`, { headers: adminHeaders(env) });
   assert.equal(deleted.status, 200);
   assert.equal(env.hub.getTask(task.id), null);
+});
+
+test('任务线程：follow-up 继承上下文并可级联归档/删除', async (t) => {
+  const env = await startTestHub(t);
+  const device = await registerDevice(env, makeManifest({ skills: [{ id: 'office-docx', name: 'Word' }] }));
+  const deviceObj = env.hub.devices.get(device.deviceId);
+  const source = env.hub.createTask({ instruction: '第一步', requirements: { skills: ['office-docx'] }, timeoutSec: 60 });
+  env.hub.handleAck(deviceObj, source.id);
+  env.hub.handleResult(deviceObj, source.id, { ok: true, output: { text: '第一步输出' } });
+  assert.equal(source.status, 'completed');
+
+  const res = await request(env.base, 'POST', `/api/tasks/${source.id}/follow-up`, {
+    headers: adminHeaders(env),
+    body: { instruction: '基于上一步继续' },
+  });
+  assert.equal(res.status, 200);
+  const follow = res.json.task;
+  assert.equal(follow.threadId, source.id);
+  assert.equal(follow.replyToTaskId, source.id);
+  assert.equal(follow.threadStep, 2);
+  assert.equal(follow.context.previousInstruction, '第一步');
+  assert.equal(follow.context.previousOutput, '第一步输出');
+
+  env.hub.archiveTask(source, true);
+  assert.equal(env.hub.getTask(source.id).archived, true);
+  assert.equal(env.hub.getTask(follow.id).archived, true);
+  env.hub.deleteTask(source);
+  assert.equal(env.hub.getTask(source.id), null);
+  assert.equal(env.hub.getTask(follow.id), null);
 });

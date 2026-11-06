@@ -159,6 +159,13 @@
               </div>
             </div>
             <form id="task-form" autocomplete="off">
+              <div id="followup-banner" class="followup-banner" hidden>
+                <div class="followup-copy">
+                  <strong id="followup-title">继续任务</strong>
+                  <span id="followup-desc" class="muted"></span>
+                </div>
+                <button type="button" class="link-btn" id="followup-cancel">取消</button>
+              </div>
               <div class="composer-input">
                 <label class="sr-only" for="instruction">指令内容</label>
                 <textarea id="instruction" name="instruction" rows="4" maxlength="8000"

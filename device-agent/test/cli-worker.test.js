@@ -137,3 +137,14 @@ test('hermesProfileHome：hermes-<profile> 映射到 profiles 目录', () => {
 test('stripAnsi：去掉终端颜色码', () => {
   assert.equal(worker.stripAnsi('\u001b[32mok\u001b[0m'), 'ok');
 });
+
+test('buildHermesArgs：会话续聊参数', () => {
+  const args = worker.buildHermesArgs({ instruction: '继续', sessionId: 'local-abc123' });
+  assert.ok(args.includes('--resume'));
+  assert.equal(args[args.indexOf('--resume') + 1], 'local-abc123');
+});
+
+test('parseCliArgs：解析任务线程 ID', () => {
+  const args = worker.parseCliArgs(['--instruction', '继续', '--thread-id', 'thread_abc']);
+  assert.equal(args.threadId, 'thread_abc');
+});

@@ -574,6 +574,15 @@ export function apply(ctx, rawConfig = {}) {
         })
         return json(res, out.status, out.data)
       }
+      const taskFollow = /^\/api\/tasks\/([^/]+)\/follow-up$/.exec(sub)
+      if (method === 'POST' && taskFollow) {
+        const body = await readBody(req)
+        const out = await hubRequest(`/api/tasks/${encodeURIComponent(taskFollow[1])}/follow-up`, {
+          method: 'POST',
+          body,
+        })
+        return json(res, out.status, out.data)
+      }
       const taskPath = /^\/api\/tasks\/([^/]+)$/.exec(sub)
       if (method === 'DELETE' && taskPath) {
         const out = await hubRequest(`/api/tasks/${encodeURIComponent(taskPath[1])}`, { method: 'DELETE' })
@@ -603,7 +612,7 @@ export function apply(ctx, rawConfig = {}) {
       if (method === 'GET' && (sub === '/' || sub === '')) {
         return json(res, 200, {
           name: 'BattleStar',
-          routes: ['/api/status', '/api/settings', '/api/snapshot', '/api/tasks', '/api/tasks/:id/archive', '/api/tasks/:id', '/api/devices/:id', '/api/test-credential', '/api/hub/start', '/api/hub/stop'],
+          routes: ['/api/status', '/api/settings', '/api/snapshot', '/api/tasks', '/api/tasks/:id/follow-up', '/api/tasks/:id/archive', '/api/tasks/:id', '/api/devices/:id', '/api/test-credential', '/api/hub/start', '/api/hub/stop'],
         })
       }
       return json(res, 404, { error: { code: 'not_found', message: `未知路由：${method} ${sub}` } })

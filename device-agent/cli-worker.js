@@ -25,7 +25,7 @@ const fs = require('node:fs');
 const fsp = fs.promises;
 const os = require('node:os');
 const path = require('node:path');
-const { spawn } = require('node:child_process');
+const { spawn, execFileSync } = require('node:child_process');
 
 const ANSI_RE = /\x1b\[[0-9;?]*[A-Za-z]/g;
 const CODE_RE = /(写代码|代码|脚本|实现|重构|修复|函数|类|接口|测试|编译|部署|html|css|javascript|typescript|python|node|api|\bbug\b|\bcode\b|\bfix\b|\bscript\b|\bbuild\b|\brefactor\b|\btest\b)/i;
@@ -134,15 +134,60 @@ function chooseBackend({ mode = 'auto', profile = '', instruction = '', allowShe
   return 'hermes';
 }
 
-function buildHermesArgs({ instruction, model = '', provider = '', skills = '', workdir = '', yolo = true }) {
+function buildHermesArgs({ instruction, model = '', provider = '', skills = '', sessionId = '', workdir = '', yolo = true }) {
   const args = ['--cli'];
   if (yolo) args.push('--yolo');
   if (model) args.push('-m', model);
   if (provider) args.push('--provider', provider);
   if (skills) args.push('--skills', skills);
+  if (sessionId) args.push('--resume', sessionId);
   if (workdir) args.push('--in', workdir);
   args.push('-z', String(instruction || ''));
   return args;
+}
+
+function readSessionMap() {
+  const file = nonEmptyString(process.env.BUTLER_CLI_SESSION_FILE);
+  if (!file) return {};
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8')) || {};
+  } catch {
+    return {};
+  }
+}
+
+function saveSessionId(threadId, sessionId) {
+  const file = nonEmptyString(process.env.BUTLER_CLI_SESSION_FILE);
+  if (!file || !threadId || !sessionId) return;
+  try {
+    const dir = path.dirname(file);
+    fs.mkdirSync(dir, { recursive: true });
+    const map = readSessionMap();
+    map[threadId] = sessionId;
+    fs.writeFileSync(file, JSON.stringify(map, null, 2));
+  } catch {
+    /* 会话缓存失败不影响本次任务 */
+  }
+}
+
+function extractHermesSessionId(text) {
+  const match = /(?:session[_\s-]*id|会话\s*ID)\s*[:=]\s*([A-Za-z0-9._:-]{6,})/i.exec(String(text || ''));
+  return match ? match[1] : '';
+}
+
+function listHermesSessionIds(exe, env, cwd) {
+  try {
+    const output = execFileSync(exe, ['sessions', 'list', '--limit', '10'], {
+      cwd,
+      env,
+      encoding: 'utf8',
+      timeout: 15000,
+      windowsHide: true,
+    });
+    return new Set([...String(output).matchAll(/local-[0-9a-f]{32,}/g)].map((match) => match[0]));
+  } catch {
+    return new Set();
+  }
 }
 
 /** 把工作机的前缀要求放在用户指令前，确保 Hermes 优先使用指定 skill。 */
@@ -248,6 +293,10 @@ function parseCliArgs(argv) {
         break;
       case '--skills':
         out.skills = value();
+        if (inline === undefined) i += 1;
+        break;
+      case '--thread-id':
+        out.threadId = value();
         if (inline === undefined) i += 1;
         break;
       case '--prompt-prefix':
@@ -408,23 +457,38 @@ async function runHermes(ctx) {
   const home = ctx.hermesHome;
   const exe = ctx.hermesExe;
   const profileHome = hermesProfileHome(home, ctx.profile);
-  const args = buildHermesArgs({
+  const sessionMap = readSessionMap();
+  const sessionId = ctx.threadId ? sessionMap[ctx.threadId] || '' : '';
+  const env = baseEnv({ HERMES_HOME: profileHome, HERMES_PROFILE: ctx.profile || '' });
+  const beforeSessions = ctx.threadId ? listHermesSessionIds(exe, env, ctx.workdir) : new Set();
+  const buildArgs = (resumeId) => buildHermesArgs({
     instruction: composePrompt(ctx.promptPrefix, ctx.instruction),
     model: ctx.model || '',
     provider: ctx.provider || '',
     skills: ctx.skills || '',
+    sessionId: resumeId,
     workdir: ctx.workdir,
     yolo: ctx.yolo !== false,
   });
-  const res = await runProcess({
+  const run = (resumeId) => runProcess({
     exe,
-    args,
+    args: buildArgs(resumeId),
     cwd: ctx.workdir,
-    env: baseEnv({ HERMES_HOME: profileHome, HERMES_PROFILE: ctx.profile || '' }),
+    env,
     timeoutMs: ctx.timeoutMs,
     label: 'Hermes CLI',
   });
+  let res = await run(sessionId);
+  // 会话 ID 失效/隐私模式重启时，回退到新会话，避免整个任务失败。
+  if (sessionId && res.code !== 0) res = await run('');
   const text = res.stdout.trim() || res.stderr.trim();
+  const foundSession = extractHermesSessionId(`${res.stdout}\n${res.stderr}`);
+  if (foundSession && ctx.threadId) saveSessionId(ctx.threadId, foundSession);
+  if (!foundSession && ctx.threadId) {
+    const afterSessions = listHermesSessionIds(exe, env, ctx.workdir);
+    const created = [...afterSessions].find((id) => !beforeSessions.has(id));
+    if (created) saveSessionId(ctx.threadId, created);
+  }
   if (res.code !== 0) {
     throw new Error(`Hermes CLI 退出码 ${res.code}${text ? `：${truncate(text, 300)}` : ''}`);
   }
@@ -517,6 +581,7 @@ async function runTask(options) {
     model: nonEmptyString(options.model),
     skills: nonEmptyString(options.skills),
     promptPrefix: nonEmptyString(options.promptPrefix),
+    threadId: nonEmptyString(options.threadId),
     provider: nonEmptyString(options.provider) || providerForModel(options.model, options.modelProviders),
     workdir,
     timeoutMs,

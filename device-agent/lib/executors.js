@@ -628,6 +628,7 @@ function createCliExecutor(options = {}) {
   const worker = nonEmptyString(cfg.worker) ? cfg.worker : path.join(__dirname, '..', 'cli-worker.js');
   const workdir = nonEmptyString(cfg.workdir) ? cfg.workdir : options.cwd || process.cwd();
   const mode = nonEmptyString(cfg.mode) ? cfg.mode : 'auto';
+  const stateDir = nonEmptyString(options.stateDir) ? options.stateDir : workdir;
   const timeoutMs = clampInt(cfg.timeoutMs, 5000, 60 * 60 * 1000, 15 * 60 * 1000);
   const maxOutputChars = clampInt(cfg.maxOutputChars, 200, 400000, 40000);
   const allowShell = cfg.allowShell === true;
@@ -659,6 +660,7 @@ function createCliExecutor(options = {}) {
       if (fallbackToHermes) args.push('--fallback-hermes');
       if (requirements.profile) args.push('--profile', String(requirements.profile));
       if (requirements.model) args.push('--model', String(requirements.model));
+      if (task.threadId) args.push('--thread-id', String(task.threadId));
       if (nonEmptyString(opencode.model)) args.push('--opencode-model', opencode.model);
       const skillList = Array.isArray(cfg.skills)
         ? cfg.skills.map((x) => nonEmptyString(x)).filter(Boolean).join(',')
@@ -675,6 +677,7 @@ function createCliExecutor(options = {}) {
       if (nonEmptyString(opencode.exe)) env.BUTLER_CLI_OPENCODE_EXE = opencode.exe;
       env.BUTLER_CLI_WORKDIR = workdir;
       env.BUTLER_CLI_TIMEOUT_MS = String(timeoutMs);
+      env.BUTLER_CLI_SESSION_FILE = path.join(stateDir, 'hermes-sessions.json');
       env.NO_COLOR = '1';
 
       const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'butler-cli-exec-'));
@@ -1434,6 +1437,7 @@ function createExecutor(options = {}) {
     config,
     env: options.env || process.env,
     cwd: options.cwd,
+    stateDir: options.stateDir,
     hubUrl: options.hubUrl,
     log: options.log,
   };

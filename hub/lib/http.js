@@ -18,6 +18,7 @@ const { LIMITS } = protocol;
 
 const TASK_ACTION_RE = /^tasks\/([^/]+)\/(ack|progress|result)$/;
 const TASK_ADMIN_RE = /^\/api\/tasks\/([^/]+)(?:\/(cancel|retry|archive|unarchive))?$/;
+const TASK_FOLLOW_RE = /^\/api\/tasks\/([^/]+)\/follow-up$/;
 
 // ---------------------------------------------------------------- 基础工具
 
@@ -235,6 +236,22 @@ async function handleRequest(hub, req, res) {
       return sendJson(res, 200, { tasks });
     }
     throw notFound('接口不存在');
+  }
+
+  const followMatch = TASK_FOLLOW_RE.exec(pathname);
+  if (followMatch) {
+    requireAdmin(hub, req, url);
+    if (method !== 'POST') throw notFound('接口不存在');
+    let sourceId;
+    try {
+      sourceId = decodeURIComponent(followMatch[1]);
+    } catch {
+      throw badRequest('任务 ID 非法');
+    }
+    const body = await readJsonBody(req);
+    const source = hub._requireTask(sourceId);
+    const task = hub.createFollowUp(source, body);
+    return sendJson(res, 200, { task: hub.taskToJson(task) });
   }
 
   const taskMatch = TASK_ADMIN_RE.exec(pathname);

@@ -196,6 +196,7 @@
     history: [],
     taskFilter: 'all',
     selectedSkills: new Set(),
+    followUpTaskId: null,
     routeTask: null,
     expandedEvents: new Set(),
     expandedOutput: new Set(),
@@ -1612,9 +1613,13 @@
     };
     setSendBusy(true);
     try {
-      const res = await api('/api/tasks', { method: 'POST', body: payload, timeout: 20000 });
+      const endpoint = state.followUpTaskId
+        ? `/api/tasks/${encodeURIComponent(state.followUpTaskId)}/follow-up`
+        : '/api/tasks';
+      const res = await api(endpoint, { method: 'POST', body: payload, timeout: 20000 });
       const task = res && res.task;
       if (!task) throw new Error('Hub 未返回任务信息');
+      const wasFollowUp = Boolean(state.followUpTaskId);
       upsertTask(task);
       state.sigs.stats = '';
       state.sigs.tasks = '';
@@ -1622,9 +1627,11 @@
       renderTasks();
       setRouteResult(task);
       textarea.value = '';
+      cancelFollowUp();
       updateComposerTarget();
       const assigned = !!task.assignedDeviceId;
-      toast(assigned ? `已分配给 ${task.assignedDeviceName || deviceName(task.assignedDeviceId)}` : '已排队，等待设备上线', assigned ? 'success' : 'warn');
+      const prefix = wasFollowUp ? '已创建下一步任务' : '';
+      toast(`${prefix}${prefix ? '，' : ''}${assigned ? `已分配给 ${task.assignedDeviceName || deviceName(task.assignedDeviceId)}` : '已排队，等待设备上线'}`, assigned ? 'success' : 'warn');
       const routeBox = $('#route-result');
       if (routeBox) routeBox.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
       scheduleSnapshot(400);
@@ -1642,21 +1649,20 @@
    * ================================================================== */
   function filteredTasks() {
     const filter = state.taskFilter;
-    const inFilter = (task) => {
-      const status = normStatus(task.status);
-      if (filter === 'archived') return Boolean(task.archived);
-      if (task.archived) return false;
-      if (filter === 'all') return true;
-      if (filter === 'active') return ACTIVE_STATUS.has(status);
-      if (filter === 'completed') return status === 'completed';
-      if (filter === 'failed') return status === 'failed' || status === 'timeout' || status === 'cancelled';
+    const roots = state.tasks.filter((task) => !task.parentTaskId && !task.replyToTaskId);
+    const groupOf = (root) => state.tasks.filter(
+      (task) => (task.threadId || task.id) === (root.threadId || root.id),
+    );
+    return roots.filter((root) => {
+      const group = groupOf(root);
+      if (filter === 'archived') return group.some((task) => task.archived);
+      const active = group.filter((task) => !task.archived);
+      if (filter === 'all') return active.length > 0;
+      if (filter === 'active') return active.some((task) => ACTIVE_STATUS.has(normStatus(task.status)));
+      if (filter === 'completed') return active.some((task) => normStatus(task.status) === 'completed');
+      if (filter === 'failed') return active.some((task) => ['failed', 'timeout', 'cancelled'].includes(normStatus(task.status)));
       return true;
-    };
-    const visible = state.tasks.filter(inFilter);
-    if (filter === 'archived') {
-      return visible.filter((task) => !task.parentTaskId || !state.tasks.some((parent) => parent.id === task.parentTaskId && parent.archived));
-    }
-    return visible.filter((task) => !task.parentTaskId || !state.tasks.some((parent) => parent.id === task.parentTaskId));
+    });
   }
 
   function renderFilterCounts() {
@@ -1727,6 +1733,22 @@
     return ids.map((id) => state.tasks.find((item) => item.id === id)).filter(Boolean);
   }
 
+  function threadTasksOf(task) {
+    const threadId = task.threadId || task.id;
+    return state.tasks
+      .filter((item) => (item.threadId || item.id) === threadId && item.id !== task.id && item.replyToTaskId)
+      .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+  }
+
+  function threadList(task) {
+    const steps = threadTasksOf(task);
+    if (!steps.length) return null;
+    return el('div', { className: 'thread-wrap' },
+      el('div', { className: 'thread-head' }, icon('activity'), el('span', { text: `任务线程 · ${steps.length + 1} 步` })),
+      el('div', { className: 'subtask-list' }, ...steps.map(subtaskRow)),
+    );
+  }
+
   function subtaskRow(child) {
     const status = normStatus(child.status);
     const row = el('button', {
@@ -1786,6 +1808,8 @@
       const children = subtaskList(task);
       if (children) card.appendChild(children);
     }
+    const thread = threadList(task);
+    if (thread) card.appendChild(thread);
 
     const progress = activeProgress(task, status);
     if (progress) card.appendChild(progress);
@@ -1830,6 +1854,10 @@
     if (RETRYABLE_STATUS.has(status)) {
       actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'retry' } },
         icon('refresh'), el('span', { text: '重试' })));
+    }
+    if (!ACTIVE_STATUS.has(status)) {
+      actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'follow-up' } },
+        icon('send'), el('span', { text: '继续此任务' })));
     }
     actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'copy-instruction' } },
       icon('copy'), el('span', { text: '复制指令' })));
@@ -2645,6 +2673,12 @@
     if (RETRYABLE_STATUS.has(status)) {
       nodes.push(el('button', { type: 'button', className: 'btn btn-primary btn-sm', onclick: () => retryTask(task.id) }, icon('refresh'), '重新排队'));
     }
+    if (!ACTIVE_STATUS.has(status)) {
+      nodes.push(el('button', {
+        type: 'button', className: 'btn btn-ghost btn-sm',
+        onclick: () => { hideDrawer(); startFollowUp(task.id); },
+      }, icon('send'), '继续此任务'));
+    }
     return nodes;
   }
 
@@ -2759,6 +2793,7 @@
   function editTaskInstruction(id) {
     const task = state.tasks.find((item) => item.id === id);
     if (!task) return;
+    cancelFollowUp();
     const requirements = task.requirements || {};
     state.selectedSkills = new Set(Array.isArray(requirements.skills) ? requirements.skills : []);
     state.sigs.composer = '';
@@ -2778,6 +2813,33 @@
     textarea.focus();
     textarea.scrollIntoView({ block: 'center', behavior: 'smooth' });
     toast('已载入原指令，修改后点发送即可重新创建任务', 'info');
+  }
+
+  function startFollowUp(id) {
+    const task = state.tasks.find((item) => item.id === id);
+    if (!task) return;
+    state.followUpTaskId = id;
+    const step = Number.isFinite(task.threadStep) ? task.threadStep + 1 : 2;
+    const banner = $('#followup-banner');
+    setText('#followup-title', `继续任务 · 第 ${step} 步`);
+    setText('#followup-desc', `基于：${shorten(task.instruction, 60)}`);
+    if (banner) banner.hidden = false;
+    const textarea = $('#instruction');
+    textarea.value = '';
+    textarea.placeholder = '基于上一步结果，输入下一步要做什么，或直接修正要求…';
+    setTab('command');
+    updateComposerTarget();
+    textarea.focus();
+    textarea.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }
+
+  function cancelFollowUp() {
+    if (!state.followUpTaskId) return;
+    state.followUpTaskId = null;
+    const banner = $('#followup-banner');
+    if (banner) banner.hidden = true;
+    const textarea = $('#instruction');
+    if (textarea) textarea.placeholder = '例如：把本周的开销记录整理成一份 Word 报告，并附上汇总表格';
   }
 
   /* ==================================================================
@@ -2920,6 +2982,7 @@
           const task = state.tasks.find((item) => item.id === id);
           if (task) copyText(task.instruction || '', '指令已复制');
         } else if (action === 'edit-instruction') editTaskInstruction(id);
+        else if (action === 'follow-up') startFollowUp(id);
         else if (action === 'toggle-events') {
           if (state.expandedEvents.has(id)) state.expandedEvents.delete(id);
           else state.expandedEvents.add(id);
@@ -2945,6 +3008,8 @@
 
     /* 指令表单 */
     $('#task-form').addEventListener('submit', sendTask);
+    const followupCancel = $('#followup-cancel');
+    if (followupCancel) followupCancel.addEventListener('click', cancelFollowUp);
     $('#instruction').addEventListener('keydown', (event) => {
       if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
         event.preventDefault();

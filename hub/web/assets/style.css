@@ -1657,3 +1657,21 @@ select:focus, input:focus { outline: none; border-color: rgba(124, 140, 255, 0.6
   .task-list { max-height: 54dvh; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding-right: 2px; }
   .mobile-tabs { padding-bottom: calc(6px + env(safe-area-inset-bottom)); }
 }
+
+/* BattleStar: follow-up task thread banner */
+.followup-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  padding: 9px 11px;
+  border-radius: 11px;
+  background: rgba(124, 140, 255, 0.12);
+  border: 1px solid rgba(124, 140, 255, 0.32);
+}
+.followup-banner[hidden] { display: none; }
+.followup-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.followup-copy strong { font-size: 12.5px; }
+.followup-copy span { font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thread-wrap { margin-top: 9px; padding: 9px; border-radius: 11px; background: rgba(255, 255, 255, 0.035); border: 1px dashed rgba(148, 163, 255, 0.22); }
+.thread-head { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-dim); margin-bottom: 6px; }

@@ -33,6 +33,7 @@ window.__ModuleLoader__.load({
       cancel: '取消', retry: '重试', output: '输出', error: '错误', events: '事件',
       archive: '归档', unarchive: '取消归档', delete: '删除', deleteConfirm: '确定删除这个任务吗？删除后不可恢复。',
       archived: '已归档', subtasks: 'Agnes 子任务', plan: 'Agnes 长任务拆分',
+      followUp: '继续', followUpPrompt: '输入下一步或修正要求（会带上一步上下文）：', followUpCreated: '已创建下一步任务', thread: '任务线程',
       hubSettings: 'Hub 设置', projectRoot: '项目目录', hubPort: 'Hub 端口', autoStart: 'DSH 启动时自动启动 Hub',
       defaultModel: '默认模型', githubUser: 'GitHub 用户名', keys: '私人账号与密钥',
       keysHint: '密钥保存在 Harness credentials 服务，不写入项目文件；留空表示不修改。',
@@ -69,6 +70,7 @@ window.__ModuleLoader__.load({
       cancel: 'Cancel', retry: 'Retry', output: 'Output', error: 'Error', events: 'Events',
       archive: 'Archive', unarchive: 'Unarchive', delete: 'Delete', deleteConfirm: 'Delete this task permanently?',
       archived: 'Archived', subtasks: 'Agnes subtasks', plan: 'Agnes task split',
+      followUp: 'Continue', followUpPrompt: 'Enter the next step or correction (previous context will be included):', followUpCreated: 'Follow-up task created', thread: 'Task thread',
       hubSettings: 'Hub settings', projectRoot: 'Project root', hubPort: 'Hub port', autoStart: 'Start hub with DSH',
       defaultModel: 'Default model', githubUser: 'GitHub username', keys: 'Private accounts and keys',
       keysHint: 'Keys are stored in the Harness credential service, not project files. Leave blank to keep.',
@@ -262,6 +264,9 @@ window.__ModuleLoader__.load({
         .map((id) => (tasks || []).find((item) => item.id === id))
         .filter(Boolean)
       const finishedChildren = childTasks.filter((child) => ['completed', 'failed', 'timeout', 'cancelled'].includes(child.status))
+      const threadTasks = (tasks || [])
+        .filter((item) => item.replyToTaskId && item.id !== task.id && (item.threadId || item.id) === (task.threadId || task.id))
+        .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
       return h('div', { style: { ...card, padding: 12, opacity: task.archived ? 0.65 : 1 } },
         h('div', { style: { ...row, justifyContent: 'space-between', alignItems: 'flex-start' } },
           h('div', { style: { flex: 1, minWidth: 0 } },
@@ -281,6 +286,12 @@ window.__ModuleLoader__.load({
             task.status === 'failed' || task.status === 'timeout' || task.status === 'cancelled'
               ? h('button', { style: btn(false), onClick: () => onAction(task.id, 'retry') }, t('retry'))
               : null,
+            task.status !== 'queued' && task.status !== 'assigned' && task.status !== 'running'
+              ? h('button', {
+                  style: { ...btn(false), padding: '3px 8px', fontSize: 12 },
+                  onClick: () => onAction(task.id, 'follow-up'),
+                }, t('followUp'))
+              : null,
             h('button', {
               style: { ...btn(false), padding: '3px 8px', fontSize: 12 },
               onClick: () => onAction(task.id, task.archived ? 'unarchive' : 'archive'),
@@ -295,6 +306,19 @@ window.__ModuleLoader__.load({
           ? h('div', { style: { marginTop: 8, padding: 8, borderRadius: 8, background: COLORS.layer2, border: `1px solid ${COLORS.border}` } },
               h('div', { style: { ...muted, marginBottom: 5 } }, `${t('subtasks')} ${finishedChildren.length}/${childTasks.length}`),
               ...childTasks.map((child) => h('div', {
+                key: child.id,
+                style: { ...row, gap: 8, padding: '5px 0', borderTop: `1px solid ${COLORS.border}` },
+              },
+                h(Badge, { tone: statusTone(child.status) }, child.status),
+                h('span', { style: { fontSize: 12, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, child.instruction),
+                h('span', { style: { ...muted, fontSize: 11 } }, child.assignedDeviceName || ''),
+              )),
+            )
+          : null,
+        threadTasks.length
+          ? h('div', { style: { marginTop: 8, padding: 8, borderRadius: 8, background: 'rgba(124,140,255,0.06)', border: '1px dashed rgba(148,163,255,0.25)' } },
+              h('div', { style: { ...muted, marginBottom: 5 } }, `${t('thread')} · ${threadTasks.length + 1} 步`),
+              ...threadTasks.map((child) => h('div', {
                 key: child.id,
                 style: { ...row, gap: 8, padding: '5px 0', borderTop: `1px solid ${COLORS.border}` },
               },
@@ -320,7 +344,7 @@ window.__ModuleLoader__.load({
     function ConsoleTab({ status, snapshot, t, onRefresh, onHub, onTaskAction, onSend, onRenameDevice, onRemoveDevice, onToggleDevice, hubOrigin, busy, message }) {
       const devices = (snapshot && snapshot.devices) || []
       const allTasks = (snapshot && snapshot.tasks) || []
-      const tasks = allTasks.filter((task) => !task.parentTaskId)
+      const tasks = allTasks.filter((task) => !task.parentTaskId && !task.replyToTaskId)
       const stats = (snapshot && snapshot.stats) || {}
       const [instruction, setInstruction] = useState('')
       const [profile, setProfile] = useState('')
@@ -588,6 +612,17 @@ window.__ModuleLoader__.load({
       const onTaskAction = (id, action) => withBusy(async () => {
         if (action === 'cancel' && !window.confirm(t('cancelConfirm'))) return
         if (action === 'delete' && !window.confirm(t('deleteConfirm'))) return
+        if (action === 'follow-up') {
+          const instruction = window.prompt(t('followUpPrompt'))
+          if (!instruction || !instruction.trim()) return
+          await call(`/tasks/${encodeURIComponent(id)}/follow-up`, {
+            method: 'POST',
+            body: JSON.stringify({ instruction: instruction.trim() }),
+          })
+          await load()
+          setMessage(t('followUpCreated'))
+          return
+        }
         if (action === 'delete') {
           await call(`/tasks/${encodeURIComponent(id)}`, { method: 'DELETE' })
         } else {
