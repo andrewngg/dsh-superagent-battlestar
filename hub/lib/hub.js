@@ -1506,6 +1506,22 @@ class Hub {
     return task;
   }
 
+  attachExternalResult(task, input = {}) {
+    if (!task) throw notFound('任务不存在');
+    const text = util.str(input.text, 200000);
+    if (!text) throw badRequest('外部结果不能为空');
+    const failed = input.status === 'failed';
+    this._finishTask(task, failed ? TASK_STATUS.FAILED : TASK_STATUS.COMPLETED, {
+      output: {
+        text,
+        data: util.isPlainObject(input.data) ? input.data : undefined,
+      },
+      error: failed ? util.str(input.error, 4000) || '外部任务失败' : null,
+      eventMessage: '已同步 Mika 最终结果',
+    });
+    return task;
+  }
+
   handleProgress(device, taskId, body) {
     const task = this._requireTask(taskId);
     if (task.assignedDeviceId !== device.id) throw conflict('任务未分配给该设备');

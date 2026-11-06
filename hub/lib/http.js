@@ -20,6 +20,7 @@ const TASK_ACTION_RE = /^tasks\/([^/]+)\/(ack|progress|result)$/;
 const TASK_ADMIN_RE = /^\/api\/tasks\/([^/]+)(?:\/(cancel|retry|archive|unarchive))?$/;
 const TASK_FOLLOW_RE = /^\/api\/tasks\/([^/]+)\/follow-up$/;
 const TASK_ANSWER_RE = /^\/api\/tasks\/([^/]+)\/answer$/;
+const TASK_EXTERNAL_RE = /^\/api\/tasks\/([^/]+)\/external-result$/;
 const TASK_BODY_BYTES = 8 * 1024 * 1024;
 const MAX_ATTACHMENT_COUNT = 3;
 const MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024;
@@ -278,6 +279,22 @@ async function handleRequest(hub, req, res) {
     const task = hub._requireTask(taskId);
     const answered = hub.answerTask(task, body.text);
     return sendJson(res, 200, { task: hub.taskToJson(answered) });
+  }
+
+  const externalMatch = TASK_EXTERNAL_RE.exec(pathname);
+  if (externalMatch) {
+    requireAdmin(hub, req, url);
+    if (method !== 'POST') throw notFound('接口不存在');
+    let taskId;
+    try {
+      taskId = decodeURIComponent(externalMatch[1]);
+    } catch {
+      throw badRequest('任务 ID 非法');
+    }
+    const body = await readJsonBody(req, TASK_BODY_BYTES);
+    const task = hub._requireTask(taskId);
+    const updated = hub.attachExternalResult(task, body);
+    return sendJson(res, 200, { task: hub.taskToJson(updated) });
   }
 
   const followMatch = TASK_FOLLOW_RE.exec(pathname);

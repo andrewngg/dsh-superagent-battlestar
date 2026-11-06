@@ -139,3 +139,17 @@ test('Mika 等待回答：waiting 状态与 answer 命令', async (t) => {
   env.hub.handleResult(deviceObj, task.id, { ok: true, output: { text: '完成' } });
   assert.equal(env.hub.getTask(task.id).status, 'completed');
 });
+
+test('外部最终结果可追加到 Mika 任务', async (t) => {
+  const env = await startTestHub(t);
+  const task = await env.hub.createTask({ instruction: '外部任务', requirements: {}, timeoutSec: 60 });
+  env.hub._finishTask(task, 'failed', { error: '旧连接失败', eventMessage: '旧失败' });
+  const res = await request(env.base, 'POST', `/api/tasks/${task.id}/external-result`, {
+    headers: adminHeaders(env),
+    body: { text: '手机端最终答案', data: { mikaTaskId: 'mika-1' } },
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.json.task.status, 'completed');
+  assert.equal(res.json.task.output.text, '手机端最终答案');
+  assert.equal(env.hub.getTask(task.id).error, null);
+});

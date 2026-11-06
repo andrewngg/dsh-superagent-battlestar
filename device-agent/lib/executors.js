@@ -1331,7 +1331,43 @@ function createMikaExecutor(options = {}) {
           if (status === 'waiting_for_answer' || status === 'waiting_on_phone') {
             const question = snapshot.question || (snapshot.options ? JSON.stringify(snapshot.options) : '');
             if (status === 'waiting_for_answer' && requestAnswer) {
-              const answer = await requestAnswer(question || 'Mika 需要你的回答', taskId);
+              const answerPromise = Promise.resolve(requestAnswer(question || 'Mika 需要你的回答', taskId))
+                .then((text) => ({ kind: 'answer', text }))
+                .catch((err) => ({ kind: 'answer-error', err }));
+              let answer = '';
+              let phoneTerminal = false;
+              while (true) {
+                throwIfAborted(signal);
+                const remaining = deadline - Date.now();
+                if (remaining <= 0) break;
+                const budget = Math.max(1, Math.min(waitSeconds, 10, Math.floor(remaining / 1000)));
+                const poll = runCli(
+                  [...connectionArgs(), '--json', 'task', 'wait', taskId, '--timeout', String(budget)],
+                  { timeout: (budget + 10) * 1000, signal },
+                )
+                  .then((result) => ({ kind: 'snapshot', result }))
+                  .catch((err) => ({ kind: 'poll-error', err }));
+                const outcome = await Promise.race([answerPromise, poll]);
+                if (outcome.kind === 'answer') {
+                  answer = String(outcome.text || '');
+                  break;
+                }
+                if (outcome.kind === 'answer-error') {
+                  return { output: { text: '' }, error: `Mika 等待回答失败：${outcome.err && outcome.err.message ? outcome.err.message : outcome.err}` };
+                }
+                if (outcome.kind === 'poll-error') {
+                  if (outcome.err && outcome.err.name === 'AbortError') throw outcome.err;
+                  continue;
+                }
+                const payload = outcome.result && outcome.result.payload;
+                const pollError = mikaErrorText(payload);
+                if (pollError) continue;
+                if (payload && payload.task_id) snapshot = payload;
+                if (snapshot && ['done', 'failed', 'cancelled'].includes(snapshot.status)) {
+                  phoneTerminal = true;
+                  break;
+                }
+              }
               if (answer) {
                 await progress('回答已收到，正在让 Mika 继续…', Math.min(90, 20 + waits * 6));
                 const answered = await runCli(
@@ -1345,6 +1381,8 @@ function createMikaExecutor(options = {}) {
                 if (answered.payload && answered.payload.task_id) snapshot = answered.payload;
                 continue;
               }
+              if (phoneTerminal) continue;
+              break;
             }
             return {
               output: {
