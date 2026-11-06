@@ -1707,3 +1707,11 @@ select:focus, input:focus { outline: none; border-color: rgba(124, 140, 255, 0.6
   .followup-copy { flex: 1 1 100%; }
   .followup-banner .link-btn { flex: none; margin-left: auto; }
 }
+
+.composer-attach { flex: none; height: 38px; white-space: nowrap; }
+@media (max-width: 600px) {
+  .composer-foot { flex-wrap: wrap; }
+  .composer-attach { width: 100%; justify-content: center; order: 3; }
+  #send-btn { order: 2; }
+  .composer-target { order: 1; width: 100%; }
+}

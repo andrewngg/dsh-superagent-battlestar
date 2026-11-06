@@ -56,7 +56,7 @@ async function sendFile(req, res, filePath) {
   const headers = {
     'Content-Type': mimeFor(filePath),
     'Content-Length': stat.size,
-    'Cache-Control': ext === '.html' || ext === '.htm' ? 'no-cache' : 'public, max-age=300',
+    'Cache-Control': ['.html','.htm','.js','.css'].includes(ext) ? 'no-cache' : 'public, max-age=300',
     'X-Content-Type-Options': 'nosniff',
   };
   res.writeHead(200, headers);
@@ -114,3 +114,4 @@ async function serveStatic(hub, req, res, pathname) {
 }
 
 module.exports = { serveStatic, mimeFor, MIME_TYPES };
+

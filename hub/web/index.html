@@ -7,7 +7,7 @@
   <meta name="color-scheme" content="dark">
   <meta name="description" content="BattleStar 多设备智能管家控制台">
   <title>BattleStar · 控制台</title>
-  <link rel="stylesheet" href="assets/style.css">
+  <link rel="stylesheet" href="assets/style.css?v=20261106b">
 </head>
 <body>
   <!-- 静态图标库（仅常量路径，不承载用户数据） -->
@@ -225,6 +225,9 @@
 
               <div class="composer-foot">
                 <span class="composer-target" id="composer-target">自动路由：等待在线设备…</span>
+                <label class="btn btn-ghost btn-sm composer-attach" for="file-input">
+                  <svg class="icon"><use href="#i-link"></use></svg><span>附件</span>
+                </label>
                 <button type="submit" class="btn btn-primary" id="send-btn">
                   <svg class="icon"><use href="#i-send"></use></svg><span>发送指令</span>
                 </button>
@@ -304,6 +307,6 @@
     <p id="loading-text">正在连接中枢…</p>
   </div>
 
-  <script src="assets/app.js" defer></script>
+  <script src="assets/app.js?v=20261106b" defer></script>
 </body>
 </html>
