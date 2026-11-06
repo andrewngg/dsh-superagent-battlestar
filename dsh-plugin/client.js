@@ -29,6 +29,8 @@ window.__ModuleLoader__.load({
       device: '目标设备（可选）', priority: '优先级', timeout: '超时（秒）', send: '发送',
       sending: '发送中…', sent: '已创建任务', route: '路由结果', assigned: '已派发',
       cancel: '取消', retry: '重试', output: '输出', error: '错误', events: '事件',
+      archive: '归档', unarchive: '取消归档', delete: '删除', deleteConfirm: '确定删除这个任务吗？删除后不可恢复。',
+      archived: '已归档', subtasks: 'Agnes 子任务', plan: 'Agnes 长任务拆分',
       hubSettings: 'Hub 设置', projectRoot: '项目目录', hubPort: 'Hub 端口', autoStart: 'DSH 启动时自动启动 Hub',
       defaultModel: '默认模型', githubUser: 'GitHub 用户名', keys: '私人账号与密钥',
       keysHint: '密钥保存在 Harness credentials 服务，不写入项目文件；留空表示不修改。',
@@ -61,6 +63,8 @@ window.__ModuleLoader__.load({
       device: 'Target device (optional)', priority: 'Priority', timeout: 'Timeout (s)', send: 'Send',
       sending: 'Sending…', sent: 'Task created', route: 'Route', assigned: 'assigned',
       cancel: 'Cancel', retry: 'Retry', output: 'Output', error: 'Error', events: 'Events',
+      archive: 'Archive', unarchive: 'Unarchive', delete: 'Delete', deleteConfirm: 'Delete this task permanently?',
+      archived: 'Archived', subtasks: 'Agnes subtasks', plan: 'Agnes task split',
       hubSettings: 'Hub settings', projectRoot: 'Project root', hubPort: 'Hub port', autoStart: 'Start hub with DSH',
       defaultModel: 'Default model', githubUser: 'GitHub username', keys: 'Private accounts and keys',
       keysHint: 'Keys are stored in the Harness credential service, not project files. Leave blank to keep.',
@@ -238,17 +242,22 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function TaskRow({ task, t, onAction }) {
+    function TaskRow({ task, t, onAction, tasks }) {
       const data = task.output && task.output.data ? task.output.data : null
-      return h('div', { style: { ...card, padding: 12 } },
+      const childTasks = (task.childTaskIds || [])
+        .map((id) => (tasks || []).find((item) => item.id === id))
+        .filter(Boolean)
+      const finishedChildren = childTasks.filter((child) => ['completed', 'failed', 'timeout', 'cancelled'].includes(child.status))
+      return h('div', { style: { ...card, padding: 12, opacity: task.archived ? 0.65 : 1 } },
         h('div', { style: { ...row, justifyContent: 'space-between', alignItems: 'flex-start' } },
           h('div', { style: { flex: 1, minWidth: 0 } },
             h('div', { style: { ...row, gap: 8 } },
               h(Badge, { tone: statusTone(task.status) }, task.status),
+              task.archived ? h(Badge, { tone: 'idle' }, t('archived')) : null,
               h('strong', { style: { fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, task.instruction),
             ),
             h('div', { style: { ...muted, marginTop: 4 } },
-              `${task.assignedDeviceName || '-'} · ${new Date(task.createdAt).toLocaleString()}${data && data.backend ? ` · ${data.backend}` : ''}`,
+              `${task.assignedDeviceName || '-'} · ${new Date(task.createdAt).toLocaleString()}${data && data.backend ? ` · ${data.backend}` : ''}${task.isPlan ? ` · ${t('plan')}` : ''}`,
             ),
           ),
           h('div', { style: { ...row, gap: 6 } },
@@ -258,8 +267,29 @@ window.__ModuleLoader__.load({
             task.status === 'failed' || task.status === 'timeout' || task.status === 'cancelled'
               ? h('button', { style: btn(false), onClick: () => onAction(task.id, 'retry') }, t('retry'))
               : null,
+            h('button', {
+              style: { ...btn(false), padding: '3px 8px', fontSize: 12 },
+              onClick: () => onAction(task.id, task.archived ? 'unarchive' : 'archive'),
+            }, task.archived ? t('unarchive') : t('archive')),
+            h('button', {
+              style: { ...btn(false), padding: '3px 8px', fontSize: 12, color: COLORS.err },
+              onClick: () => onAction(task.id, 'delete'),
+            }, t('delete')),
           ),
         ),
+        childTasks.length
+          ? h('div', { style: { marginTop: 8, padding: 8, borderRadius: 8, background: COLORS.layer2, border: `1px solid ${COLORS.border}` } },
+              h('div', { style: { ...muted, marginBottom: 5 } }, `${t('subtasks')} ${finishedChildren.length}/${childTasks.length}`),
+              ...childTasks.map((child) => h('div', {
+                key: child.id,
+                style: { ...row, gap: 8, padding: '5px 0', borderTop: `1px solid ${COLORS.border}` },
+              },
+                h(Badge, { tone: statusTone(child.status) }, child.status),
+                h('span', { style: { fontSize: 12, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, child.instruction),
+                h('span', { style: { ...muted, fontSize: 11 } }, child.assignedDeviceName || ''),
+              )),
+            )
+          : null,
         task.output && task.output.text
           ? h('div', {
               style: {
@@ -275,7 +305,8 @@ window.__ModuleLoader__.load({
 
     function ConsoleTab({ status, snapshot, t, onRefresh, onHub, onTaskAction, onSend, onRenameDevice, hubOrigin, busy, message }) {
       const devices = (snapshot && snapshot.devices) || []
-      const tasks = (snapshot && snapshot.tasks) || []
+      const allTasks = (snapshot && snapshot.tasks) || []
+      const tasks = allTasks.filter((task) => !task.parentTaskId)
       const stats = (snapshot && snapshot.stats) || {}
       const [instruction, setInstruction] = useState('')
       const [profile, setProfile] = useState('')
@@ -361,7 +392,7 @@ window.__ModuleLoader__.load({
         h('section', null,
           h('h3', { style: { fontSize: 14, margin: '0 0 10px' } }, `${t('tasks')} (${tasks.length})`),
           tasks.length
-            ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 10 } }, ...tasks.map((task) => h(TaskRow, { key: task.id, task, t, onAction: onTaskAction })))
+            ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 10 } }, ...tasks.map((task) => h(TaskRow, { key: task.id, task, t, onAction: onTaskAction, tasks: allTasks })))
             : h('div', { style: { ...card, ...muted } }, t('noTasks')),
         ),
       )
@@ -542,7 +573,12 @@ window.__ModuleLoader__.load({
       })
       const onTaskAction = (id, action) => withBusy(async () => {
         if (action === 'cancel' && !window.confirm(t('cancelConfirm'))) return
-        await call(`/tasks/${encodeURIComponent(id)}/${action}`, { method: 'POST', body: '{}' })
+        if (action === 'delete' && !window.confirm(t('deleteConfirm'))) return
+        if (action === 'delete') {
+          await call(`/tasks/${encodeURIComponent(id)}`, { method: 'DELETE' })
+        } else {
+          await call(`/tasks/${encodeURIComponent(id)}/${action}`, { method: 'POST', body: '{}' })
+        }
         await load()
       })
       const onRenameDevice = (id, name) => withBusy(async () => {

@@ -17,7 +17,7 @@ const { toHttpError, unauthorized, forbidden, notFound, badRequest } = errors;
 const { LIMITS } = protocol;
 
 const TASK_ACTION_RE = /^tasks\/([^/]+)\/(ack|progress|result)$/;
-const TASK_ADMIN_RE = /^\/api\/tasks\/([^/]+)(?:\/(cancel|retry))?$/;
+const TASK_ADMIN_RE = /^\/api\/tasks\/([^/]+)(?:\/(cancel|retry|archive|unarchive))?$/;
 
 // ---------------------------------------------------------------- 基础工具
 
@@ -222,13 +222,14 @@ async function handleRequest(hub, req, res) {
     requireAdmin(hub, req, url);
     if (method === 'POST') {
       const body = await readJsonBody(req);
-      const task = hub.createTask(body);
+      const task = hub.shouldAutoSplit(body) ? await hub.createPlanTask(body) : hub.createTask(body);
       return sendJson(res, 200, { task: hub.taskToJson(task) });
     }
     if (method === 'GET') {
       const tasks = hub.listTasks({
         status: queryString(url, 'status'),
         deviceId: queryString(url, 'deviceId'),
+        includeArchived: queryString(url, 'includeArchived') === '1',
         limit: queryNumber(url, 'limit'),
       });
       return sendJson(res, 200, { tasks });
@@ -249,6 +250,10 @@ async function handleRequest(hub, req, res) {
     if (!action && method === 'GET') {
       return sendJson(res, 200, { task: hub.taskToJson(hub._requireTask(taskId)) });
     }
+    if (!action && method === 'DELETE') {
+      const task = hub.deleteTask(hub._requireTask(taskId));
+      return sendJson(res, 200, { ok: true, task: hub.taskToJson(task) });
+    }
     if (action === 'cancel' && method === 'POST') {
       await readJsonBody(req);
       const task = hub.cancelTask(hub._requireTask(taskId));
@@ -257,6 +262,16 @@ async function handleRequest(hub, req, res) {
     if (action === 'retry' && method === 'POST') {
       await readJsonBody(req);
       const task = hub.retryTask(hub._requireTask(taskId));
+      return sendJson(res, 200, { task: hub.taskToJson(task) });
+    }
+    if (action === 'archive' && method === 'POST') {
+      await readJsonBody(req);
+      const task = hub.archiveTask(hub._requireTask(taskId), true);
+      return sendJson(res, 200, { task: hub.taskToJson(task) });
+    }
+    if (action === 'unarchive' && method === 'POST') {
+      await readJsonBody(req);
+      const task = hub.archiveTask(hub._requireTask(taskId), false);
       return sendJson(res, 200, { task: hub.taskToJson(task) });
     }
     throw notFound('接口不存在');

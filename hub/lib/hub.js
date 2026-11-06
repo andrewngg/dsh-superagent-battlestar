@@ -11,6 +11,7 @@ const protocol = require('../../shared/protocol.js');
 const { createHttpServer } = require('./http');
 const { StateStore } = require('./store');
 const { badRequest, notFound, conflict } = require('./errors');
+const { createPlan } = require('./planner');
 const util = require('./util');
 
 const { LIMITS, TASK_STATUS } = protocol;
@@ -79,6 +80,9 @@ class Hub {
       20,
       60000,
     );
+    this.planner = typeof options.planner === 'function' ? options.planner : createPlan;
+    this.splitThresholdChars = util.clampInt(options.splitThresholdChars, 800, 100, 100000);
+    this.splitTimeoutSec = util.clampInt(options.splitTimeoutSec, 900, 30, 86400);
     this.pingIntervalMs = util.clampInt(options.pingIntervalMs, 15000, 20, 3600 * 1000);
     this.persistDebounceMs = util.clampInt(options.persistDebounceMs, 150, 0, 60000);
     this.eventLimit = util.clampInt(options.eventLimit, 200, 20, 2000);
@@ -391,6 +395,11 @@ class Hub {
         .arr(raw.events)
         .filter((e) => util.isPlainObject(e))
         .slice(-this.taskEventLimit),
+      parentTaskId: util.str(raw.parentTaskId, 80) || null,
+      childTaskIds: util.arr(raw.childTaskIds).map((id) => util.str(id, 80)).filter(Boolean),
+      isPlan: raw.isPlan === true,
+      archived: raw.archived === true,
+      archivedAt: util.str(raw.archivedAt, 40) || null,
       _avoidDeviceIds: [],
     };
   }
@@ -436,6 +445,11 @@ class Hub {
       output: task.output,
       error: task.error,
       progress: task.progress ? { ...task.progress } : null,
+      parentTaskId: task.parentTaskId || null,
+      childTaskIds: [...(task.childTaskIds || [])],
+      isPlan: Boolean(task.isPlan),
+      archived: Boolean(task.archived),
+      archivedAt: task.archivedAt || null,
       route: {
         reason: task.route.reason,
         candidates: task.route.candidates.map((c) => ({ ...c })),
@@ -454,6 +468,7 @@ class Hub {
     let tasksCompleted = 0;
     let tasksFailed = 0;
     for (const task of this.tasks.values()) {
+      if (task.archived) continue;
       if (task.status === TASK_STATUS.QUEUED) tasksQueued += 1;
       else if (task.status === TASK_STATUS.ASSIGNED) tasksAssigned += 1;
       else if (task.status === TASK_STATUS.RUNNING) tasksRunning += 1;
@@ -866,9 +881,10 @@ class Hub {
     return this.tasks.get(id) || null;
   }
 
-  listTasks({ status, deviceId, limit } = {}) {
+  listTasks({ status, deviceId, includeArchived = false, limit } = {}) {
     const safeLimit = util.clampInt(limit, 100, 1, 500);
     let tasks = [...this.tasks.values()];
+    if (!includeArchived) tasks = tasks.filter((task) => !task.archived);
     if (typeof status === 'string' && status) tasks = tasks.filter((task) => task.status === status);
     if (typeof deviceId === 'string' && deviceId) {
       tasks = tasks.filter((task) => task.assignedDeviceId === deviceId);
@@ -899,6 +915,11 @@ class Hub {
       output: null,
       error: null,
       progress: null,
+      parentTaskId: input.parentTaskId ? String(input.parentTaskId) : null,
+      childTaskIds: [],
+      isPlan: false,
+      archived: false,
+      archivedAt: null,
       route: { reason: '等待路由', candidates: [], excluded: [] },
       events: [{ at: now, type: 'created', message: '任务已创建' }],
       _avoidDeviceIds: [],
@@ -907,6 +928,154 @@ class Hub {
     this.broadcast('task.created', { task: this.taskToJson(task) });
     this.log('info', `任务创建：${task.id}「${util.truncate(task.instruction, 40)}」`);
     this.routeTask(task);
+    this.schedulePersist();
+    return task;
+  }
+
+  shouldAutoSplit(input) {
+    if (!util.isPlainObject(input)) return false;
+    if (input.split === false) return false;
+    if (input.split === true) return true;
+    const instruction = typeof input.instruction === 'string' ? input.instruction : '';
+    const timeoutSec = Number(input.timeoutSec) || 0;
+    return instruction.length >= this.splitThresholdChars || timeoutSec >= this.splitTimeoutSec;
+  }
+
+  /**
+   * 长任务先用 Agnes AI 拆成子任务，再让每个子任务独立路由。
+   * 规划失败时退化为普通任务，避免因为规划服务不可用而丢任务。
+   */
+  async createPlanTask(input) {
+    let plan;
+    try {
+      plan = await this.planner({
+        instruction: input.instruction,
+        requirements: input.requirements || {},
+        timeoutSec: input.timeoutSec,
+      });
+    } catch (err) {
+      this.log('warn', `Agnes 长任务拆分失败，按普通任务执行：${err && err.message ? err.message : err}`);
+      return this.createTask(input);
+    }
+    if (!plan || !Array.isArray(plan.subtasks) || plan.subtasks.length < 2) {
+      this.log('warn', 'Agnes 没有返回有效子任务，按普通任务执行');
+      return this.createTask(input);
+    }
+    const normalized = protocol.normalizeTaskRequest(input);
+    if (!normalized.ok) throw badRequest(normalized.errors.join('；'));
+    const value = normalized.value;
+    const now = protocol.nowIso();
+    const parent = {
+      id: protocol.randomId('task'),
+      instruction: value.instruction,
+      requirements: value.requirements,
+      priority: value.priority,
+      status: TASK_STATUS.RUNNING,
+      assignedDeviceId: null,
+      assignedDeviceName: 'Agnes 规划器',
+      createdAt: now,
+      updatedAt: now,
+      startedAt: now,
+      finishedAt: null,
+      attempts: 0,
+      maxAttempts: value.maxAttempts,
+      timeoutSec: value.timeoutSec,
+      output: null,
+      error: null,
+      progress: { message: `Agnes 已拆分为 ${plan.subtasks.length} 个子任务`, percent: 0, logs: [], at: now },
+      parentTaskId: null,
+      childTaskIds: [],
+      isPlan: true,
+      archived: false,
+      archivedAt: null,
+      route: {
+        reason: `Agnes 长任务拆分：${plan.title || '长任务'}`,
+        candidates: [],
+        excluded: [],
+      },
+      events: [
+        { at: now, type: 'created', message: '长任务已创建' },
+        { at: now, type: 'plan', message: `Agnes 拆分为 ${plan.subtasks.length} 个子任务` },
+      ],
+      _avoidDeviceIds: [],
+    };
+    this.tasks.set(parent.id, parent);
+    this.broadcast('task.created', { task: this.taskToJson(parent) });
+    this.log('info', `Agnes 拆分任务：${parent.id} → ${plan.subtasks.length} 个子任务`);
+    for (const subtask of plan.subtasks) {
+      const child = this.createTask({
+        instruction: subtask.instruction,
+        requirements: value.requirements,
+        priority: parent.priority,
+        timeoutSec: subtask.timeoutSec,
+        maxAttempts: parent.maxAttempts,
+        parentTaskId: parent.id,
+      });
+      parent.childTaskIds.push(child.id);
+    }
+    parent.updatedAt = protocol.nowIso();
+    this.broadcast('task.updated', { task: this.taskToJson(parent) });
+    this.schedulePersist();
+    return parent;
+  }
+
+  _updateParentTask(child) {
+    if (!child || !child.parentTaskId) return;
+    const parent = this.tasks.get(child.parentTaskId);
+    if (!parent || !parent.isPlan) return;
+    const children = parent.childTaskIds.map((id) => this.tasks.get(id)).filter(Boolean);
+    const finished = children.filter((task) => TERMINAL_TASK_STATUSES.has(task.status));
+    const failed = finished.filter((task) => task.status !== TASK_STATUS.COMPLETED);
+    parent.updatedAt = protocol.nowIso();
+    if (finished.length < children.length) {
+      parent.progress = {
+        message: `子任务 ${finished.length}/${children.length} 已完成`,
+        percent: children.length ? Math.round((finished.length / children.length) * 100) : 0,
+        logs: [],
+        at: parent.updatedAt,
+      };
+      this.broadcast('task.updated', { task: this.taskToJson(parent) });
+      this.schedulePersist();
+      return;
+    }
+    parent.status = failed.length ? TASK_STATUS.FAILED : TASK_STATUS.COMPLETED;
+    parent.finishedAt = parent.updatedAt;
+    parent.progress = { message: '全部子任务结束', percent: 100, logs: [], at: parent.updatedAt };
+    parent.output = {
+      text: `Agnes 拆分的 ${children.length} 个子任务已结束：完成 ${children.length - failed.length} 个，失败 ${failed.length} 个。`,
+    };
+    parent.error = failed.length ? `${failed.length} 个子任务失败` : null;
+    parent.events.push({ at: parent.updatedAt, type: parent.status, message: parent.output.text });
+    this.broadcast(parent.status === TASK_STATUS.COMPLETED ? 'task.completed' : 'task.failed', {
+      task: this.taskToJson(parent),
+    });
+    this.schedulePersist();
+  }
+
+  archiveTask(task, archived = true) {
+    const targets = task.isPlan
+      ? [task, ...(task.childTaskIds || []).map((id) => this.tasks.get(id)).filter(Boolean)]
+      : [task];
+    const at = protocol.nowIso();
+    for (const item of targets) {
+      item.archived = archived;
+      item.archivedAt = archived ? at : null;
+      item.updatedAt = at;
+      this.broadcast('task.updated', { task: this.taskToJson(item) });
+    }
+    this.schedulePersist();
+    return task;
+  }
+
+  deleteTask(task) {
+    const ids = task.isPlan ? [task.id, ...(task.childTaskIds || [])] : [task.id];
+    for (const id of ids) {
+      const item = this.tasks.get(id);
+      if (!item) continue;
+      this._clearTaskTimers(id);
+      this.tasks.delete(id);
+      this.broadcast('task.deleted', { taskId: id });
+    }
     this.schedulePersist();
     return task;
   }
@@ -1178,6 +1347,7 @@ class Hub {
       status === TASK_STATUS.COMPLETED ? 'info' : 'warn',
       `${TASK_MESSAGES[status] || `状态 ${status}`}：${task.id}`,
     );
+    this._updateParentTask(task);
     this.schedulePersist();
     return task;
   }
@@ -1252,6 +1422,20 @@ class Hub {
   }
 
   cancelTask(task) {
+    if (task.isPlan) {
+      for (const childId of task.childTaskIds || []) {
+        const child = this.tasks.get(childId);
+        if (child && [TASK_STATUS.QUEUED, TASK_STATUS.ASSIGNED, TASK_STATUS.RUNNING].includes(child.status)) {
+          try {
+            this.cancelTask(child);
+          } catch {
+            /* 子任务可能已结束 */
+          }
+        }
+      }
+      this._finishTask(task, TASK_STATUS.CANCELLED, { error: null, eventMessage: '长任务已取消' });
+      return task;
+    }
     if (![TASK_STATUS.QUEUED, TASK_STATUS.ASSIGNED, TASK_STATUS.RUNNING].includes(task.status)) {
       throw conflict(`任务状态 ${task.status} 不可取消`);
     }

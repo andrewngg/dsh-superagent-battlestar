@@ -309,6 +309,7 @@ export function apply(ctx, rawConfig = {}) {
       '--port', String(state.settings.hubPort),
       '--host', String(state.settings.hubHost || '0.0.0.0'),
       '--data-dir', state.settings.dataDir,
+      '--ttl-ms', '60000',
     ]
     if (state.settings.adminToken) args.push('--admin-token', String(state.settings.adminToken))
     if (state.settings.joinCode) args.push('--join-code', String(state.settings.joinCode))
@@ -565,12 +566,17 @@ export function apply(ctx, rawConfig = {}) {
         const out = await hubRequest('/api/tasks', { method: 'POST', body })
         return json(res, out.status, out.data)
       }
-      const taskAction = /^\/api\/tasks\/([^/]+)\/(cancel|retry)$/.exec(sub)
+      const taskAction = /^\/api\/tasks\/([^/]+)\/(cancel|retry|archive|unarchive)$/.exec(sub)
       if (method === 'POST' && taskAction) {
         const out = await hubRequest(`/api/tasks/${encodeURIComponent(taskAction[1])}/${taskAction[2]}`, {
           method: 'POST',
           body: {},
         })
+        return json(res, out.status, out.data)
+      }
+      const taskPath = /^\/api\/tasks\/([^/]+)$/.exec(sub)
+      if (method === 'DELETE' && taskPath) {
+        const out = await hubRequest(`/api/tasks/${encodeURIComponent(taskPath[1])}`, { method: 'DELETE' })
         return json(res, out.status, out.data)
       }
       const devicePath = /^\/api\/devices\/([^/]+)$/.exec(sub)
@@ -593,7 +599,7 @@ export function apply(ctx, rawConfig = {}) {
       if (method === 'GET' && (sub === '/' || sub === '')) {
         return json(res, 200, {
           name: 'BattleStar',
-          routes: ['/api/status', '/api/settings', '/api/snapshot', '/api/tasks', '/api/devices/:id', '/api/test-credential', '/api/hub/start', '/api/hub/stop'],
+          routes: ['/api/status', '/api/settings', '/api/snapshot', '/api/tasks', '/api/tasks/:id/archive', '/api/tasks/:id', '/api/devices/:id', '/api/test-credential', '/api/hub/start', '/api/hub/stop'],
         })
       }
       return json(res, 404, { error: { code: 'not_found', message: `未知路由：${method} ${sub}` } })

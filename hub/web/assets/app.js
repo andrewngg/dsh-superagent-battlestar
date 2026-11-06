@@ -1627,22 +1627,31 @@
    * ================================================================== */
   function filteredTasks() {
     const filter = state.taskFilter;
-    return state.tasks.filter((task) => {
+    const inFilter = (task) => {
       const status = normStatus(task.status);
+      if (filter === 'archived') return Boolean(task.archived);
+      if (task.archived) return false;
       if (filter === 'all') return true;
       if (filter === 'active') return ACTIVE_STATUS.has(status);
       if (filter === 'completed') return status === 'completed';
       if (filter === 'failed') return status === 'failed' || status === 'timeout' || status === 'cancelled';
       return true;
-    });
+    };
+    const visible = state.tasks.filter(inFilter);
+    if (filter === 'archived') {
+      return visible.filter((task) => !task.parentTaskId || !state.tasks.some((parent) => parent.id === task.parentTaskId && parent.archived));
+    }
+    return visible.filter((task) => !task.parentTaskId || !state.tasks.some((parent) => parent.id === task.parentTaskId));
   }
 
   function renderFilterCounts() {
+    const activeTasks = state.tasks.filter((task) => !task.archived);
     const counts = {
-      all: state.tasks.length,
-      active: state.tasks.filter((t) => ACTIVE_STATUS.has(normStatus(t.status))).length,
-      completed: state.tasks.filter((t) => normStatus(t.status) === 'completed').length,
-      failed: state.tasks.filter((t) => ['failed', 'timeout', 'cancelled'].includes(normStatus(t.status))).length,
+      all: activeTasks.length,
+      active: activeTasks.filter((t) => ACTIVE_STATUS.has(normStatus(t.status))).length,
+      completed: activeTasks.filter((t) => normStatus(t.status) === 'completed').length,
+      failed: activeTasks.filter((t) => ['failed', 'timeout', 'cancelled'].includes(normStatus(t.status))).length,
+      archived: state.tasks.filter((t) => t.archived).length,
     };
     $$('#task-filters .filter-chip').forEach((btn) => {
       const key = btn.dataset.filter;
@@ -1698,10 +1707,42 @@
     return wrap;
   }
 
+  function childTasksOf(task) {
+    const ids = Array.isArray(task.childTaskIds) ? task.childTaskIds : [];
+    return ids.map((id) => state.tasks.find((item) => item.id === id)).filter(Boolean);
+  }
+
+  function subtaskRow(child) {
+    const status = normStatus(child.status);
+    const row = el('button', {
+      type: 'button', className: 'subtask-row', dataset: { action: 'open-child', taskId: child.id },
+      attrs: { 'aria-label': `子任务 ${TASK_STATUS[status].label}：${shorten(child.instruction, 36)}` },
+    },
+      statusBadge(status),
+      el('span', { className: 'subtask-title', text: shorten(child.instruction, 70) }),
+      el('span', { className: 'subtask-meta', text: child.assignedDeviceName || (ACTIVE_STATUS.has(status) ? '等待设备' : '') }),
+    );
+    return row;
+  }
+
+  function subtaskList(parent) {
+    const children = childTasksOf(parent);
+    if (!children.length) return null;
+    const done = children.filter((item) => ['completed', 'failed', 'timeout', 'cancelled'].includes(normStatus(item.status))).length;
+    const wrap = el('div', { className: 'subtask-wrap' },
+      el('div', { className: 'subtask-head' },
+        icon('queue'),
+        el('span', { text: `Agnes 拆分的子任务 ${done}/${children.length}` }),
+      ),
+      el('div', { className: 'subtask-list' }, ...children.map(subtaskRow)),
+    );
+    return wrap;
+  }
+
   function taskCard(task) {
     const status = normStatus(task.status);
     const card = el('article', {
-      className: 'task-card' + (state.expandedOutput.has(task.id) ? ' output-open' : ''),
+      className: 'task-card' + (state.expandedOutput.has(task.id) ? ' output-open' : '') + (task.archived ? ' is-archived' : ''),
       dataset: { id: task.id, status },
       role: 'button',
       tabIndex: 0,
@@ -1726,6 +1767,10 @@
     );
     card.appendChild(top);
     card.appendChild(el('p', { className: 'task-instruction', text: task.instruction || '（无指令内容）' }));
+    if (task.isPlan) {
+      const children = subtaskList(task);
+      if (children) card.appendChild(children);
+    }
 
     const progress = activeProgress(task, status);
     if (progress) card.appendChild(progress);
@@ -1771,6 +1816,10 @@
       actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'retry' } },
         icon('refresh'), el('span', { text: '重试' })));
     }
+    actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: task.archived ? 'unarchive' : 'archive' } },
+      el('span', { text: task.archived ? '取消归档' : '归档' })));
+    actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'delete' } },
+      el('span', { text: '删除' })));
     actions.appendChild(el('span', { className: 'task-id', text: task.id }));
     card.appendChild(actions);
 
@@ -1825,6 +1874,7 @@
         active: { icon: 'activity', title: '没有进行中的任务', desc: '当前没有排队、已分配或运行中的任务。' },
         completed: { icon: 'check', title: '还没有已完成的任务', desc: '设备执行完任务后会显示在这里。' },
         failed: { icon: 'alert', title: '没有失败的任务', desc: '一切正常。' },
+        archived: { icon: 'tasks', title: '没有已归档的任务', desc: '任务卡片上的「归档」会把它移到这里。' },
       };
       const msg = messages[state.taskFilter] || messages.all;
       list.appendChild(emptyState({ iconName: msg.icon, title: msg.title, desc: msg.desc }));
@@ -2651,6 +2701,37 @@
     }
   }
 
+  async function archiveTask(id, archived = true) {
+    try {
+      const res = await api(`/api/tasks/${encodeURIComponent(id)}/${archived ? 'archive' : 'unarchive'}`, {
+        method: 'POST',
+        timeout: 10000,
+      });
+      if (res && res.task) {
+        upsertTask(res.task);
+        state.sigs.stats = '';
+        state.sigs.tasks = '';
+        await refreshNow(false);
+        toast(archived ? '任务已归档' : '任务已取消归档', 'success');
+      }
+    } catch (err) {
+      if (err.status === 401) return handleAuthLost(err.message);
+      toast(err.message || '归档失败', 'error');
+    }
+  }
+
+  async function deleteTask(id) {
+    if (!window.confirm('确定删除这个任务吗？删除后不可恢复。')) return;
+    try {
+      await api(`/api/tasks/${encodeURIComponent(id)}`, { method: 'DELETE', timeout: 10000 });
+      await refreshNow(false);
+      toast('任务已删除', 'success');
+    } catch (err) {
+      if (err.status === 401) return handleAuthLost(err.message);
+      toast(err.message || '删除失败', 'error');
+    }
+  }
+
   /* ==================================================================
    * 刷新 / Tab / 键盘
    * ================================================================== */
@@ -2781,8 +2862,12 @@
         event.stopPropagation();
         const action = actionBtn.dataset.action;
         if (action === 'open') openTaskDrawer(id);
+        else if (action === 'open-child') openTaskDrawer(actionBtn.dataset.taskId);
         else if (action === 'cancel') cancelTask(id);
         else if (action === 'retry') retryTask(id);
+        else if (action === 'archive') archiveTask(id, true);
+        else if (action === 'unarchive') archiveTask(id, false);
+        else if (action === 'delete') deleteTask(id);
         else if (action === 'toggle-events') {
           if (state.expandedEvents.has(id)) state.expandedEvents.delete(id);
           else state.expandedEvents.add(id);

@@ -630,7 +630,14 @@ class Agent {
       this.log.warn('run_task 命令缺少 taskId，已忽略');
       return;
     }
-    if (this.running.has(taskId)) return;
+    if (this.running.has(taskId)) {
+      // Hub 重派/重复下发时，任务其实还在本机执行：重新 ack 并报一次进度，
+      // 避免 Hub 等 30s 后把“仍在跑”的任务判成 ack timeout。
+      this._ackTask(taskId)
+        .then(() => this.client.progress(taskId, { message: '任务仍在执行，重复派发已确认', percent: undefined }))
+        .catch((err) => this.log.warn(`重复任务 ${taskId} 重新确认失败：${err && err.message ? err.message : err}`));
+      return;
+    }
 
     const task = this._taskFromCommand(command);
     const controller = new AbortController();
