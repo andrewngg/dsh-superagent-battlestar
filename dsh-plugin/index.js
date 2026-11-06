@@ -588,6 +588,10 @@ export function apply(ctx, rawConfig = {}) {
         })
         return json(res, out.status, out.data)
       }
+      if (devicePath && method === 'DELETE') {
+        const out = await hubRequest(`/api/devices/${encodeURIComponent(devicePath[1])}`, { method: 'DELETE' })
+        return json(res, out.status, out.data)
+      }
       if (method === 'POST' && sub === '/api/hub/start') {
         await ensureHub()
         return json(res, 200, { ok: true, hub: (await statusPayload()).hub })

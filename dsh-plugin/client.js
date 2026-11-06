@@ -18,6 +18,7 @@ window.__ModuleLoader__.load({
       edit: '编辑', rename: '重命名', saveName: '保存', cancelEdit: '取消',
       hubNickname: '母机昵称', connection: '连接', outbound: '主动连接', endpoint: '端点',
       deviceRenamed: '设备名称已更新', hubNicknameSaved: '母机昵称已更新', nameRequired: '名称不能为空',
+      removeDevice: '移除', removeDeviceConfirm: '确定从 Hub 移除此设备吗？在线设备下次心跳可能重新注册。', deviceRemoved: '设备已移除',
       console: '控制台', settings: '设置', refresh: '刷新', start: '启动 Hub', stop: '停止 Hub',
       running: '运行中', stopped: '未运行', owned: '插件托管', external: '外部进程',
       devices: '设备', tasks: '任务', online: '在线', offline: '离线',
@@ -52,6 +53,7 @@ window.__ModuleLoader__.load({
       edit: 'Edit', rename: 'Rename', saveName: 'Save', cancelEdit: 'Cancel',
       hubNickname: 'Hub nickname', connection: 'Connection', outbound: 'outbound', endpoint: 'endpoint',
       deviceRenamed: 'Device renamed', hubNicknameSaved: 'Hub nickname saved', nameRequired: 'Name is required',
+      removeDevice: 'Remove', removeDeviceConfirm: 'Remove this device from the hub? An online device may re-register on its next heartbeat.', deviceRemoved: 'Device removed',
       console: 'Console', settings: 'Settings', refresh: 'Refresh', start: 'Start hub', stop: 'Stop hub',
       running: 'Running', stopped: 'Stopped', owned: 'plugin-managed', external: 'external process',
       devices: 'Devices', tasks: 'Tasks', online: 'online', offline: 'offline',
@@ -186,7 +188,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function DeviceCard({ device, t, hubOrigin, onRename }) {
+    function DeviceCard({ device, t, hubOrigin, onRename, onRemove }) {
       const caps = device.capabilities || {}
       const models = (caps.models || []).slice(0, 4)
       const skills = (caps.skills || []).slice(0, 6)
@@ -224,6 +226,10 @@ window.__ModuleLoader__.load({
             editing
               ? h('button', { style: { ...btn(false), padding: '3px 8px', fontSize: 12 }, onClick: () => setEditing(false) }, t('cancelEdit'))
               : h(Badge, { tone: device.online ? 'ok' : 'idle' }, device.online ? t('online') : t('offline')),
+            h('button', {
+              style: { ...btn(false), padding: '3px 8px', fontSize: 12, color: COLORS.err },
+              onClick: () => onRemove(device),
+            }, t('removeDevice')),
           ),
         ),
         h('div', { style: { ...muted, marginTop: 6, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, connection),
@@ -303,7 +309,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function ConsoleTab({ status, snapshot, t, onRefresh, onHub, onTaskAction, onSend, onRenameDevice, hubOrigin, busy, message }) {
+    function ConsoleTab({ status, snapshot, t, onRefresh, onHub, onTaskAction, onSend, onRenameDevice, onRemoveDevice, hubOrigin, busy, message }) {
       const devices = (snapshot && snapshot.devices) || []
       const allTasks = (snapshot && snapshot.tasks) || []
       const tasks = allTasks.filter((task) => !task.parentTaskId)
@@ -360,7 +366,7 @@ window.__ModuleLoader__.load({
         h('section', null,
           h('h3', { style: { fontSize: 14, margin: '0 0 10px' } }, `${t('devices')} (${devices.length})`),
           devices.length
-            ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 12 } }, ...devices.map((d) => h(DeviceCard, { key: d.id, device: d, t, hubOrigin, onRename: onRenameDevice })))
+            ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 12 } }, ...devices.map((d) => h(DeviceCard, { key: d.id, device: d, t, hubOrigin, onRename: onRenameDevice, onRemove: onRemoveDevice })))
             : h('div', { style: { ...card, ...muted } }, t('noDevices')),
         ),
         h('section', { style: card },
@@ -588,6 +594,12 @@ window.__ModuleLoader__.load({
         await load()
         setMessage(t('deviceRenamed'))
       })
+      const onRemoveDevice = (device) => withBusy(async () => {
+        if (!window.confirm(t('removeDeviceConfirm'))) return
+        await call(`/devices/${encodeURIComponent(device.id)}`, { method: 'DELETE' })
+        await load()
+        setMessage(t('deviceRemoved'))
+      })
       const onSave = async (payload) => {
         setBusy(true)
         try {
@@ -657,7 +669,7 @@ window.__ModuleLoader__.load({
               ? h(ConsoleTab, {
                   status, snapshot, t, busy, message,
                   onRefresh: () => void load(), onHub, onTaskAction, onSend,
-                  onRenameDevice, hubOrigin: status && status.hub ? status.hub.origin : '',
+                  onRenameDevice, onRemoveDevice, hubOrigin: status && status.hub ? status.hub.origin : '',
                 })
               : h(SettingsTab, {
                   settings: settingsData && settingsData.settings, secrets: settingsData && settingsData.secrets, status, t, busy, message, onSave,

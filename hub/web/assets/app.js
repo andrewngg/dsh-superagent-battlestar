@@ -1266,8 +1266,14 @@
       relNode(device.lastSeenAt, '心跳 '),
     );
     if (active.length) footLeft.appendChild(el('span', { text: ` · ${active.length} 个任务` }));
+    const removeBtn = el('button', { type: 'button', className: 'link-btn device-remove', text: '移除' });
+    removeBtn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      deleteDevice(device.id);
+    });
     card.appendChild(el('div', { className: 'device-foot' },
       footLeft,
+      removeBtn,
       el('span', { className: 'open-hint' }, '详情', icon('chevron')),
     ));
 
