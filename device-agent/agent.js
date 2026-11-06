@@ -18,6 +18,7 @@
  */
 
 const os = require('node:os');
+const fs = require('node:fs');
 const path = require('node:path');
 
 const { discover, loadConfig, AGENT_VERSION } = require('./lib/discovery');
@@ -579,6 +580,28 @@ class Agent {
     }
   }
 
+  _materializeAttachments(task) {
+    if (!Array.isArray(task.attachments) || !task.attachments.length) return;
+    const dir = path.join(this.stateDir, 'attachments', task.id);
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      const paths = [];
+      task.attachments.forEach((file, index) => {
+        if (!file || !file.data) return;
+        const safe = String(file.name || `file-${index + 1}`).replace(/[\\/:*?"<>|]/g, '_').slice(0, 120);
+        const target = path.join(dir, `${index + 1}-${safe}`);
+        fs.writeFileSync(target, Buffer.from(String(file.data), 'base64'));
+        paths.push(target);
+      });
+      if (paths.length) {
+        task.attachmentPaths = paths;
+        task.instruction = `【任务附件】\n以下是用户随任务上传的文件，请直接读取：\n${paths.map((p) => `- ${p}`).join('\n')}\n\n${task.instruction}`;
+      }
+    } catch (err) {
+      this.log.warn(`附件写入失败：${err && err.message ? err.message : err}`);
+    }
+  }
+
   _taskFromCommand(command) {
     const payload = isPlainObject(command.payload) ? command.payload : {};
     return {
@@ -589,6 +612,7 @@ class Agent {
       priority: Number.isFinite(payload.priority) ? payload.priority : 5,
       timeoutSec: Number.isFinite(payload.timeoutSec) ? payload.timeoutSec : 300,
       context: isPlainObject(payload.context) ? payload.context : {},
+      attachments: Array.isArray(payload.attachments) ? payload.attachments : [],
       threadId: typeof payload.threadId === 'string' ? payload.threadId : '',
       replyToTaskId: typeof payload.replyToTaskId === 'string' ? payload.replyToTaskId : null,
       threadStep: Number.isFinite(payload.threadStep) ? payload.threadStep : 1,
@@ -644,6 +668,7 @@ class Agent {
     }
 
     const task = this._taskFromCommand(command);
+    this._materializeAttachments(task);
     const context = isPlainObject(task.context) ? task.context : {};
     if (context.previousInstruction || context.previousOutput || context.previousError) {
       const parts = ['【BattleStar 任务线程上下文】'];

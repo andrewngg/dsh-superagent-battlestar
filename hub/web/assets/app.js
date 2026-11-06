@@ -196,6 +196,7 @@
     history: [],
     taskFilter: 'all',
     selectedSkills: new Set(),
+    pendingAttachments: [],
     followUpTaskId: null,
     routeTask: null,
     expandedEvents: new Set(),
@@ -1611,6 +1612,8 @@
       timeoutSec: num(Number($('#timeout').value), 300),
       maxAttempts: 2,
     };
+    const attachments = attachmentPayload();
+    if (attachments.length) payload.attachments = attachments;
     setSendBusy(true);
     try {
       const endpoint = state.followUpTaskId
@@ -1628,6 +1631,7 @@
       setRouteResult(task);
       textarea.value = '';
       cancelFollowUp();
+      clearPendingAttachments();
       updateComposerTarget();
       const assigned = !!task.assignedDeviceId;
       const prefix = wasFollowUp ? '已创建下一步任务' : '';
@@ -1804,6 +1808,15 @@
     );
     card.appendChild(top);
     card.appendChild(el('p', { className: 'task-instruction', text: task.instruction || '（无指令内容）' }));
+    const taskAttachments = Array.isArray(task.attachments) ? task.attachments : [];
+    if (taskAttachments.length) {
+      card.appendChild(el('div', { className: 'task-attachments' },
+        ...taskAttachments.map((file) => el('span', { className: 'task-attachment', title: file.name },
+          icon('link'),
+          el('span', { className: 'name', text: file.name }),
+        )),
+      ));
+    }
     if (task.isPlan) {
       const children = subtaskList(task);
       if (children) card.appendChild(children);
@@ -2011,9 +2024,109 @@
     return `${token.slice(0, 4)}••••${token.slice(-4)}`;
   }
 
+  const ATTACHMENT_LIMITS = { count: 3, bytes: 2 * 1024 * 1024, total: 4 * 1024 * 1024 };
+
+  function formatBytes(bytes) {
+    const value = Number(bytes) || 0;
+    if (value < 1024) return `${value} B`;
+    if (value < 1024 * 1024) return `${(value / 1024).toFixed(value < 10240 ? 1 : 0)} KB`;
+    return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  function renderPendingAttachments() {
+    const list = $('#attachment-list');
+    if (!list) return;
+    list.replaceChildren();
+    list.hidden = state.pendingAttachments.length === 0;
+    state.pendingAttachments.forEach((file, index) => {
+      const chip = el('span', { className: 'attachment-chip' },
+        icon('link'),
+        el('span', { className: 'name', text: file.name, title: file.name }),
+        el('span', { className: 'size', text: formatBytes(file.size) }),
+        el('button', {
+          type: 'button', text: '×', title: '移除附件',
+          onclick: () => {
+            state.pendingAttachments.splice(index, 1);
+            renderPendingAttachments();
+          },
+        }),
+      );
+      list.appendChild(chip);
+    });
+    const hint = $('#attach-hint');
+    if (hint) {
+      const total = state.pendingAttachments.reduce((sum, file) => sum + file.size, 0);
+      hint.textContent = state.pendingAttachments.length
+        ? `${state.pendingAttachments.length}/${ATTACHMENT_LIMITS.count} 个 · ${formatBytes(total)}`
+        : '小文件 ≤2MB，最多 3 个';
+    }
+  }
+
+  function fileToDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(new Error(`读取 ${file.name} 失败`));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function addPendingFiles(fileList) {
+    const files = Array.from(fileList || []);
+    const current = state.pendingAttachments.reduce((sum, file) => sum + file.size, 0);
+    let total = current;
+    for (const file of files) {
+      if (state.pendingAttachments.length >= ATTACHMENT_LIMITS.count) {
+        toast(`最多附加 ${ATTACHMENT_LIMITS.count} 个文件`, 'warn');
+        break;
+      }
+      if (file.size > ATTACHMENT_LIMITS.bytes) {
+        toast(`${file.name} 超过 2MB`, 'warn');
+        continue;
+      }
+      if (total + file.size > ATTACHMENT_LIMITS.total) {
+        toast('附件总大小超过 4MB', 'warn');
+        break;
+      }
+      try {
+        const data = await fileToDataUrl(file);
+        state.pendingAttachments.push({ name: file.name, type: file.type || 'application/octet-stream', size: file.size, data });
+        total += file.size;
+      } catch (err) {
+        toast(err.message || '读取附件失败', 'error');
+      }
+    }
+    renderPendingAttachments();
+  }
+
+  function clearPendingAttachments() {
+    state.pendingAttachments = [];
+    renderPendingAttachments();
+    const input = $('#file-input');
+    if (input) input.value = '';
+  }
+
+  function attachmentPayload() {
+    return state.pendingAttachments.map((file) => ({
+      name: file.name,
+      type: file.type,
+      size: file.size,
+      data: file.data,
+    }));
+  }
+
   function copyText(text, successMessage) {
     const done = () => toast(successMessage || '已复制', 'success');
     const fail = () => toast('复制失败，请手动选择文本', 'error');
+    if (window.ButlerBridge && typeof window.ButlerBridge.copyText === 'function') {
+      try {
+        window.ButlerBridge.copyText(String(text || ''));
+        done();
+        return;
+      } catch {
+        /* 回退到浏览器剪贴板 */
+      }
+    }
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).then(done).catch(() => fallback());
     } else {
@@ -3008,6 +3121,15 @@
 
     /* 指令表单 */
     $('#task-form').addEventListener('submit', sendTask);
+    const attachBtn = $('#attach-btn');
+    const fileInput = $('#file-input');
+    if (attachBtn && fileInput) {
+      attachBtn.addEventListener('click', () => fileInput.click());
+      fileInput.addEventListener('change', () => {
+        void addPendingFiles(fileInput.files);
+        fileInput.value = '';
+      });
+    }
     const followupCancel = $('#followup-cancel');
     if (followupCancel) followupCancel.addEventListener('click', cancelFollowUp);
     $('#instruction').addEventListener('keydown', (event) => {

@@ -19,8 +19,32 @@ const { LIMITS } = protocol;
 const TASK_ACTION_RE = /^tasks\/([^/]+)\/(ack|progress|result)$/;
 const TASK_ADMIN_RE = /^\/api\/tasks\/([^/]+)(?:\/(cancel|retry|archive|unarchive))?$/;
 const TASK_FOLLOW_RE = /^\/api\/tasks\/([^/]+)\/follow-up$/;
+const TASK_BODY_BYTES = 8 * 1024 * 1024;
+const MAX_ATTACHMENT_COUNT = 3;
+const MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024;
+const MAX_ATTACHMENTS_TOTAL = 4 * 1024 * 1024;
 
-// ---------------------------------------------------------------- 基础工具
+function normalizeAttachments(raw) {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) throw badRequest('attachments 必须是数组');
+  if (raw.length > MAX_ATTACHMENT_COUNT) throw badRequest(`最多附加 ${MAX_ATTACHMENT_COUNT} 个文件`);
+  let total = 0;
+  return raw.map((item) => {
+    if (!item || typeof item !== 'object') throw badRequest('附件格式不正确');
+    const name = String(item.name || 'file')
+      .replace(/[\\/:*?"<>|]/g, '_')
+      .slice(0, 120) || 'file';
+    const mime = String(item.type || item.mime || 'application/octet-stream').slice(0, 120);
+    const source = String(item.data || '').replace(/^data:[^;]+;base64,/i, '').replace(/\s+/g, '');
+    if (!source || !/^[A-Za-z0-9+/]+={0,2}$/.test(source)) throw badRequest(`附件 ${name} 不是合法 base64`);
+    const size = Buffer.byteLength(source, 'base64');
+    if (!size) throw badRequest(`附件 ${name} 是空文件`);
+    if (size > MAX_ATTACHMENT_BYTES) throw badRequest(`附件 ${name} 超过 2 MiB`);
+    total += size;
+    if (total > MAX_ATTACHMENTS_TOTAL) throw badRequest('附件总大小超过 4 MiB');
+    return { id: protocol.randomId('att'), name, mime, size, data: source };
+  });
+}
 
 function headerValue(req, name) {
   const value = req.headers[name];
@@ -59,7 +83,7 @@ function queryString(url, name) {
 }
 
 /** 读取 JSON 请求体；空体视为 {}；非对象 → 400。 */
-function readJsonBody(req) {
+function readJsonBody(req, maxBytes = LIMITS.MAX_BODY_BYTES) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
@@ -72,8 +96,8 @@ function readJsonBody(req) {
     req.on('data', (chunk) => {
       if (settled) return;
       size += chunk.length;
-      if (size > LIMITS.MAX_BODY_BYTES) {
-        fail(badRequest('请求体过大（上限 1 MiB）'));
+      if (size > maxBytes) {
+        fail(badRequest(`请求体过大（上限 ${Math.round(maxBytes / 1024 / 1024)} MiB）`));
         req.destroy();
         return;
       }
@@ -222,8 +246,9 @@ async function handleRequest(hub, req, res) {
   if (pathname === '/api/tasks') {
     requireAdmin(hub, req, url);
     if (method === 'POST') {
-      const body = await readJsonBody(req);
-      const task = hub.shouldAutoSplit(body) ? await hub.createPlanTask(body) : hub.createTask(body);
+      const body = await readJsonBody(req, TASK_BODY_BYTES);
+      const input = { ...body, attachments: normalizeAttachments(body.attachments) };
+      const task = hub.shouldAutoSplit(input) ? await hub.createPlanTask(input) : hub.createTask(input);
       return sendJson(res, 200, { task: hub.taskToJson(task) });
     }
     if (method === 'GET') {
@@ -248,9 +273,9 @@ async function handleRequest(hub, req, res) {
     } catch {
       throw badRequest('任务 ID 非法');
     }
-    const body = await readJsonBody(req);
+    const body = await readJsonBody(req, TASK_BODY_BYTES);
     const source = hub._requireTask(sourceId);
-    const task = hub.createFollowUp(source, body);
+    const task = hub.createFollowUp(source, { ...body, attachments: normalizeAttachments(body.attachments) });
     return sendJson(res, 200, { task: hub.taskToJson(task) });
   }
 

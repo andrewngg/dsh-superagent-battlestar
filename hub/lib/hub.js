@@ -307,7 +307,10 @@ class Hub {
         registeredAt: device.registeredAt,
         lastSeenAt: device.lastSeenAt,
       })),
-      tasks: [...this.tasks.values()].map((task) => this.taskToJson(task)),
+      tasks: [...this.tasks.values()].map((task) => ({
+        ...this.taskToJson(task),
+        attachments: (task.attachments || []).map((file) => ({ ...file })),
+      })),
       events: this.events.slice(-this.eventLimit),
     };
   }
@@ -401,6 +404,7 @@ class Hub {
       replyToTaskId: util.str(raw.replyToTaskId, 80) || null,
       threadStep: util.clampInt(raw.threadStep, 1, 1, 10000),
       context: util.isPlainObject(raw.context) ? raw.context : null,
+      attachments: util.arr(raw.attachments).filter((file) => util.isPlainObject(file) && file.name && file.data),
       isPlan: raw.isPlan === true,
       archived: raw.archived === true,
       archivedAt: util.str(raw.archivedAt, 40) || null,
@@ -455,6 +459,12 @@ class Hub {
       replyToTaskId: task.replyToTaskId || null,
       threadStep: Number.isFinite(task.threadStep) ? task.threadStep : 1,
       context: task.context ? { ...task.context } : null,
+      attachments: (task.attachments || []).map((file) => ({
+        id: file.id,
+        name: file.name,
+        mime: file.mime,
+        size: file.size,
+      })),
       isPlan: Boolean(task.isPlan),
       archived: Boolean(task.archived),
       archivedAt: task.archivedAt || null,
@@ -930,6 +940,7 @@ class Hub {
       replyToTaskId: typeof input.replyToTaskId === 'string' && input.replyToTaskId ? input.replyToTaskId : null,
       threadStep: Number.isFinite(Number(input.threadStep)) ? Math.max(1, Math.trunc(Number(input.threadStep))) : 1,
       context: util.isPlainObject(input.context) ? input.context : null,
+      attachments: Array.isArray(input.attachments) ? input.attachments : [],
       isPlan: false,
       archived: false,
       archivedAt: null,
@@ -970,6 +981,7 @@ class Hub {
       previousArtifacts: source.output && Array.isArray(source.output.artifacts)
         ? source.output.artifacts.slice(0, 10)
         : [],
+      previousAttachments: (source.attachments || []).map((file) => file.name),
       historySummary: threadTasks
         .slice(0, 10)
         .map((task) => `${task.threadStep || 1}. [${task.status}] ${util.truncate(task.instruction, 120)}`)
@@ -994,6 +1006,7 @@ class Hub {
       replyToTaskId: source.id,
       threadStep: context.step,
       context,
+      attachments: Array.isArray(input.attachments) ? input.attachments : [],
     });
   }
 
@@ -1055,6 +1068,7 @@ class Hub {
       replyToTaskId: null,
       threadStep: 1,
       context: null,
+      attachments: Array.isArray(input.attachments) ? input.attachments : [],
       isPlan: true,
       archived: false,
       archivedAt: null,
@@ -1082,6 +1096,7 @@ class Hub {
         parentTaskId: parent.id,
         threadId: parent.threadId,
         threadStep: 1,
+        attachments: parent.attachments || [],
       });
       parent.childTaskIds.push(child.id);
     }
@@ -1308,6 +1323,7 @@ class Hub {
           requestedAt: protocol.nowIso(),
           ...(task.context || {}),
         },
+        attachments: (task.attachments || []).map((file) => ({ ...file })),
       },
     };
   }

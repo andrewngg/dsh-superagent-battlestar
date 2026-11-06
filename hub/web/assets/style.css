@@ -1675,3 +1675,35 @@ select:focus, input:focus { outline: none; border-color: rgba(124, 140, 255, 0.6
 .followup-copy span { font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .thread-wrap { margin-top: 9px; padding: 9px; border-radius: 11px; background: rgba(255, 255, 255, 0.035); border: 1px dashed rgba(148, 163, 255, 0.22); }
 .thread-head { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-dim); margin-bottom: 6px; }
+
+/* BattleStar: task file attachments */
+.composer-attachment-tools { display: flex; align-items: center; gap: 8px; margin-top: 7px; }
+.composer-attachment-tools .muted { font-size: 10.5px; }
+.attachment-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+.attachment-list[hidden] { display: none; }
+.attachment-chip { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 4px 7px; border-radius: 8px; background: rgba(124, 140, 255, 0.1); border: 1px solid rgba(124, 140, 255, 0.22); font-size: 11px; color: var(--text); }
+.attachment-chip .name { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-chip .size { color: var(--text-dim); font-size: 10px; }
+.attachment-chip button { border: 0; background: transparent; color: var(--text-dim); padding: 0 2px; font-size: 14px; line-height: 1; cursor: pointer; }
+.attachment-chip button:hover { color: var(--status-failed); }
+.task-attachments { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+.task-attachment { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; padding: 2px 6px; border-radius: 6px; background: rgba(255,255,255,0.045); border: 1px solid rgba(148,163,255,0.12); font-size: 10.5px; color: var(--text-dim); }
+.task-attachment .name { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 600px) {
+  .composer-attachment-tools { flex-wrap: wrap; }
+  .attachment-chip .name { max-width: 120px; }
+}
+
+/* BattleStar: narrow-screen action layout (avoid cut-off buttons) */
+@media (max-width: 600px) {
+  .task-card { max-width: 100%; box-sizing: border-box; }
+  .task-actions { gap: 5px; }
+  .task-actions .link-btn { flex: 1 1 calc(50% - 5px); justify-content: center; min-width: 0; }
+  .task-actions .link-btn span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .task-actions .spacer { display: none; }
+  .subtask-wrap, .thread-wrap { max-width: 100%; box-sizing: border-box; overflow: hidden; }
+  .subtask-row { min-width: 0; }
+  .followup-banner { flex-wrap: wrap; align-items: flex-start; }
+  .followup-copy { flex: 1 1 100%; }
+  .followup-banner .link-btn { flex: none; margin-left: auto; }
+}

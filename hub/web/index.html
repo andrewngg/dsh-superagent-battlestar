@@ -173,6 +173,15 @@
                 <div class="composer-hint"><kbd>Ctrl</kbd> + <kbd>Enter</kbd> 发送</div>
               </div>
 
+              <div class="composer-attachment-tools">
+                <button type="button" class="link-btn" id="attach-btn">
+                  <svg class="icon"><use href="#i-link"></use></svg><span>添加附件</span>
+                </button>
+                <input type="file" id="file-input" multiple hidden>
+                <span class="muted" id="attach-hint">小文件 ≤2MB，最多 3 个</span>
+              </div>
+              <div id="attachment-list" class="attachment-list" hidden></div>
+
               <div class="field-row">
                 <div class="field">
                   <label for="req-model">模型要求</label>

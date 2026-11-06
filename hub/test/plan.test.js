@@ -90,3 +90,25 @@ test('任务线程：follow-up 继承上下文并可级联归档/删除', async 
   assert.equal(env.hub.getTask(source.id), null);
   assert.equal(env.hub.getTask(follow.id), null);
 });
+
+test('任务附件：元数据与设备命令回传', async (t) => {
+  const env = await startTestHub(t);
+  const device = await registerDevice(env, makeManifest({ skills: [{ id: 'office-docx', name: 'Word' }] }));
+  const data = Buffer.from('hello attachment').toString('base64');
+  const res = await request(env.base, 'POST', '/api/tasks', {
+    headers: adminHeaders(env),
+    body: {
+      instruction: '读取附件',
+      requirements: { deviceId: device.deviceId },
+      timeoutSec: 60,
+      attachments: [{ name: 'a.txt', type: 'text/plain', data }],
+    },
+  });
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.json.task.attachments.map((file) => file.name), ['a.txt']);
+  assert.equal(res.json.task.attachments[0].data, undefined);
+  const command = env.hub.devices.get(device.deviceId).commands.find((item) => item.taskId === res.json.task.id);
+  assert.equal(command.payload.attachments[0].name, 'a.txt');
+  assert.equal(command.payload.attachments[0].data, data);
+  await request(env.base, 'DELETE', `/api/tasks/${res.json.task.id}`, { headers: adminHeaders(env) });
+});

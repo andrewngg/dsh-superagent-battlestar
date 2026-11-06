@@ -6,6 +6,9 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
@@ -18,6 +21,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.webkit.JavascriptInterface;
+import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
@@ -63,6 +67,7 @@ public class MainActivity extends Activity {
     private static final String TASK_PROGRESS_CHANNEL = "butler_task_progress";
     private static final String TASK_DONE_CHANNEL = "butler_task_done";
     private static final int REQ_POST_NOTIFICATIONS = 7301;
+    private static final int REQ_FILE_CHOOSER = 7302;
     private static final int TASK_NOTIFY_BASE = 7300;
 
     private static final int BRAND_BG = Color.parseColor("#141026");
@@ -76,6 +81,7 @@ public class MainActivity extends Activity {
     private boolean bridgeAdded = false;
     private boolean showingError = false;
     private boolean pendingClearHistory = false;
+    private ValueCallback<Uri[]> pendingFileCallback;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -90,7 +96,7 @@ public class MainActivity extends Activity {
         webView.setOverScrollMode(View.OVER_SCROLL_NEVER);
         configureSettings(webView.getSettings());
         webView.setWebViewClient(new ButlerWebViewClient());
-        webView.setWebChromeClient(new WebChromeClient());
+        webView.setWebChromeClient(new ButlerWebChromeClient());
 
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(BRAND_BG);
@@ -290,6 +296,59 @@ public class MainActivity extends Activity {
     // ------------------------------------------------------------------
     // WebViewClient
     // ------------------------------------------------------------------
+
+    private final class ButlerWebChromeClient extends WebChromeClient {
+
+        @Override
+        public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> filePathCallback,
+                                         FileChooserParams params) {
+            if (pendingFileCallback != null) {
+                pendingFileCallback.onReceiveValue(null);
+            }
+            pendingFileCallback = filePathCallback;
+            Intent intent;
+            try {
+                intent = params.createIntent();
+            } catch (Exception e) {
+                intent = new Intent(Intent.ACTION_GET_CONTENT);
+                intent.addCategory(Intent.CATEGORY_OPENABLE);
+            }
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+            intent.setType("*/*");
+            try {
+                startActivityForResult(intent, REQ_FILE_CHOOSER);
+            } catch (Exception e) {
+                pendingFileCallback = null;
+                Toast.makeText(MainActivity.this, "无法打开文件选择器", Toast.LENGTH_SHORT).show();
+                return false;
+            }
+            return true;
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (requestCode == REQ_FILE_CHOOSER) {
+            if (pendingFileCallback == null) return;
+            Uri[] results = null;
+            if (resultCode == RESULT_OK && data != null) {
+                ClipData clip = data.getClipData();
+                if (clip != null && clip.getItemCount() > 0) {
+                    results = new Uri[clip.getItemCount()];
+                    for (int i = 0; i < clip.getItemCount(); i++) {
+                        results[i] = clip.getItemAt(i).getUri();
+                    }
+                } else if (data.getData() != null) {
+                    results = new Uri[]{data.getData()};
+                }
+            }
+            pendingFileCallback.onReceiveValue(results);
+            pendingFileCallback = null;
+            return;
+        }
+        super.onActivityResult(requestCode, resultCode, data);
+    }
 
     private final class ButlerWebViewClient extends WebViewClient {
 
@@ -509,6 +568,19 @@ public class MainActivity extends Activity {
     // 必须为 public：WebView 的 JavaBridge 通过反射调用 @JavascriptInterface 方法，
     // 非 public 内部类会让 Method.invoke 抛 IllegalAccessException。
     public final class Bridge {
+
+        @JavascriptInterface
+        public void copyText(String text) {
+            if (!bridgeAllowed) return;
+            final String value = text == null ? "" : text;
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    ClipboardManager manager = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                    if (manager != null) manager.setPrimaryClip(ClipData.newPlainText("BattleStar", value));
+                }
+            });
+        }
 
         @JavascriptInterface
         public String getConfig() {
