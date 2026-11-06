@@ -1266,6 +1266,14 @@
       relNode(device.lastSeenAt, '心跳 '),
     );
     if (active.length) footLeft.appendChild(el('span', { text: ` · ${active.length} 个任务` }));
+    const toggleBtn = el('button', {
+      type: 'button', className: 'link-btn device-disable',
+      text: device.disabled ? '启用' : '禁用',
+    });
+    toggleBtn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      toggleDeviceDisabled(device.id);
+    });
     const removeBtn = el('button', { type: 'button', className: 'link-btn device-remove', text: '移除' });
     removeBtn.addEventListener('click', (event) => {
       event.stopPropagation();
@@ -1273,6 +1281,7 @@
     });
     card.appendChild(el('div', { className: 'device-foot' },
       footLeft,
+      toggleBtn,
       removeBtn,
       el('span', { className: 'open-hint' }, '详情', icon('chevron')),
     ));

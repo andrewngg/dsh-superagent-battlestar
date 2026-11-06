@@ -19,6 +19,7 @@ window.__ModuleLoader__.load({
       hubNickname: '母机昵称', connection: '连接', outbound: '主动连接', endpoint: '端点',
       deviceRenamed: '设备名称已更新', hubNicknameSaved: '母机昵称已更新', nameRequired: '名称不能为空',
       removeDevice: '移除', removeDeviceConfirm: '确定从 Hub 移除此设备吗？在线设备下次心跳可能重新注册。', deviceRemoved: '设备已移除',
+      disableDevice: '禁用', enableDevice: '启用', disabled: '已禁用', deviceDisabled: '设备已禁用，不再接收任务', deviceEnabled: '设备已启用',
       console: '控制台', settings: '设置', refresh: '刷新', start: '启动 Hub', stop: '停止 Hub',
       running: '运行中', stopped: '未运行', owned: '插件托管', external: '外部进程',
       devices: '设备', tasks: '任务', online: '在线', offline: '离线',
@@ -54,6 +55,7 @@ window.__ModuleLoader__.load({
       hubNickname: 'Hub nickname', connection: 'Connection', outbound: 'outbound', endpoint: 'endpoint',
       deviceRenamed: 'Device renamed', hubNicknameSaved: 'Hub nickname saved', nameRequired: 'Name is required',
       removeDevice: 'Remove', removeDeviceConfirm: 'Remove this device from the hub? An online device may re-register on its next heartbeat.', deviceRemoved: 'Device removed',
+      disableDevice: 'Disable', enableDevice: 'Enable', disabled: 'Disabled', deviceDisabled: 'Device disabled; it will no longer receive tasks', deviceEnabled: 'Device enabled',
       console: 'Console', settings: 'Settings', refresh: 'Refresh', start: 'Start hub', stop: 'Stop hub',
       running: 'Running', stopped: 'Stopped', owned: 'plugin-managed', external: 'external process',
       devices: 'Devices', tasks: 'Tasks', online: 'online', offline: 'offline',
@@ -188,7 +190,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function DeviceCard({ device, t, hubOrigin, onRename, onRemove }) {
+    function DeviceCard({ device, t, hubOrigin, onRename, onRemove, onToggle }) {
       const caps = device.capabilities || {}
       const models = (caps.models || []).slice(0, 4)
       const skills = (caps.skills || []).slice(0, 6)
@@ -225,7 +227,13 @@ window.__ModuleLoader__.load({
               : h('button', { style: { ...btn(false), padding: '3px 8px', fontSize: 12 }, onClick: () => setEditing(true) }, t('edit')),
             editing
               ? h('button', { style: { ...btn(false), padding: '3px 8px', fontSize: 12 }, onClick: () => setEditing(false) }, t('cancelEdit'))
-              : h(Badge, { tone: device.online ? 'ok' : 'idle' }, device.online ? t('online') : t('offline')),
+              : device.disabled
+                ? h(Badge, { tone: 'idle' }, t('disabled'))
+                : h(Badge, { tone: device.online ? 'ok' : 'idle' }, device.online ? t('online') : t('offline')),
+            h('button', {
+              style: { ...btn(false), padding: '3px 8px', fontSize: 12 },
+              onClick: () => onToggle(device),
+            }, device.disabled ? t('enableDevice') : t('disableDevice')),
             h('button', {
               style: { ...btn(false), padding: '3px 8px', fontSize: 12, color: COLORS.err },
               onClick: () => onRemove(device),
@@ -309,7 +317,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function ConsoleTab({ status, snapshot, t, onRefresh, onHub, onTaskAction, onSend, onRenameDevice, onRemoveDevice, hubOrigin, busy, message }) {
+    function ConsoleTab({ status, snapshot, t, onRefresh, onHub, onTaskAction, onSend, onRenameDevice, onRemoveDevice, onToggleDevice, hubOrigin, busy, message }) {
       const devices = (snapshot && snapshot.devices) || []
       const allTasks = (snapshot && snapshot.tasks) || []
       const tasks = allTasks.filter((task) => !task.parentTaskId)
@@ -366,7 +374,7 @@ window.__ModuleLoader__.load({
         h('section', null,
           h('h3', { style: { fontSize: 14, margin: '0 0 10px' } }, `${t('devices')} (${devices.length})`),
           devices.length
-            ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 12 } }, ...devices.map((d) => h(DeviceCard, { key: d.id, device: d, t, hubOrigin, onRename: onRenameDevice, onRemove: onRemoveDevice })))
+            ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 12 } }, ...devices.map((d) => h(DeviceCard, { key: d.id, device: d, t, hubOrigin, onRename: onRenameDevice, onRemove: onRemoveDevice, onToggle: onToggleDevice })))
             : h('div', { style: { ...card, ...muted } }, t('noDevices')),
         ),
         h('section', { style: card },
@@ -600,6 +608,14 @@ window.__ModuleLoader__.load({
         await load()
         setMessage(t('deviceRemoved'))
       })
+      const onToggleDevice = (device) => withBusy(async () => {
+        const res = await call(`/devices/${encodeURIComponent(device.id)}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ disabled: !device.disabled }),
+        })
+        await load()
+        setMessage(res && res.device && res.device.disabled ? t('deviceDisabled') : t('deviceEnabled'))
+      })
       const onSave = async (payload) => {
         setBusy(true)
         try {
@@ -669,7 +685,7 @@ window.__ModuleLoader__.load({
               ? h(ConsoleTab, {
                   status, snapshot, t, busy, message,
                   onRefresh: () => void load(), onHub, onTaskAction, onSend,
-                  onRenameDevice, onRemoveDevice, hubOrigin: status && status.hub ? status.hub.origin : '',
+                  onRenameDevice, onRemoveDevice, onToggleDevice, hubOrigin: status && status.hub ? status.hub.origin : '',
                 })
               : h(SettingsTab, {
                   settings: settingsData && settingsData.settings, secrets: settingsData && settingsData.secrets, status, t, busy, message, onSave,
