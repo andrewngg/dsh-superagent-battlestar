@@ -17,6 +17,7 @@
  */
 
 import { spawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
@@ -182,6 +183,153 @@ export function apply(ctx, rawConfig = {}) {
       return undefined
     }
   })()
+  const dshSession = (() => {
+    try {
+      return ctx.get('sessionController')
+    } catch {
+      return undefined
+    }
+  })()
+  const dshApproval = (() => {
+    try {
+      return ctx.get('approval')
+    } catch {
+      return undefined
+    }
+  })()
+  const devState = { sessionId: '', jobSeq: 0, jobs: new Map() }
+
+  const DEV_PREFIX = [
+    '你是 BattleStar Developer Mode，运行在 DeepSeek Harness 里。',
+    `只能修改这个仓库：${state.settings.projectRoot}`,
+    '不要读取、输出或提交私人 token、密钥、密码、个人隐私数据；不要把这些信息写进公开仓库。',
+    '用户允许你直接修改代码，不需要逐文件确认；修改后请运行相关测试，并简要汇报改了哪些文件、测试结果。',
+    '不要执行 git push，除非用户在消息里明确要求。',
+  ].join('\n')
+
+  function dshAvailable() {
+    return Boolean(dshSession && typeof dshSession.create === 'function')
+  }
+
+  function extractAssistantText(frame) {
+    if (!frame || typeof frame !== 'object') return ''
+    const event = frame.type === 'event' ? frame.event : null
+    if (!event || event.type !== 'assistant/message') return ''
+    const content = event.data && event.data.message && event.data.message.content
+    if (!Array.isArray(content)) return ''
+    return content
+      .filter((block) => block && block.type === 'text' && typeof block.text === 'string')
+      .map((block) => block.text)
+      .join('')
+  }
+
+  function summarizeFrame(job, frame) {
+    if (!frame || typeof frame !== 'object') return
+    const event = frame.type === 'event' ? frame.event : null
+    if (!event) return
+    if (event.type === 'tool/call') {
+      const name = event.data && event.data.name ? String(event.data.name) : 'tool'
+      job.logs.push(`调用工具：${name}`)
+      if (job.logs.length > 40) job.logs.splice(0, job.logs.length - 40)
+    }
+    if (event.type === 'tool/result') {
+      const message = event.data && event.data.message
+      const text = message && Array.isArray(message.content)
+        ? message.content.filter((b) => b && b.type === 'text').map((b) => b.text).join('').slice(0, 240)
+        : ''
+      if (text) job.logs.push(`工具结果：${text.replace(/\s+/g, ' ').trim()}`)
+    }
+  }
+
+  async function ensureDevSession() {
+    if (devState.sessionId) return devState.sessionId
+    if (!dshAvailable()) throw new Error('DSH sessionController 不可用')
+    const created = await dshSession.create({ cwd: state.settings.projectRoot })
+    if (!created || !created.sessionId) throw new Error('DSH 未返回 sessionId')
+    devState.sessionId = String(created.sessionId)
+    return devState.sessionId
+  }
+
+  async function runDevJob(job, message) {
+    let abort
+    try {
+      const sessionId = await ensureDevSession()
+      job.sessionId = sessionId
+      if (dshApproval) {
+        try {
+          const resolved = await dshSession.resolveAgent(sessionId)
+          if (resolved && resolved.agent) dshApproval.setPolicy(resolved.agent, 'never')
+        } catch {
+          /* approval 可选 */
+        }
+      }
+      job.status = 'running'
+      job.startedAt = new Date().toISOString()
+      const controller = new AbortController()
+      abort = controller
+      job.abort = controller
+      const content = [{ type: 'text', text: `${DEV_PREFIX}\n\n用户请求：\n${message}` }]
+      await dshSession.prompt({
+        requestId: randomUUID(),
+        sessionId,
+        mode: 'queue',
+        content,
+      }, controller.signal)
+      let finalText = ''
+      let ended = false
+      const deadline = Date.now() + 30 * 60 * 1000
+      const timer = setTimeout(() => controller.abort(), Math.max(1000, deadline - Date.now()))
+      try {
+        for await (const frame of dshSession.follow({
+          address: { kind: 'session', sessionId },
+          assistantStream: true,
+        }, controller.signal)) {
+          summarizeFrame(job, frame)
+          const text = extractAssistantText(frame)
+          if (text.trim()) finalText = text.trim()
+          if (frame && frame.type === 'event' && frame.event && frame.event.type === 'turn/end') {
+            ended = true
+            break
+          }
+        }
+      } finally {
+        clearTimeout(timer)
+      }
+      job.text = finalText || (ended ? 'DSH 已完成修改（未返回文本）' : 'DSH 未返回最终文本')
+      job.status = 'done'
+      job.finishedAt = new Date().toISOString()
+    } catch (err) {
+      job.status = 'failed'
+      job.error = err && err.message ? err.message : String(err)
+      job.finishedAt = new Date().toISOString()
+    } finally {
+      if (abort) {
+        try {
+          abort.abort()
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  }
+
+  function publicJob(job) {
+    return {
+      id: job.id,
+      status: job.status,
+      sessionId: job.sessionId || '',
+      text: job.text || '',
+      error: job.error || '',
+      logs: job.logs.slice(-20),
+      createdAt: job.createdAt,
+      finishedAt: job.finishedAt || '',
+    }
+  }
+
+  function isLoopback(req) {
+    const raw = String((req.socket && req.socket.remoteAddress) || '')
+    return raw === '127.0.0.1' || raw === '::1' || raw.endsWith('127.0.0.1')
+  }
 
   const log = (...args) => {
     try {
@@ -530,8 +678,55 @@ export function apply(ctx, rawConfig = {}) {
     if (!sub.startsWith('/')) sub = `/${sub}`
     const method = (req.method || 'GET').toUpperCase()
     try {
+      if (sub === '/api/dsh/status' || sub === '/api/dsh/chat' || sub.startsWith('/api/dsh/job/') || sub === '/api/dsh/reset') {
+        if (!isLoopback(req)) return json(res, 403, { error: { code: 'forbidden', message: 'Developer Mode 只允许本机访问' } })
+      }
       if (method === 'GET' && (sub === '/api/status' || sub === '/api/status/')) {
         return json(res, 200, await statusPayload())
+      }
+      if (method === 'GET' && sub === '/api/dsh/status') {
+        return json(res, 200, {
+          available: dshAvailable(),
+          sessionId: devState.sessionId,
+          projectRoot: state.settings.projectRoot,
+          runningJobs: Array.from(devState.jobs.values()).filter((job) => job.status === 'running').length,
+        })
+      }
+      if (method === 'POST' && sub === '/api/dsh/chat') {
+        if (!dshAvailable()) {
+          return json(res, 503, { error: { code: 'dsh_unavailable', message: 'DSH sessionController 不可用' } })
+        }
+        const body = await readBody(req)
+        const message = typeof body.message === 'string' ? body.message.trim() : ''
+        if (!message) {
+          return json(res, 400, { error: { code: 'bad_request', message: 'message 不能为空' } })
+        }
+        if (message.length > 20000) {
+          return json(res, 400, { error: { code: 'bad_request', message: 'message 过长' } })
+        }
+        const job = {
+          id: `dev_${++devState.jobSeq}_${Date.now()}`,
+          status: 'queued',
+          sessionId: devState.sessionId,
+          text: '',
+          error: '',
+          logs: [],
+          createdAt: new Date().toISOString(),
+          finishedAt: '',
+        }
+        devState.jobs.set(job.id, job)
+        void runDevJob(job, message)
+        return json(res, 202, { job: publicJob(job) })
+      }
+      const devJobMatch = /^\/api\/dsh\/job\/([^/]+)$/.exec(sub)
+      if (method === 'GET' && devJobMatch) {
+        const job = devState.jobs.get(decodeURIComponent(devJobMatch[1]))
+        if (!job) return json(res, 404, { error: { code: 'not_found', message: 'Developer Mode 任务不存在' } })
+        return json(res, 200, { job: publicJob(job) })
+      }
+      if (method === 'POST' && sub === '/api/dsh/reset') {
+        devState.sessionId = ''
+        return json(res, 200, { ok: true })
       }
       if (method === 'GET' && sub === '/api/settings') {
         return json(res, 200, { settings: publicSettings(), secrets: await secretStatus() })

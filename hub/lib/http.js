@@ -21,6 +21,31 @@ const TASK_ADMIN_RE = /^\/api\/tasks\/([^/]+)(?:\/(cancel|retry|archive|unarchiv
 const TASK_FOLLOW_RE = /^\/api\/tasks\/([^/]+)\/follow-up$/;
 const TASK_ANSWER_RE = /^\/api\/tasks\/([^/]+)\/answer$/;
 const TASK_EXTERNAL_RE = /^\/api\/tasks\/([^/]+)\/external-result$/;
+const DSH_JOB_RE = /^\/api\/dsh\/job\/([^/]+)$/;
+const DSH_BRIDGE_URL = (process.env.DSH_BRIDGE_URL || 'http://127.0.0.1:50646/super-butler/api/dsh').replace(/\/+$/, '');
+
+async function dshRequest(pathname, options = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), options.timeoutMs || 30000);
+  try {
+    const res = await fetch(`${DSH_BRIDGE_URL}${pathname}`, {
+      method: options.method || 'GET',
+      headers: { 'Content-Type': 'application/json' },
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    let json = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      /* non-json */
+    }
+    return { status: res.status, data: json, text };
+  } finally {
+    clearTimeout(timer);
+  }
+}
 const TASK_BODY_BYTES = 8 * 1024 * 1024;
 const MAX_ATTACHMENT_COUNT = 3;
 const MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024;
@@ -243,6 +268,50 @@ async function handleRequest(hub, req, res) {
     if (method !== 'GET') throw notFound('接口不存在');
     const devices = [...hub.devices.values()].map((device) => hub.deviceToJson(device));
     return sendJson(res, 200, { devices, hubTime: protocol.nowIso() });
+  }
+
+  if (pathname === '/api/dsh/status') {
+    requireAdmin(hub, req, url);
+    try {
+      const out = await dshRequest('/status');
+      return sendJson(res, out.status, out.data || {});
+    } catch (err) {
+      return sendJson(res, 502, { error: { code: 'dsh_unavailable', message: `DSH bridge 不可用：${err.message}` } });
+    }
+  }
+
+  if (pathname === '/api/dsh/chat') {
+    requireAdmin(hub, req, url);
+    if (method !== 'POST') throw notFound('接口不存在');
+    const body = await readJsonBody(req);
+    try {
+      const out = await dshRequest('/chat', { method: 'POST', body });
+      return sendJson(res, out.status, out.data || {});
+    } catch (err) {
+      return sendJson(res, 502, { error: { code: 'dsh_unavailable', message: `DSH bridge 不可用：${err.message}` } });
+    }
+  }
+
+  if (pathname === '/api/dsh/reset') {
+    requireAdmin(hub, req, url);
+    if (method !== 'POST') throw notFound('接口不存在');
+    try {
+      const out = await dshRequest('/reset', { method: 'POST', body: {} });
+      return sendJson(res, out.status, out.data || {});
+    } catch (err) {
+      return sendJson(res, 502, { error: { code: 'dsh_unavailable', message: `DSH bridge 不可用：${err.message}` } });
+    }
+  }
+
+  const dshJobMatch = DSH_JOB_RE.exec(pathname);
+  if (dshJobMatch) {
+    requireAdmin(hub, req, url);
+    try {
+      const out = await dshRequest(`/job/${encodeURIComponent(decodeURIComponent(dshJobMatch[1]))}`);
+      return sendJson(res, out.status, out.data || {});
+    } catch (err) {
+      return sendJson(res, 502, { error: { code: 'dsh_unavailable', message: `DSH bridge 不可用：${err.message}` } });
+    }
   }
 
   if (pathname === '/api/tasks') {

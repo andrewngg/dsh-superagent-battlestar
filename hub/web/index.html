@@ -8,7 +8,7 @@
   <meta name="description" content="BattleStar 多设备智能管家控制台">
   <title>BattleStar · 控制台</title>
   <link rel="stylesheet" href="assets/vendor/select2.min.css">
-  <link rel="stylesheet" href="assets/style.css?v=20261106e">
+  <link rel="stylesheet" href="assets/style.css?v=20261106f">
 </head>
 <body>
   <!-- 静态图标库（仅常量路径，不承载用户数据） -->
@@ -110,6 +110,9 @@
         </span>
         <button id="refresh-btn" class="icon-btn" type="button" title="刷新数据 (R)" aria-label="刷新数据">
           <svg class="icon"><use href="#i-refresh"></use></svg>
+        </button>
+        <button id="dev-open" class="icon-btn dev-open" type="button" title="Developer Mode" aria-label="打开 Developer Mode">
+          <svg class="icon"><use href="#i-terminal"></use></svg>
         </button>
         <button id="settings-btn" class="icon-btn" type="button" title="设置" aria-label="打开设置">
           <svg class="icon"><use href="#i-gear"></use></svg>
@@ -257,6 +260,30 @@
         </div>
         <div id="settings-inline-body" class="settings-body"></div>
       </section>
+
+      <section class="panel section-developer" id="section-developer" data-tab-panel="developer">
+        <div class="panel-head">
+          <div>
+            <h2>Developer Mode</h2>
+            <p class="panel-sub">直接和 DeepSeek Harness 沟通，修改 BattleStar 仓库</p>
+          </div>
+          <button type="button" class="btn btn-ghost btn-sm" id="dev-reset">新会话</button>
+        </div>
+        <div class="dev-safety">
+          <strong>开发者模式</strong>
+          <span>只允许修改 super-butler 仓库；不要输出或提交私人 token、密钥、个人资料。修改会直接生效，请自行确认测试结果。</span>
+        </div>
+        <div id="dev-chat-log" class="dev-chat-log" aria-live="polite">
+          <div class="dev-empty">告诉 DSH 要改什么，例如：把任务卡片的按钮改成两列，并修复移动端溢出。</div>
+        </div>
+        <form id="dev-form" class="dev-form">
+          <textarea id="dev-input" rows="3" maxlength="20000" placeholder="描述要修改的功能、bug 或重构要求…"></textarea>
+          <div class="dev-actions">
+            <span id="dev-status" class="dev-status">只修改当前 BattleStar 仓库</span>
+            <button type="submit" class="btn btn-primary btn-sm" id="dev-send">发送给 DSH</button>
+          </div>
+        </form>
+      </section>
     </main>
 
     <nav class="mobile-tabs" id="mobile-nav" aria-label="主导航">
@@ -268,6 +295,9 @@
       </button>
       <button type="button" class="mobile-tab" data-tab="command" aria-selected="false">
         <svg class="icon"><use href="#i-terminal"></use></svg><span>指令</span>
+      </button>
+      <button type="button" class="mobile-tab" data-tab="developer" aria-selected="false">
+        <svg class="icon"><use href="#i-edit"></use></svg><span>开发</span>
       </button>
       <button type="button" class="mobile-tab" data-tab="settings" aria-selected="false">
         <svg class="icon"><use href="#i-gear"></use></svg><span>设置</span>
@@ -314,8 +344,6 @@
 
   <script src="assets/vendor/jquery.min.js" defer></script>
   <script src="assets/vendor/select2.min.js" defer></script>
-  <script src="assets/app.js?v=20261106e" defer></script>
+  <script src="assets/app.js?v=20261106f" defer></script>
 </body>
 </html>
-
-
