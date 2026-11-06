@@ -199,13 +199,46 @@ export function apply(ctx, rawConfig = {}) {
   })()
   const devState = { sessionId: '', jobSeq: 0, jobs: new Map() }
 
-  const DEV_PREFIX = [
-    '你是 BattleStar Developer Mode，运行在 DeepSeek Harness 里。',
-    `只能修改这个仓库：${state.settings.projectRoot}`,
-    '不要读取、输出或提交私人 token、密钥、密码、个人隐私数据；不要把这些信息写进公开仓库。',
-    '用户允许你直接修改代码，不需要逐文件确认；修改后请运行相关测试，并简要汇报改了哪些文件、测试结果。',
-    '不要执行 git push，除非用户在消息里明确要求。',
-  ].join('\n')
+  const DEV_SCOPES = {
+    global: {
+      label: '全局 · 整套系统',
+      paths: '整个 super-butler 仓库',
+      rule: '可以修改仓库内任何组件；改动前先判断影响范围。',
+    },
+    plugin: {
+      label: 'DSH 插件',
+      paths: 'dsh-plugin/**',
+      rule: '只允许修改 dsh-plugin/**。如果需求必须改 Hub、APK 或网页，先停下来告诉用户切换到「全局」。',
+    },
+    apk: {
+      label: 'APK',
+      paths: 'android/** 以及 dist/** 中的构建产物',
+      rule: '只允许修改 android/** 和 dist/**。不要自动安装 APK；构建后告诉用户自己安装。',
+    },
+    localhost: {
+      label: 'Localhost 界面',
+      paths: 'hub/web/**',
+      rule: '只允许修改 hub/web/**（Hub 本地网页/手机 WebView 界面）。不要修改 Hub 后端、插件或 APK。',
+    },
+  }
+
+  function normalizeDevScope(value) {
+    return Object.prototype.hasOwnProperty.call(DEV_SCOPES, value) ? value : 'global'
+  }
+
+  function devPrefix(scope) {
+    const target = DEV_SCOPES[scope] || DEV_SCOPES.global
+    return [
+      '你是 BattleStar Developer Mode，运行在 DeepSeek Harness 里。',
+      `只能修改这个仓库：${state.settings.projectRoot}`,
+      `本次改动对象：${target.label}`,
+      `本次允许修改的文件范围：${target.paths}`,
+      target.rule,
+      '不要读取、输出或提交私人 token、密钥、密码、个人隐私数据；不要把这些信息写进公开仓库。',
+      '用户允许你直接修改代码，不需要逐文件确认；修改后请运行相关测试，并简要汇报改了哪些文件、测试结果。',
+      '不要执行 git push，除非用户在消息里明确要求。',
+    ].join('\n')
+  }
 
   function dshAvailable() {
     return Boolean(dshSession && typeof dshSession.create === 'function')
@@ -250,11 +283,12 @@ export function apply(ctx, rawConfig = {}) {
     return devState.sessionId
   }
 
-  async function runDevJob(job, message) {
+  async function runDevJob(job, message, scope = 'global') {
     let abort
     try {
       const sessionId = await ensureDevSession()
       job.sessionId = sessionId
+      job.scope = normalizeDevScope(scope)
       if (dshApproval) {
         try {
           const resolved = await dshSession.resolveAgent(sessionId)
@@ -268,7 +302,7 @@ export function apply(ctx, rawConfig = {}) {
       const controller = new AbortController()
       abort = controller
       job.abort = controller
-      const content = [{ type: 'text', text: `${DEV_PREFIX}\n\n用户请求：\n${message}` }]
+      const content = [{ type: 'text', text: `${devPrefix(job.scope)}\n\n用户请求：\n${message}` }]
       await dshSession.prompt({
         requestId: randomUUID(),
         sessionId,
@@ -318,6 +352,7 @@ export function apply(ctx, rawConfig = {}) {
       id: job.id,
       status: job.status,
       sessionId: job.sessionId || '',
+      scope: job.scope || 'global',
       text: job.text || '',
       error: job.error || '',
       logs: job.logs.slice(-20),
@@ -698,6 +733,7 @@ export function apply(ctx, rawConfig = {}) {
         }
         const body = await readBody(req)
         const message = typeof body.message === 'string' ? body.message.trim() : ''
+        const scope = normalizeDevScope(typeof body.scope === 'string' ? body.scope : 'global')
         if (!message) {
           return json(res, 400, { error: { code: 'bad_request', message: 'message 不能为空' } })
         }
@@ -708,6 +744,7 @@ export function apply(ctx, rawConfig = {}) {
           id: `dev_${++devState.jobSeq}_${Date.now()}`,
           status: 'queued',
           sessionId: devState.sessionId,
+          scope,
           text: '',
           error: '',
           logs: [],
@@ -715,7 +752,7 @@ export function apply(ctx, rawConfig = {}) {
           finishedAt: '',
         }
         devState.jobs.set(job.id, job)
-        void runDevJob(job, message)
+        void runDevJob(job, message, scope)
         return json(res, 202, { job: publicJob(job) })
       }
       const devJobMatch = /^\/api\/dsh\/job\/([^/]+)$/.exec(sub)

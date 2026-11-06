@@ -3034,8 +3034,7 @@
     return TABS.has(hash) ? hash : 'status';
   }
 
-  function renderDevMessages() {
-    const log = $('#dev-chat-log');
+  function renderDevMessages() {    const log = $('#dev-chat-log');
     if (!log) return;
     log.replaceChildren();
     if (!devState.messages.length) {
@@ -3067,13 +3066,16 @@
       return;
     }
     devState.busy = true;
-    devPush('user', message);
+    const scopeSelect = $('#dev-scope');
+    const scope = scopeSelect ? scopeSelect.value : 'global';
+    const scopeLabel = { global: '全局', plugin: 'DSH 插件', apk: 'APK', localhost: 'Localhost 界面' }[scope] || '全局';
+    devPush('user', `[${scopeLabel}] ${message}`);
     input.value = '';
-    setDevStatus('DSH 正在处理…');
+    setDevStatus(`${scopeLabel} · DSH 正在处理…`);
     const button = $('#dev-send');
     if (button) button.disabled = true;
     try {
-      const res = await api('/api/dsh/chat', { method: 'POST', body: { message }, timeout: 30000 });
+      const res = await api('/api/dsh/chat', { method: 'POST', body: { message, scope }, timeout: 30000 });
       const job = res && res.job;
       if (!job || !job.id) throw new Error('DSH bridge 未返回任务 ID');
       devState.jobId = job.id;
@@ -3299,6 +3301,13 @@
     }
     const devReset = $('#dev-reset');
     if (devReset) devReset.addEventListener('click', () => void resetDevSession());
+    const devScope = $('#dev-scope');
+    if (devScope) {
+      devScope.addEventListener('change', () => {
+        const label = devScope.options[devScope.selectedIndex] ? devScope.options[devScope.selectedIndex].textContent : '全局';
+        setDevStatus(`改动对象：${label}`);
+      });
+    }
     const attachBtn = $('#attach-btn');
     const fileInput = $('#file-input');
     if (attachBtn && fileInput) {

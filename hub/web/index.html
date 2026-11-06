@@ -8,7 +8,7 @@
   <meta name="description" content="BattleStar 多设备智能管家控制台">
   <title>BattleStar · 控制台</title>
   <link rel="stylesheet" href="assets/vendor/select2.min.css">
-  <link rel="stylesheet" href="assets/style.css?v=20261106g">
+  <link rel="stylesheet" href="assets/style.css?v=20261106h">
 </head>
 <body>
   <!-- 静态图标库（仅常量路径，不承载用户数据） -->
@@ -276,6 +276,15 @@
         <div id="dev-chat-log" class="dev-chat-log" aria-live="polite">
           <div class="dev-empty">告诉 DSH 要改什么，例如：把任务卡片的按钮改成两列，并修复移动端溢出。</div>
         </div>
+        <div class="dev-scope-row">
+          <label for="dev-scope">改动对象</label>
+          <select id="dev-scope">
+            <option value="global" selected>全局 · 整套系统</option>
+            <option value="plugin">DSH 插件 · dsh-plugin</option>
+            <option value="apk">APK · android</option>
+            <option value="localhost">Localhost 界面 · hub/web</option>
+          </select>
+        </div>
         <form id="dev-form" class="dev-form">
           <textarea id="dev-input" rows="3" maxlength="20000" placeholder="描述要修改的功能、bug 或重构要求…"></textarea>
           <div class="dev-actions">
@@ -344,6 +353,6 @@
 
   <script src="assets/vendor/jquery.min.js" defer></script>
   <script src="assets/vendor/select2.min.js" defer></script>
-  <script src="assets/app.js?v=20261106g" defer></script>
+  <script src="assets/app.js?v=20261106h" defer></script>
 </body>
 </html>
