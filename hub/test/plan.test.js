@@ -153,3 +153,30 @@ test('外部最终结果可追加到 Mika 任务', async (t) => {
   assert.equal(res.json.task.output.text, '手机端最终答案');
   assert.equal(env.hub.getTask(task.id).error, null);
 });
+
+test('父任务失败后子任务全部成功会重新判定为 completed 并清除 error', async (t) => {
+  const env = await startTestHub(t, {
+    planner: async () => ({
+      title: '重算测试',
+      subtasks: [{ instruction: '子任务一', timeoutSec: 60 }, { instruction: '子任务二', timeoutSec: 60 }],
+    }),
+  });
+  const device = await registerDevice(env, makeManifest({ skills: [{ id: 'office-docx' }] }));
+  const deviceObj = env.hub.devices.get(device.deviceId);
+  const parent = await env.hub.createPlanTask({
+    instruction: '父任务',
+    requirements: { skills: ['office-docx'] },
+    timeoutSec: 120,
+    split: true,
+  });
+  env.hub._finishTask(parent, 'failed', { error: 'hub restarted', eventMessage: 'stale' });
+  const children = parent.childTaskIds.map((id) => env.hub.getTask(id));
+  for (const child of children) {
+    env.hub.handleAck(deviceObj, child.id);
+    env.hub.handleResult(deviceObj, child.id, { ok: true, output: { text: 'ok' } });
+  }
+  const updated = env.hub.getTask(parent.id);
+  assert.equal(updated.status, 'completed');
+  assert.equal(updated.error, null);
+  assert.equal(updated.progress.percent, 100);
+});

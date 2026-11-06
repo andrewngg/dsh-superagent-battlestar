@@ -178,6 +178,7 @@ class Hub {
     this._pingTimer = setInterval(() => this._pingClients(), this.pingIntervalMs);
     if (this._pingTimer.unref) this._pingTimer.unref();
 
+    this.reconcilePlans();
     this.schedulePersist();
     this.retryQueuedTasks('startup');
     return this;
@@ -508,6 +509,7 @@ class Hub {
   }
 
   snapshot(limit = 50) {
+    this.reconcilePlans();
     const safeLimit = util.clampInt(limit, 50, 1, 200);
     const devices = [...this.devices.values()].map((device) => this.deviceToJson(device));
     const tasks = [...this.tasks.values()]
@@ -903,6 +905,7 @@ class Hub {
   }
 
   listTasks({ status, deviceId, includeArchived = false, limit } = {}) {
+    this.reconcilePlans();
     const safeLimit = util.clampInt(limit, 100, 1, 500);
     let tasks = [...this.tasks.values()];
     if (!includeArchived) tasks = tasks.filter((task) => !task.archived);
@@ -1109,15 +1112,28 @@ class Hub {
     return parent;
   }
 
-  _updateParentTask(child) {
-    if (!child || !child.parentTaskId) return;
-    const parent = this.tasks.get(child.parentTaskId);
+  _reconcileParent(parent) {
     if (!parent || !parent.isPlan) return;
+    if (parent.status === TASK_STATUS.CANCELLED) return;
     const children = parent.childTaskIds.map((id) => this.tasks.get(id)).filter(Boolean);
+    if (!children.length) return;
     const finished = children.filter((task) => TERMINAL_TASK_STATUSES.has(task.status));
     const failed = finished.filter((task) => task.status !== TASK_STATUS.COMPLETED);
+    const allDone = finished.length === children.length;
+    if (allDone) {
+      const nextStatus = failed.length ? TASK_STATUS.FAILED : TASK_STATUS.COMPLETED;
+      const nextError = failed.length ? `${failed.length} 个子任务失败` : null;
+      if (parent.status === nextStatus && (parent.error || null) === nextError && parent.progress && parent.progress.percent === 100) {
+        return;
+      }
+    } else {
+      const percent = children.length ? Math.round((finished.length / children.length) * 100) : 0;
+      if (parent.progress && parent.progress.percent === percent && parent.progress.message === `子任务 ${finished.length}/${children.length} 已完成`) {
+        return;
+      }
+    }
     parent.updatedAt = protocol.nowIso();
-    if (finished.length < children.length) {
+    if (!allDone) {
       parent.progress = {
         message: `子任务 ${finished.length}/${children.length} 已完成`,
         percent: children.length ? Math.round((finished.length / children.length) * 100) : 0,
@@ -1140,6 +1156,19 @@ class Hub {
       task: this.taskToJson(parent),
     });
     this.schedulePersist();
+  }
+
+  reconcilePlans() {
+    for (const task of this.tasks.values()) {
+      if (task.isPlan) this._reconcileParent(task);
+    }
+  }
+
+  _updateParentTask(child) {
+    if (!child || !child.parentTaskId) return;
+    const parent = this.tasks.get(child.parentTaskId);
+    if (!parent || !parent.isPlan) return;
+    this._reconcileParent(parent);
   }
 
   archiveTask(task, archived = true) {

@@ -1860,7 +1860,7 @@
       }
     }
 
-    if (task.error) {
+    if (task.error && status !== 'completed') {
       card.appendChild(el('div', { className: 'task-error' }, icon('alert'), el('span', { text: task.error })));
     }
 
@@ -2771,7 +2771,7 @@
       );
       body.appendChild(outSection);
     }
-    if (task.error) {
+    if (task.error && normStatus(task.status) !== 'completed') {
       const errSection = el('section', { className: 'detail-section' },
         el('div', { className: 'detail-section-head' }, el('h3', { text: '错误' })),
         el('div', { className: 'task-error' }, icon('alert'), el('span', { text: task.error })),
