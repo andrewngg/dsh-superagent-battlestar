@@ -1822,6 +1822,10 @@
       actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'retry' } },
         icon('refresh'), el('span', { text: '重试' })));
     }
+    actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'copy-instruction' } },
+      icon('copy'), el('span', { text: '复制指令' })));
+    actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'edit-instruction' } },
+      icon('edit'), el('span', { text: '编辑重发' })));
     actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: task.archived ? 'unarchive' : 'archive' } },
       el('span', { text: task.archived ? '取消归档' : '归档' })));
     actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'delete' } },
@@ -2620,6 +2624,11 @@
     const nodes = [
       el('button', { type: 'button', className: 'btn btn-ghost btn-sm', onclick: hideDrawer, text: '关闭' }),
       el('span', { className: 'spacer' }),
+      el('button', { type: 'button', className: 'btn btn-ghost btn-sm', onclick: () => copyText(task.instruction || '', '指令已复制') }, icon('copy'), '复制指令'),
+      el('button', {
+        type: 'button', className: 'btn btn-ghost btn-sm',
+        onclick: () => { hideDrawer(); editTaskInstruction(task.id); },
+      }, icon('edit'), '编辑重发'),
     ];
     if (ACTIVE_STATUS.has(status)) {
       nodes.push(el('button', { type: 'button', className: 'btn btn-danger btn-sm', onclick: () => cancelTask(task.id) }, icon('x'), '取消任务'));
@@ -2736,6 +2745,30 @@
       if (err.status === 401) return handleAuthLost(err.message);
       toast(err.message || '删除失败', 'error');
     }
+  }
+
+  function editTaskInstruction(id) {
+    const task = state.tasks.find((item) => item.id === id);
+    if (!task) return;
+    const requirements = task.requirements || {};
+    state.selectedSkills = new Set(Array.isArray(requirements.skills) ? requirements.skills : []);
+    state.sigs.composer = '';
+    renderComposerOptions();
+    const modelSelect = $('#req-model');
+    if (modelSelect && requirements.model) setSelectValue(modelSelect, requirements.model);
+    const deviceSelect = $('#target-device');
+    if (deviceSelect && requirements.deviceId) setSelectValue(deviceSelect, requirements.deviceId);
+    const textarea = $('#instruction');
+    textarea.value = task.instruction || '';
+    const timeout = $('#timeout');
+    if (timeout && Number.isFinite(Number(task.timeoutSec))) timeout.value = String(task.timeoutSec);
+    const priority = $('#priority');
+    if (priority && Number.isFinite(Number(task.priority))) priority.value = String(task.priority);
+    setTab('command');
+    updateComposerTarget();
+    textarea.focus();
+    textarea.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    toast('已载入原指令，修改后点发送即可重新创建任务', 'info');
   }
 
   /* ==================================================================
@@ -2874,6 +2907,10 @@
         else if (action === 'archive') archiveTask(id, true);
         else if (action === 'unarchive') archiveTask(id, false);
         else if (action === 'delete') deleteTask(id);
+        else if (action === 'copy-instruction') {
+          const task = state.tasks.find((item) => item.id === id);
+          if (task) copyText(task.instruction || '', '指令已复制');
+        } else if (action === 'edit-instruction') editTaskInstruction(id);
         else if (action === 'toggle-events') {
           if (state.expandedEvents.has(id)) state.expandedEvents.delete(id);
           else state.expandedEvents.add(id);
