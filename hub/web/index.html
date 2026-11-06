@@ -8,7 +8,7 @@
   <meta name="description" content="BattleStar 多设备智能管家控制台">
   <title>BattleStar · 控制台</title>
   <link rel="stylesheet" href="assets/vendor/select2.min.css">
-  <link rel="stylesheet" href="assets/style.css?v=20261106c">
+  <link rel="stylesheet" href="assets/style.css?v=20261106d">
 </head>
 <body>
   <!-- 静态图标库（仅常量路径，不承载用户数据） -->
@@ -27,6 +27,7 @@
       <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3.5L22 20.5H2L12 3.5z"/><path d="M12 9.5v5M12 17.8v.2"/></symbol>
       <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.2"/><path d="M12 6.8V12l3.4 2"/></symbol>
       <symbol id="i-queue" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/><path d="M19 15.5v5M16.5 18H21.5"/></symbol>
+      <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
       <symbol id="i-link" viewBox="0 0 24 24"><path d="M10.5 13.5a5 5 0 0 0 7.1 0l2.4-2.4a5 5 0 0 0-7.1-7.1L11.6 5.3"/><path d="M13.5 10.5a5 5 0 0 0-7.1 0L4 12.9a5 5 0 0 0 7.1 7.1l1.3-1.3"/></symbol>
       <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="12" height="12" rx="2"/><path d="M15.5 8.5V5.6A2.1 2.1 0 0 0 13.4 3.5H5.6A2.1 2.1 0 0 0 3.5 5.6v7.8a2.1 2.1 0 0 0 2.1 2.1h2.9"/></symbol>
       <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4.2L20 8.2a2.1 2.1 0 0 0-3-3L5.2 17 4 20z"/><path d="M14.5 5.5l4 4"/></symbol>
@@ -89,6 +90,9 @@
   <!-- ============ 主控制台 ============ -->
   <div id="app-view" class="app" hidden>
     <header class="topbar glass">
+      <button id="nav-toggle" class="icon-btn nav-toggle" type="button" aria-label="打开导航" aria-controls="mobile-nav" aria-expanded="false">
+        <svg class="icon"><use href="#i-menu"></use></svg>
+      </button>
       <div class="brand">
         <span class="brand-mark" aria-hidden="true"><svg class="icon"><use href="#i-spark"></use></svg></span>
         <span class="brand-text"><strong>BattleStar</strong><small id="brand-sub">家庭 AI 中枢</small></span>
@@ -255,7 +259,7 @@
       </section>
     </main>
 
-    <nav class="mobile-tabs" aria-label="主导航">
+    <nav class="mobile-tabs" id="mobile-nav" aria-label="主导航">
       <button type="button" class="mobile-tab is-active" data-tab="status" aria-selected="true">
         <svg class="icon"><use href="#i-devices"></use></svg><span>状态</span>
       </button>
@@ -310,6 +314,7 @@
 
   <script src="assets/vendor/jquery.min.js" defer></script>
   <script src="assets/vendor/select2.min.js" defer></script>
-  <script src="assets/app.js?v=20261106c" defer></script>
+  <script src="assets/app.js?v=20261106d" defer></script>
 </body>
 </html>
+

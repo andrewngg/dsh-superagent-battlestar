@@ -1792,3 +1792,43 @@ select:focus, input:focus { outline: none; border-color: rgba(124, 140, 255, 0.6
   .select2-container--default .select2-selection--multiple { min-height: 46px; }
   .select2-container--default .select2-selection--multiple .select2-search--inline .select2-search__field { font-size: 16px; }
 }
+
+/* BattleStar: top hamburger navigation + non-squashing task rows */
+.nav-toggle { display: none; }
+
+.task-list > .task-card { flex: 0 0 auto; }
+.task-card { flex-shrink: 0; }
+.task-instruction { flex-shrink: 0; }
+
+@media (max-width: 600px) {
+  .nav-toggle { display: inline-flex; flex: none; }
+  .app { padding-bottom: calc(24px + env(safe-area-inset-bottom)); }
+  .mobile-tabs {
+    position: fixed;
+    top: calc(74px + env(safe-area-inset-top));
+    left: 12px;
+    right: 12px;
+    bottom: auto;
+    display: none;
+    grid-template-columns: 1fr;
+    gap: 3px;
+    padding: 7px;
+    border-radius: 15px;
+    border: 1px solid rgba(148, 163, 255, 0.18);
+    background: rgba(10, 15, 29, 0.97);
+    box-shadow: 0 20px 42px -18px rgba(0, 0, 0, 0.95);
+    z-index: 80;
+  }
+  .mobile-tabs.is-open { display: grid; }
+  .mobile-tabs .mobile-tab {
+    flex-direction: row;
+    justify-content: flex-start;
+    gap: 10px;
+    padding: 11px 12px;
+    border-radius: 10px;
+    font-size: 13px;
+  }
+  .mobile-tabs .mobile-tab .icon { width: 18px; height: 18px; }
+  .mobile-tabs .mobile-tab.is-active { background: rgba(124, 140, 255, 0.14); color: var(--text); }
+  .task-actions .link-btn { min-height: 30px; }
+}

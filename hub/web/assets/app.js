@@ -2989,6 +2989,16 @@
     return TABS.has(hash) ? hash : 'status';
   }
 
+  function setMobileNav(open) {
+    const nav = $('#mobile-nav');
+    const toggle = $('#nav-toggle');
+    if (!nav || !toggle) return;
+    const next = Boolean(open);
+    nav.classList.toggle('is-open', next);
+    toggle.setAttribute('aria-expanded', next ? 'true' : 'false');
+    toggle.setAttribute('aria-label', next ? '关闭导航' : '打开导航');
+  }
+
   function setTab(tab, { scroll = true } = {}) {
     const next = TABS.has(tab) ? tab : 'status';
     state.tab = next;
@@ -3161,6 +3171,7 @@
     $$('.mobile-tab').forEach((btn) => {
       btn.addEventListener('click', () => {
         setTab(btn.dataset.tab);
+        setMobileNav(false);
         try {
           history.replaceState(null, '', '#' + btn.dataset.tab);
         } catch {
@@ -3168,14 +3179,37 @@
         }
       });
     });
+    const navToggle = $('#nav-toggle');
+    const mobileNav = $('#mobile-nav');
+    if (navToggle && mobileNav) {
+      navToggle.addEventListener('click', (event) => {
+        event.stopPropagation();
+        setMobileNav(!mobileNav.classList.contains('is-open'));
+      });
+      document.addEventListener('click', (event) => {
+        if (!mobileNav.classList.contains('is-open')) return;
+        if (mobileNav.contains(event.target) || navToggle.contains(event.target)) return;
+        setMobileNav(false);
+      });
+    }
     window.addEventListener('hashchange', () => setTab(currentTabFromHash(), { scroll: false }));
-    MOBILE_MQ.addEventListener('change', () => setTab(state.tab, { scroll: false }));
+    MOBILE_MQ.addEventListener('change', () => {
+      setMobileNav(false);
+      setTab(state.tab, { scroll: false });
+    });
 
     /* 键盘 */
     document.addEventListener('keydown', (event) => {
       if (event.key === 'Escape' && state.drawer.open) {
         hideDrawer();
         return;
+      }
+      if (event.key === 'Escape') {
+        const nav = $('#mobile-nav');
+        if (nav && nav.classList.contains('is-open')) {
+          setMobileNav(false);
+          return;
+        }
       }
       const tag = (event.target && event.target.tagName) || '';
       const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(tag);
