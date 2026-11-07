@@ -22,7 +22,7 @@ const valueOf = (flag) => {
 };
 const taskIndex = args.indexOf('task');
 const action = taskIndex >= 0 ? args[taskIndex + 1] : '';
-const taskId = valueOf('--request-id') || 'mk_task_1';
+const taskId = 'mk_task_1';
 const mode = process.env.MOCK_MIKA_MODE || 'ok';
 const counterFile = process.env.MOCK_MIKA_COUNTER || '';
 

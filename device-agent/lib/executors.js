@@ -18,6 +18,7 @@
  */
 
 const { spawn } = require('node:child_process');
+const { randomUUID } = require('node:crypto');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const os = require('node:os');
@@ -1311,11 +1312,35 @@ function createMikaExecutor(options = {}) {
       let snapshot = null;
       try {
         await progress('正在通过 Mika 派发手机任务…', 8);
-        const run = await runCli([...connectionArgs(), '--json', 'task', 'run', '--goal-file', goalFile], {
-          timeout: 120000,
-          signal,
-        });
-        const runError = mikaErrorText(run.payload);
+        const requestId = randomUUID();
+        let run = await runCli(
+          [...connectionArgs(), '--json', 'task', 'run', '--request-id', requestId, '--goal-file', goalFile],
+          { timeout: 120000, signal },
+        );
+        let runError = mikaErrorText(run.payload);
+        if (runError && run.payload && run.payload.error && run.payload.error.code === 'incompatible_api') {
+          // 旧版 Mika APK 不支持 request_id：退回普通提交。
+          run = await runCli([...connectionArgs(), '--json', 'task', 'run', '--goal-file', goalFile], {
+            timeout: 120000,
+            signal,
+          });
+          runError = mikaErrorText(run.payload);
+        }
+        if (!run.payload || !run.payload.task_id) {
+          // 手机可能已经接受任务，但响应在连接层丢失：用提交前生成的 request_id 反查。
+          try {
+            const recovered = await runCli(
+              [...connectionArgs(), '--json', 'task', 'status', requestId],
+              { timeout: 30000, signal },
+            );
+            if (recovered.payload && recovered.payload.task_id) {
+              run.payload = recovered.payload;
+              runError = '';
+            }
+          } catch {
+            /* 反查失败时保留原始错误 */
+          }
+        }
         if (runError) return { output: { text: truncate(run.stdout || run.stderr, 2000) }, error: `Mika：${runError}` };
         if (!run.payload || !run.payload.task_id) {
           return { output: { text: truncate(run.stdout || run.stderr, 2000) }, error: 'Mika 未返回 task_id' };

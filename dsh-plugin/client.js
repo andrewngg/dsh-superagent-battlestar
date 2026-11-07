@@ -564,7 +564,7 @@ window.__ModuleLoader__.load({
         message ? h('div', { style: { ...muted, color: COLORS.sub } }, message) : null,
         h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12 } },
           h(Stat, { label: t('online'), value: `${stats.devicesOnline ?? 0}/${stats.devicesTotal ?? devices.length}` }),
-          h(Stat, { label: t('runningTasks'), value: stats.tasksRunning ?? 0 }),
+          h(Stat, { label: t('runningTasks'), value: (stats.tasksRunning ?? 0) + (stats.tasksWaiting ?? 0) }),
           h(Stat, { label: t('queued'), value: stats.tasksQueued ?? 0 }),
           h(Stat, { label: t('completed'), value: stats.tasksCompleted ?? 0 }),
           h(Stat, { label: t('failed'), value: stats.tasksFailed ?? 0, tone: 'err' }),

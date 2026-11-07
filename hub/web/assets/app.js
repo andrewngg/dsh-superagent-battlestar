@@ -781,7 +781,7 @@
   }
 
   function adjustStats(prevStatus, nextStatus) {
-    const map = { queued: 'tasksQueued', assigned: 'tasksAssigned', running: 'tasksRunning', completed: 'tasksCompleted', failed: 'tasksFailed' };
+    const map = { queued: 'tasksQueued', assigned: 'tasksAssigned', running: 'tasksRunning', waiting: 'tasksWaiting', completed: 'tasksCompleted', failed: 'tasksFailed' };
     if (prevStatus && map[prevStatus]) bumpStat(map[prevStatus], -1);
     if (nextStatus && map[nextStatus]) bumpStat(map[nextStatus], 1);
   }
@@ -916,7 +916,7 @@
     return { text, markdown };
   }
   function computeStats() {
-    const counts = { queued: 0, assigned: 0, running: 0, completed: 0, failed: 0 };
+    const counts = { queued: 0, assigned: 0, running: 0, waiting: 0, completed: 0, failed: 0 };
     for (const task of state.tasks) {
       if (counts[task.status] !== undefined) counts[task.status] += 1;
     }
@@ -926,6 +926,7 @@
       tasksQueued: counts.queued,
       tasksAssigned: counts.assigned,
       tasksRunning: counts.running,
+      tasksWaiting: counts.waiting,
       tasksCompleted: counts.completed,
       tasksFailed: counts.failed,
     };
@@ -940,6 +941,7 @@
       queued: pick('tasksQueued'),
       assigned: pick('tasksAssigned'),
       running: pick('tasksRunning'),
+      waiting: pick('tasksWaiting'),
       completed: pick('tasksCompleted'),
       failed: pick('tasksFailed'),
     };
@@ -1078,7 +1080,7 @@
     const sig = JSON.stringify(view);
     setText('#head-online', String(view.online));
     setText('#head-total', `/${view.total}`);
-    setText('#head-running', String(view.running + view.assigned));
+    setText('#head-running', String(view.running + view.assigned + view.waiting));
     setText('#head-queued', String(view.queued));
     if (sig === state.sigs.stats) return;
     state.sigs.stats = sig;
@@ -1094,10 +1096,10 @@
       },
       {
         tone: 'running',
-        label: '运行任务',
+        label: '运行 / 等待',
         icon: 'activity',
-        value: String(view.running),
-        sub: `已分配 ${view.assigned} · 排队 ${view.queued}`,
+        value: String(view.running + view.waiting),
+        sub: `已分配 ${view.assigned} · 排队 ${view.queued}${view.waiting ? ` · 等待 ${view.waiting}` : ''}`,
       },
       {
         tone: 'queued',
