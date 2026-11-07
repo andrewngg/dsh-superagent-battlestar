@@ -3,7 +3,8 @@
  *
  * 职责：
  *  1. 在 DSH 内管理本机管家 Hub（检测已有 Hub / 自动启动 / 停止），并代理其 API；
- *  2. 提供 /super-butler/api/* 路由给 Client 面板（状态、设备/任务快照、建任务、取消/重试、设置）；
+ *  2. 提供 /super-butler/api/* 路由给 Client 面板（状态、设备/任务快照、建任务、取消/重试、
+ *     手动改状态、继续/回答、设置）；
  *  3. 通过 Harness credentials 服务统一保存私人密钥（GitHub、DeepSeek、Agnes、豆包、OpenCode），
  *     启动 Hub 时解析为环境变量，供管家与各设备使用。
  *
@@ -25,6 +26,8 @@ import path from 'node:path'
 
 const ROUTE_PREFIX = '/super-butler'
 const MAX_BODY_BYTES = 1024 * 1024
+// 面板“手动改状态”允许的目标状态：完成/失败走 external-result，取消/重新排队走 cancel/retry。
+const MANUAL_TASK_STATUSES = new Set(['completed', 'failed', 'cancelled', 'queued'])
 
 const SECRET_FIELDS = [
   { key: 'githubToken', ref: 'SUPER_BUTLER_GITHUB_TOKEN', label: 'GitHub Token', env: 'GITHUB_TOKEN' },
@@ -713,7 +716,7 @@ export function apply(ctx, rawConfig = {}) {
     if (!sub.startsWith('/')) sub = `/${sub}`
     const method = (req.method || 'GET').toUpperCase()
     try {
-      if (sub === '/api/dsh/status' || sub === '/api/dsh/chat' || sub.startsWith('/api/dsh/job/') || sub === '/api/dsh/reset') {
+      if (sub === '/api/dsh/status' || sub === '/api/dsh/chat' || sub.startsWith('/api/dsh/job') || sub === '/api/dsh/reset') {
         if (!isLoopback(req)) return json(res, 403, { error: { code: 'forbidden', message: 'Developer Mode 只允许本机访问' } })
       }
       if (method === 'GET' && (sub === '/api/status' || sub === '/api/status/')) {
@@ -760,6 +763,13 @@ export function apply(ctx, rawConfig = {}) {
         const job = devState.jobs.get(decodeURIComponent(devJobMatch[1]))
         if (!job) return json(res, 404, { error: { code: 'not_found', message: 'Developer Mode 任务不存在' } })
         return json(res, 200, { job: publicJob(job) })
+      }
+      if (method === 'GET' && sub === '/api/dsh/jobs') {
+        const jobs = Array.from(devState.jobs.values())
+          .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+          .slice(0, 20)
+          .map(publicJob)
+        return json(res, 200, { jobs })
       }
       if (method === 'POST' && sub === '/api/dsh/reset') {
         devState.sessionId = ''
@@ -824,6 +834,32 @@ export function apply(ctx, rawConfig = {}) {
         })
         return json(res, out.status, out.data)
       }
+      // 手动改状态：把面板里的“完成/失败/取消/重新排队”映射到 Hub 现有的管理接口。
+      // 完成/失败复用 Hub 的 external-result（管理员手动结束任务），其余走 cancel/retry。
+      const taskStatus = /^\/api\/tasks\/([^/]+)\/status$/.exec(sub)
+      if (method === 'POST' && taskStatus) {
+        const body = await readBody(req)
+        const target = typeof body.status === 'string' ? body.status : ''
+        const note = typeof body.note === 'string' ? body.note.trim().slice(0, 2000) : ''
+        if (!MANUAL_TASK_STATUSES.has(target)) {
+          return json(res, 400, {
+            error: { code: 'bad_request', message: `不支持的状态：${target || '(空)'}` },
+          })
+        }
+        const id = encodeURIComponent(taskStatus[1])
+        let out
+        if (target === 'cancelled') {
+          out = await hubRequest(`/api/tasks/${id}/cancel`, { method: 'POST', body: {} })
+        } else if (target === 'queued') {
+          out = await hubRequest(`/api/tasks/${id}/retry`, { method: 'POST', body: {} })
+        } else {
+          const payload = target === 'completed'
+            ? { text: note || '管理员在 DSH 面板手动标记完成', status: 'completed' }
+            : { text: note || '管理员在 DSH 面板手动标记失败', status: 'failed', error: note || '管理员手动标记失败' }
+          out = await hubRequest(`/api/tasks/${id}/external-result`, { method: 'POST', body: payload })
+        }
+        return json(res, out.status, out.data)
+      }
       const taskPath = /^\/api\/tasks\/([^/]+)$/.exec(sub)
       if (method === 'DELETE' && taskPath) {
         const out = await hubRequest(`/api/tasks/${encodeURIComponent(taskPath[1])}`, { method: 'DELETE' })
@@ -853,7 +889,7 @@ export function apply(ctx, rawConfig = {}) {
       if (method === 'GET' && (sub === '/' || sub === '')) {
         return json(res, 200, {
           name: 'BattleStar',
-          routes: ['/api/status', '/api/settings', '/api/snapshot', '/api/tasks', '/api/tasks/:id/follow-up', '/api/tasks/:id/answer', '/api/tasks/:id/archive', '/api/tasks/:id', '/api/devices/:id', '/api/test-credential', '/api/hub/start', '/api/hub/stop'],
+          routes: ['/api/status', '/api/settings', '/api/snapshot', '/api/tasks', '/api/tasks/:id/status', '/api/tasks/:id/follow-up', '/api/tasks/:id/answer', '/api/tasks/:id/archive', '/api/tasks/:id', '/api/devices/:id', '/api/test-credential', '/api/hub/start', '/api/hub/stop'],
         })
       }
       return json(res, 404, { error: { code: 'not_found', message: `未知路由：${method} ${sub}` } })

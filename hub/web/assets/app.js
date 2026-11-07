@@ -213,7 +213,7 @@
     sigs: { stats: '', devices: '', tasks: '', composer: '', activity: '', settings: '' },
   };
   const taskNotifyState = new Map();
-  const devState = { busy: false, jobId: '', timer: 0, messages: [] };
+  const devState = { busy: false, jobId: '', timer: 0, pollFailures: 0, messages: [] };
 
   /* ==================================================================
    * 会话与 API
@@ -3034,7 +3034,73 @@
     return TABS.has(hash) ? hash : 'status';
   }
 
-  function renderDevMessages() {    const log = $('#dev-chat-log');
+  function devRememberJob(id) {
+    try {
+      if (id) localStorage.setItem('sb.dev.job', id);
+      else localStorage.removeItem('sb.dev.job');
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function devRememberedJob() {
+    try {
+      return localStorage.getItem('sb.dev.job') || '';
+    } catch {
+      return '';
+    }
+  }
+
+  async function resumeDevJob() {
+    if (devState.busy) return false;
+    let job = null;
+    try {
+      const res = await api('/api/dsh/jobs', { timeout: 12000 });
+      const jobs = res && Array.isArray(res.jobs) ? res.jobs : [];
+      job = jobs.find((item) => item.status === 'running' || item.status === 'queued') || null;
+      if (!job) {
+        const remembered = devState.jobId || devRememberedJob();
+        if (remembered) {
+          for (const item of jobs) if (item.id === remembered) job = item;
+        }
+      }
+    } catch {
+      return false;
+    }
+    if (!job) return false;
+    devState.jobId = job.id;
+    devRememberJob(job.id);
+    devState.busy = true;
+    devState.pollFailures = 0;
+    const button = $('#dev-send');
+    if (button) button.disabled = true;
+    setDevStatus(`恢复 DSH 任务 · ${job.status === 'running' ? '正在执行' : '等待执行'}…`);
+    if (job.status === 'done' || job.status === 'failed') {
+      applyDevJobResult(job);
+    } else {
+      pollDevJob(job.id);
+    }
+    return true;
+  }
+
+  function applyDevJobResult(job) {
+    devState.busy = false;
+    devState.pollFailures = 0;
+    devRememberJob('');
+    const button = $('#dev-send');
+    if (button) button.disabled = false;
+    if (job.status === 'failed') {
+      devPush('error', job.error || 'DSH 执行失败');
+      setDevStatus('失败');
+      return;
+    }
+    devPush('assistant', job.text || 'DSH 已完成修改');
+    setDevStatus('完成');
+    toast('DSH 已完成修改', 'success');
+  }
+
+  function renderDevMessages() {
+    const log = $('#dev-chat-log');
     if (!log) return;
     log.replaceChildren();
     if (!devState.messages.length) {
@@ -3079,16 +3145,16 @@
       const job = res && res.job;
       if (!job || !job.id) throw new Error('DSH bridge 未返回任务 ID');
       devState.jobId = job.id;
+      devState.pollFailures = 0;
+      devRememberJob(job.id);
       if (job.status === 'done') {
-        devPush('assistant', job.text || 'DSH 已完成');
-        devState.busy = false;
-        setDevStatus('完成');
-        if (button) button.disabled = false;
+        applyDevJobResult(job);
         return;
       }
       setDevStatus('DSH 正在修改代码…');
       pollDevJob(job.id);
     } catch (err) {
+      if (await resumeDevJob()) return;
       devPush('error', err.message || '启动 DSH 会话失败');
       devState.busy = false;
       setDevStatus('失败');
@@ -3101,24 +3167,27 @@
     devState.timer = setTimeout(async () => {
       try {
         const res = await api(`/api/dsh/job/${encodeURIComponent(jobId)}`, { timeout: 20000 });
+        devState.pollFailures = 0;
         const job = res && res.job;
         if (!job) throw new Error('DSH 任务状态丢失');
         if (job.logs && job.logs.length) setDevStatus(job.logs[job.logs.length - 1]);
         if (job.status === 'done' || job.status === 'failed') {
-          if (job.status === 'failed') devPush('error', job.error || 'DSH 执行失败');
-          else devPush('assistant', job.text || 'DSH 已完成修改');
-          devState.busy = false;
-          setDevStatus(job.status === 'done' ? '完成' : '失败');
-          const button = $('#dev-send');
-          if (button) button.disabled = false;
-          if (job.status === 'done') toast('DSH 已完成修改', 'success');
+          applyDevJobResult(job);
           return;
         }
         setDevStatus(job.status === 'running' ? 'DSH 正在修改代码…' : 'DSH 等待执行…');
         pollDevJob(jobId);
       } catch (err) {
-        devPush('error', err.message || '查询 DSH 任务失败');
+        devState.pollFailures += 1;
+        if (err.status !== 404 && devState.pollFailures <= 20) {
+          setDevStatus(`DSH 连接暂时中断，重试 ${devState.pollFailures}/20…`);
+          pollDevJob(jobId);
+          return;
+        }
         devState.busy = false;
+        devRememberJob('');
+        devPush('error', err.message || '查询 DSH 任务失败');
+        setDevStatus('失败');
         const button = $('#dev-send');
         if (button) button.disabled = false;
       }
@@ -3130,6 +3199,8 @@
     try {
       await api('/api/dsh/reset', { method: 'POST', body: {}, timeout: 15000 });
       devState.messages = [];
+      devState.jobId = '';
+      devRememberJob('');
       renderDevMessages();
       setDevStatus('已开始新会话');
       toast('Developer Mode 新会话已开始', 'success');
@@ -3163,6 +3234,7 @@
       const body = $('#settings-inline-body');
       if (body) body.replaceChildren(buildSettings());
     }
+    if (next === 'developer') void resumeDevJob();
     if (isMobile() && scroll) {
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }

@@ -303,6 +303,16 @@ async function handleRequest(hub, req, res) {
     }
   }
 
+  if (pathname === '/api/dsh/jobs') {
+    requireAdmin(hub, req, url);
+    try {
+      const out = await dshRequest('/jobs');
+      return sendJson(res, out.status, out.data || {});
+    } catch (err) {
+      return sendJson(res, 502, { error: { code: 'dsh_unavailable', message: `DSH bridge 不可用：${err.message}` } });
+    }
+  }
+
   const dshJobMatch = DSH_JOB_RE.exec(pathname);
   if (dshJobMatch) {
     requireAdmin(hub, req, url);

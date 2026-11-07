@@ -50,6 +50,20 @@ window.__ModuleLoader__.load({
       lastSeen: '最后心跳', justNow: '刚刚', minutesAgo: '分钟前', hoursAgo: '小时前',
       hubLog: 'Hub 日志', adminTokenHidden: '管理令牌由插件代理，不在页面暴露',
       emptySecrets: '尚未配置任何私人密钥',
+      taskId: '任务 ID', copyId: '复制 ID', copiedId: '任务 ID 已复制', copyInstruction: '复制指令',
+      copiedInstruction: '指令已复制', copyFailed: '复制失败，请手动选择文本',
+      detail: '详情', showDetail: '展开任务详情', hideDetail: '收起任务详情', taskInfo: '任务信息',
+      statusLabel: '状态', deviceLabel: '执行设备', priorityLabel: '优先级', timeoutLabel: '超时',
+      attemptsLabel: '尝试次数', createdLabel: '创建时间', startedLabel: '开始时间',
+      finishedLabel: '结束时间', threadStepLabel: '线程步骤', routeReason: '路由结果', noRoute: '暂无路由信息',
+      manualStatus: '手动改状态', markCompleted: '标记完成', markFailed: '标记失败', requeue: '重新排队',
+      statusNotePlaceholder: '备注（可选），会写入任务事件',
+      applyStatus: '应用', statusUpdated: '任务状态已更新',
+      statusChangeHint: '手动改状态会直接结束任务，设备之后上报的结果会被忽略。',
+      statusRouteNeedsRestart: 'Host 插件已更新，请重启 DSH 后再使用手动改状态',
+      followUpHint: '继续会创建一个新任务，并自动带上当前任务的结果作为上下文。',
+      activeFollowUpHint: '任务还在进行中，结束后才能继续；也可以先取消任务再继续。',
+      cancelTaskTitle: '取消任务', dialogOk: '确定', dialogCancel: '取消', close: '关闭',
     }
     const en = {
       panel: 'BattleStar', title: 'BattleStar', subtitle: 'Multi-device AI butler · console and keys',
@@ -88,6 +102,20 @@ window.__ModuleLoader__.load({
       lastSeen: 'Last seen', justNow: 'just now', minutesAgo: 'm ago', hoursAgo: 'h ago',
       hubLog: 'Hub log', adminTokenHidden: 'Admin token stays in the plugin proxy',
       emptySecrets: 'No private keys configured yet',
+      taskId: 'Task ID', copyId: 'Copy ID', copiedId: 'Task ID copied', copyInstruction: 'Copy instruction',
+      copiedInstruction: 'Instruction copied', copyFailed: 'Copy failed; select the text manually',
+      detail: 'Details', showDetail: 'Show task details', hideDetail: 'Hide task details', taskInfo: 'Task info',
+      statusLabel: 'Status', deviceLabel: 'Device', priorityLabel: 'Priority', timeoutLabel: 'Timeout',
+      attemptsLabel: 'Attempts', createdLabel: 'Created', startedLabel: 'Started',
+      finishedLabel: 'Finished', threadStepLabel: 'Thread step', routeReason: 'Route', noRoute: 'No route info',
+      manualStatus: 'Change status manually', markCompleted: 'Mark completed', markFailed: 'Mark failed', requeue: 'Re-queue',
+      statusNotePlaceholder: 'Optional note, stored in the task events',
+      applyStatus: 'Apply', statusUpdated: 'Task status updated',
+      statusChangeHint: 'Changing status ends the task immediately; later device reports are ignored.',
+      statusRouteNeedsRestart: 'Host plugin updated; restart DSH to use manual status changes',
+      followUpHint: 'Continue creates a new task with the current result as context.',
+      activeFollowUpHint: 'The task is still active; it can continue after it ends. You can cancel it first.',
+      cancelTaskTitle: 'Cancel task', dialogOk: 'OK', dialogCancel: 'Cancel', close: 'Close',
     }
 
     const COLORS = {
@@ -167,6 +195,52 @@ window.__ModuleLoader__.load({
       if (status === 'failed' || status === 'timeout' || status === 'cancelled') return 'err'
       if (status === 'running' || status === 'assigned' || status === 'waiting') return 'warn'
       return 'idle'
+    }
+
+    // 与 Hub 的任务状态机保持一致：进行中 / 可重试（终态里允许重新排队的部分）。
+    const ACTIVE_TASK_STATUS = ['queued', 'assigned', 'running', 'waiting']
+    const RETRYABLE_TASK_STATUS = ['failed', 'timeout', 'cancelled']
+    const isActiveTask = (status) => ACTIVE_TASK_STATUS.includes(status)
+    const isRetryableTask = (status) => RETRYABLE_TASK_STATUS.includes(status)
+
+    const mono = { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', fontSize: 11 }
+    const miniBtn = (danger, disabled) => ({
+      ...btn(false, disabled), padding: '2px 8px', fontSize: 11, color: danger ? COLORS.err : COLORS.text,
+    })
+
+    function fmtDateTime(iso) {
+      if (!iso) return '-'
+      try {
+        const date = new Date(iso)
+        return Number.isFinite(date.getTime()) ? date.toLocaleString() : '-'
+      } catch {
+        return '-'
+      }
+    }
+
+    // Electron 里 window.prompt 不可用，统一用面板内弹窗代替浏览器 prompt。
+    async function copyToClipboard(text) {
+      const value = String(text == null ? '' : text)
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        await navigator.clipboard.writeText(value)
+        return
+      }
+      const area = document.createElement('textarea')
+      area.value = value
+      area.setAttribute('readonly', '')
+      area.style.position = 'fixed'
+      area.style.opacity = '0'
+      document.body.appendChild(area)
+      area.select()
+      const ok = document.execCommand && document.execCommand('copy')
+      document.body.removeChild(area)
+      if (!ok) throw new Error('copy failed')
+    }
+
+    // Host 插件里还没有 /status 路由时（未重启 Harness）给出明确提示，而不是原始 404。
+    function isMissingRouteError(err) {
+      const message = err && err.message ? String(err.message) : ''
+      return /未知路由|not_found|HTTP 404|接口不存在|404/.test(message)
     }
 
     function ButlerIcon({ size }) {
@@ -260,8 +334,79 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function TaskRow({ task, t, onAction, tasks }) {
+    function TaskDetail({ task, t, busy, onAction, onCopy }) {
+      const active = isActiveTask(task.status)
+      const retryable = isRetryableTask(task.status)
+      const rows = [
+        [t('statusLabel'), task.status],
+        [t('deviceLabel'), task.assignedDeviceName || '-'],
+        [t('priorityLabel'), task.priority == null ? '-' : String(task.priority)],
+        [t('timeoutLabel'), task.timeoutSec == null ? '-' : `${task.timeoutSec}s`],
+        [t('attemptsLabel'), `${task.attempts == null ? 0 : task.attempts}/${task.maxAttempts == null ? 1 : task.maxAttempts}`],
+        [t('createdLabel'), fmtDateTime(task.createdAt)],
+        [t('startedLabel'), fmtDateTime(task.startedAt)],
+        [t('finishedLabel'), fmtDateTime(task.finishedAt)],
+        [t('threadStepLabel'), String(task.threadStep || 1)],
+      ]
+      const events = (task.events || []).slice(-12)
+      const routeReason = task.route && task.route.reason ? String(task.route.reason) : ''
+      return h('div', {
+        style: {
+          marginTop: 10, padding: 10, borderRadius: 8, background: COLORS.layer2,
+          border: `1px solid ${COLORS.border}`, display: 'flex', flexDirection: 'column', gap: 10,
+        },
+      },
+        h('div', { style: { ...row, gap: 8, flexWrap: 'wrap' } },
+          h('span', { style: { ...muted, fontSize: 12 } }, `${t('taskId')}:`),
+          h('code', { style: { ...mono, userSelect: 'all', wordBreak: 'break-all' } }, task.id),
+          h('button', { style: miniBtn(), onClick: () => onCopy(task.id, t('copiedId')) }, t('copyId')),
+          h('button', { style: miniBtn(), onClick: () => onCopy(task.instruction || '', t('copiedInstruction')) }, t('copyInstruction')),
+        ),
+        h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 8 } },
+          ...rows.map(([label, value]) => h('div', { key: label, style: { minWidth: 0 } },
+            h('div', { style: { ...muted, fontSize: 11 } }, label),
+            h('div', { style: { fontSize: 12, marginTop: 2, wordBreak: 'break-word' } }, value),
+          )),
+        ),
+        h('div', { style: { ...muted, fontSize: 12, lineHeight: 1.5 } }, `${t('routeReason')}: ${routeReason || t('noRoute')}`),
+        h('div', { style: { borderTop: `1px solid ${COLORS.border}`, paddingTop: 8 } },
+          h('div', { style: { ...row, gap: 8, flexWrap: 'wrap', marginBottom: 6 } },
+            h('span', { style: { fontSize: 12, fontWeight: 600 } }, t('manualStatus')),
+            task.status !== 'completed'
+              ? h('button', { style: miniBtn(false, busy), disabled: busy, onClick: () => onAction(task, 'mark-completed') }, t('markCompleted'))
+              : null,
+            task.status !== 'failed'
+              ? h('button', { style: miniBtn(false, busy), disabled: busy, onClick: () => onAction(task, 'mark-failed') }, t('markFailed'))
+              : null,
+            retryable
+              ? h('button', { style: miniBtn(false, busy), disabled: busy, onClick: () => onAction(task, 'retry') }, t('requeue'))
+              : null,
+            active
+              ? h('button', { style: miniBtn(true, busy), disabled: busy, onClick: () => onAction(task, 'cancel') }, t('cancel'))
+              : null,
+          ),
+          h('div', { style: { ...muted, fontSize: 11, lineHeight: 1.5 } }, t('statusChangeHint')),
+        ),
+        events.length
+          ? h('div', { style: { borderTop: `1px solid ${COLORS.border}`, paddingTop: 8 } },
+              h('div', { style: { ...muted, fontSize: 12, fontWeight: 600, marginBottom: 4 } }, `${t('events')} (${events.length})`),
+              ...events.map((event, index) => h('div', {
+                key: `${event.at || ''}-${index}`,
+                style: { display: 'flex', gap: 8, padding: '3px 0', fontSize: 12, alignItems: 'baseline' },
+              },
+                h('span', { style: { ...muted, fontSize: 11, flex: 'none', minWidth: 116 } }, fmtDateTime(event.at)),
+                h('span', { style: { flex: 'none', color: COLORS.sub, fontSize: 11 } }, String(event.type || '')),
+                h('span', { style: { flex: 1, minWidth: 0, wordBreak: 'break-word', lineHeight: 1.5 } }, String(event.message || '')),
+              )),
+            )
+          : null,
+      )
+    }
+
+    function TaskRow({ task, t, tasks, expanded, busy, onAction, onToggle, onCopy }) {
       const data = task.output && task.output.data ? task.output.data : null
+      const active = isActiveTask(task.status)
+      const retryable = isRetryableTask(task.status)
       const childTasks = (task.childTaskIds || [])
         .map((id) => (tasks || []).find((item) => item.id === id))
         .filter(Boolean)
@@ -270,43 +415,58 @@ window.__ModuleLoader__.load({
         .filter((item) => item.replyToTaskId && item.id !== task.id && (item.threadId || item.id) === (task.threadId || task.id))
         .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
       return h('div', { style: { ...card, padding: 12, opacity: task.archived ? 0.65 : 1 } },
-        h('div', { style: { ...row, justifyContent: 'space-between', alignItems: 'flex-start' } },
+        h('div', { style: { ...row, justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 } },
           h('div', { style: { flex: 1, minWidth: 0 } },
-            h('div', { style: { ...row, gap: 8 } },
+            h('div', {
+              role: 'button',
+              tabIndex: 0,
+              'aria-expanded': expanded ? 'true' : 'false',
+              title: expanded ? t('hideDetail') : t('showDetail'),
+              onClick: onToggle,
+              onKeyDown: (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  onToggle()
+                }
+              },
+              style: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, cursor: 'pointer', outline: 'none' },
+            },
               h(Badge, { tone: statusTone(task.status) }, task.status === 'waiting' ? t('waitingAnswer') : task.status),
               task.archived ? h(Badge, { tone: 'idle' }, t('archived')) : null,
               h('strong', { style: { fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, task.instruction),
+              h('span', { style: { ...muted, flex: 'none' } }, expanded ? '▾' : '▸'),
             ),
-            h('div', { style: { ...muted, marginTop: 4 } },
-              `${task.assignedDeviceName || '-'} · ${new Date(task.createdAt).toLocaleString()}${data && data.backend ? ` · ${data.backend}` : ''}${task.isPlan ? ` · ${t('plan')}` : ''}`,
+            h('div', { style: { ...muted, marginTop: 4, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
+              h('code', { style: { ...mono, userSelect: 'all' } }, task.id),
+              h('button', { style: miniBtn(), onClick: () => onCopy(task.id, t('copiedId')) }, t('copy')),
+              h('span', null, `${task.assignedDeviceName || '-'} · ${fmtDateTime(task.createdAt)}${data && data.backend ? ` · ${data.backend}` : ''}${task.isPlan ? ` · ${t('plan')}` : ''}`),
             ),
           ),
-          h('div', { style: { ...row, gap: 6 } },
-            task.status === 'running' || task.status === 'assigned' || task.status === 'queued'
-              ? h('button', { style: btn(false), onClick: () => onAction(task.id, 'cancel') }, t('cancel'))
-              : null,
+          h('div', { style: { ...row, gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end', flex: 'none' } },
+            h('button', { style: { ...btn(false, busy), padding: '3px 8px', fontSize: 12 }, disabled: busy, onClick: () => onAction(task, 'follow-up') }, t('followUp')),
             task.status === 'waiting'
-              ? h('button', { style: btn(true), onClick: () => onAction(task.id, 'answer') }, t('answer'))
+              ? h('button', { style: { ...btn(true, busy), padding: '3px 8px', fontSize: 12 }, disabled: busy, onClick: () => onAction(task, 'answer') }, t('answer'))
               : null,
-            task.status === 'failed' || task.status === 'timeout' || task.status === 'cancelled'
-              ? h('button', { style: btn(false), onClick: () => onAction(task.id, 'retry') }, t('retry'))
+            active
+              ? h('button', { style: { ...btn(false, busy), padding: '3px 8px', fontSize: 12 }, disabled: busy, onClick: () => onAction(task, 'cancel') }, t('cancel'))
               : null,
-            task.status !== 'queued' && task.status !== 'assigned' && task.status !== 'running'
-              ? h('button', {
-                  style: { ...btn(false), padding: '3px 8px', fontSize: 12 },
-                  onClick: () => onAction(task.id, 'follow-up'),
-                }, t('followUp'))
+            retryable
+              ? h('button', { style: { ...btn(false, busy), padding: '3px 8px', fontSize: 12 }, disabled: busy, onClick: () => onAction(task, 'retry') }, t('retry'))
               : null,
             h('button', {
-              style: { ...btn(false), padding: '3px 8px', fontSize: 12 },
-              onClick: () => onAction(task.id, task.archived ? 'unarchive' : 'archive'),
+              style: { ...btn(false, busy), padding: '3px 8px', fontSize: 12 },
+              disabled: busy,
+              onClick: () => onAction(task, task.archived ? 'unarchive' : 'archive'),
             }, task.archived ? t('unarchive') : t('archive')),
             h('button', {
-              style: { ...btn(false), padding: '3px 8px', fontSize: 12, color: COLORS.err },
-              onClick: () => onAction(task.id, 'delete'),
+              style: { ...btn(false, busy), padding: '3px 8px', fontSize: 12, color: COLORS.err },
+              disabled: busy,
+              onClick: () => onAction(task, 'delete'),
             }, t('delete')),
+            h('button', { style: { ...btn(false, busy), padding: '3px 8px', fontSize: 12 }, disabled: busy, onClick: onToggle }, expanded ? t('hideDetail') : t('detail')),
           ),
         ),
+        expanded ? h(TaskDetail, { task, t, busy, onAction, onCopy }) : null,
         childTasks.length
           ? h('div', { style: { marginTop: 8, padding: 8, borderRadius: 8, background: COLORS.layer2, border: `1px solid ${COLORS.border}` } },
               h('div', { style: { ...muted, marginBottom: 5 } }, `${t('subtasks')} ${finishedChildren.length}/${childTasks.length}`),
@@ -355,7 +515,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function ConsoleTab({ status, snapshot, t, onRefresh, onHub, onTaskAction, onSend, onRenameDevice, onRemoveDevice, onToggleDevice, hubOrigin, busy, message }) {
+    function ConsoleTab({ status, snapshot, t, onRefresh, onHub, onTaskAction, onSend, onRenameDevice, onRemoveDevice, onToggleDevice, onToggleTask, onCopyText, expandedTasks, hubOrigin, busy, message }) {
       const devices = (snapshot && snapshot.devices) || []
       const allTasks = (snapshot && snapshot.tasks) || []
       const tasks = allTasks.filter((task) => !task.parentTaskId && !task.replyToTaskId)
@@ -444,7 +604,17 @@ window.__ModuleLoader__.load({
         h('section', null,
           h('h3', { style: { fontSize: 14, margin: '0 0 10px' } }, `${t('tasks')} (${tasks.length})`),
           tasks.length
-            ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 10 } }, ...tasks.map((task) => h(TaskRow, { key: task.id, task, t, onAction: onTaskAction, tasks: allTasks })))
+            ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 10 } }, ...tasks.map((task) => h(TaskRow, {
+                key: task.id,
+                task,
+                t,
+                tasks: allTasks,
+                expanded: Boolean(expandedTasks && expandedTasks[task.id]),
+                busy,
+                onAction: onTaskAction,
+                onToggle: () => onToggleTask(task.id),
+                onCopy: onCopyText,
+              })))
             : h('div', { style: { ...card, ...muted } }, t('noTasks')),
         ),
       )
@@ -561,6 +731,57 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // 面板内弹窗：Electron 不支持 window.prompt，继续/回答/手动改状态都走这里。
+    function Dialog({ modal, busy, t, onChange, onCancel, onConfirm }) {
+      if (!modal) return null
+      const dangerStyle = modal.danger
+        ? { borderColor: COLORS.err, background: COLORS.err, color: '#ffffff' }
+        : {}
+      return h('div', {
+        style: {
+          position: 'fixed', inset: 0, zIndex: 1000, padding: 20,
+          background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+        },
+        onMouseDown: (event) => { if (event.target === event.currentTarget) onCancel() },
+      },
+        h('div', {
+          role: 'dialog', 'aria-modal': 'true', 'aria-label': modal.title,
+          style: {
+            width: '100%', maxWidth: 480, background: COLORS.layer, color: COLORS.text,
+            border: `1px solid ${COLORS.border}`, borderRadius: 12, padding: 18,
+            boxShadow: '0 18px 48px rgba(0,0,0,0.35)', boxSizing: 'border-box',
+          },
+        },
+          h('div', { style: { ...row, justifyContent: 'space-between', gap: 10 } },
+            h('h3', { style: { margin: 0, fontSize: 15 } }, modal.title),
+            h('button', { style: { ...btn(false), padding: '2px 8px', fontSize: 12 }, onClick: onCancel }, '×'),
+          ),
+          modal.message ? h('div', { style: { ...muted, marginTop: 8, lineHeight: 1.6, whiteSpace: 'pre-wrap' } }, modal.message) : null,
+          modal.input
+            ? (modal.input.multiline
+                ? h('textarea', {
+                    autoFocus: true, rows: modal.input.rows || 3, value: modal.value || '',
+                    placeholder: modal.input.placeholder || '', onChange: (event) => onChange(event.target.value),
+                    style: { ...inputStyle, marginTop: 10, resize: 'vertical', minHeight: 72 },
+                  })
+                : h('input', {
+                    autoFocus: true, value: modal.value || '', placeholder: modal.input.placeholder || '',
+                    onChange: (event) => onChange(event.target.value),
+                    style: { ...inputStyle, marginTop: 10 },
+                  }))
+            : null,
+          h('div', { style: { ...row, justifyContent: 'flex-end', gap: 8, marginTop: 14 } },
+            h('button', { style: btn(false, busy), disabled: busy, onClick: onCancel }, t('dialogCancel')),
+            h('button', {
+              style: { ...btn(true, busy), ...dangerStyle },
+              disabled: busy,
+              onClick: () => void onConfirm(),
+            }, busy ? t('saving') : (modal.confirmLabel || t('dialogOk'))),
+          ),
+        ),
+      )
+    }
+
     function Panel({ ctx }) {
       const t = ctx.locale.bind(NS)
       const [tab, setTab] = useState('console')
@@ -572,9 +793,18 @@ window.__ModuleLoader__.load({
       const [error, setError] = useState('')
       const [editingHub, setEditingHub] = useState(false)
       const [hubName, setHubName] = useState('')
+      const [expandedTasks, setExpandedTasks] = useState({})
+      const [modal, setModal] = useState(null)
       const hubDisplayName = (settingsData && settingsData.settings && settingsData.settings.hubNickname) || t('title')
 
       useEffect(() => { setHubName(hubDisplayName) }, [hubDisplayName])
+
+      useEffect(() => {
+        if (!modal) return undefined
+        const onKeyDown = (event) => { if (event.key === 'Escape') setModal(null) }
+        window.addEventListener('keydown', onKeyDown)
+        return () => window.removeEventListener('keydown', onKeyDown)
+      }, [modal])
 
       const load = useCallback(async () => {
         try {
@@ -623,38 +853,114 @@ window.__ModuleLoader__.load({
         const info = res && res.task && res.task.route ? res.task.route.reason : ''
         setMessage(`${t('sent')}${info ? ` · ${info}` : ''}`)
       })
-      const onTaskAction = (id, action) => withBusy(async () => {
-        if (action === 'cancel' && !window.confirm(t('cancelConfirm'))) return
-        if (action === 'delete' && !window.confirm(t('deleteConfirm'))) return
-        if (action === 'follow-up') {
-          const instruction = window.prompt(t('followUpPrompt'))
-          if (!instruction || !instruction.trim()) return
-          await call(`/tasks/${encodeURIComponent(id)}/follow-up`, {
-            method: 'POST',
-            body: JSON.stringify({ instruction: instruction.trim() }),
-          })
-          await load()
-          setMessage(t('followUpCreated'))
-          return
+      const taskApi = (id, suffix) => `/tasks/${encodeURIComponent(id)}${suffix || ''}`
+      const postTaskAction = (id, suffix, body) => call(taskApi(id, suffix), {
+        method: 'POST',
+        body: JSON.stringify(body || {}),
+      })
+      const toggleTask = (id) => setExpandedTasks((prev) => ({ ...prev, [id]: !prev[id] }))
+      const onCopyText = async (text, okMessage) => {
+        try {
+          await copyToClipboard(text)
+          setMessage(okMessage || t('copied'))
+        } catch {
+          setMessage(t('copyFailed'))
         }
-        if (action === 'answer') {
-          const text = window.prompt(t('answerPrompt'))
-          if (!text || !text.trim()) return
-          await call(`/tasks/${encodeURIComponent(id)}/answer`, {
-            method: 'POST',
-            body: JSON.stringify({ text: text.trim() }),
+      }
+      const openDialog = (options) => setModal({ value: '', ...options })
+      const confirmModal = async () => {
+        const current = modal
+        if (!current) return
+        const value = String(current.value || '').trim()
+        if (current.input && current.input.required && !value) return
+        setModal(null)
+        if (typeof current.onConfirm === 'function') await current.onConfirm(value)
+      }
+      const runTaskAction = (fn) => withBusy(fn)
+      const onTaskAction = (task, action) => {
+        if (!task) return
+        const id = task.id
+        const active = isActiveTask(task.status)
+        if (action === 'cancel') {
+          openDialog({
+            title: t('cancelTaskTitle'), message: t('cancelConfirm'), confirmLabel: t('cancel'), danger: true,
+            onConfirm: () => runTaskAction(async () => { await postTaskAction(id, '/cancel'); await load() }),
           })
-          await load()
-          setMessage(t('answerSent'))
           return
         }
         if (action === 'delete') {
-          await call(`/tasks/${encodeURIComponent(id)}`, { method: 'DELETE' })
-        } else {
-          await call(`/tasks/${encodeURIComponent(id)}/${action}`, { method: 'POST', body: '{}' })
+          openDialog({
+            title: t('delete'), message: t('deleteConfirm'), confirmLabel: t('delete'), danger: true,
+            onConfirm: () => runTaskAction(async () => { await call(taskApi(id), { method: 'DELETE' }); await load() }),
+          })
+          return
         }
-        await load()
-      })
+        if (action === 'archive' || action === 'unarchive') {
+          openDialog({
+            title: action === 'archive' ? t('archive') : t('unarchive'),
+            message: `${t('taskId')}: ${task.id}`,
+            confirmLabel: action === 'archive' ? t('archive') : t('unarchive'),
+            onConfirm: () => runTaskAction(async () => { await postTaskAction(id, `/${action}`); await load() }),
+          })
+          return
+        }
+        if (action === 'retry') {
+          runTaskAction(async () => { await postTaskAction(id, '/retry'); await load() })
+          return
+        }
+        if (action === 'follow-up') {
+          if (active) {
+            openDialog({
+              title: t('followUp'), message: t('activeFollowUpHint'), confirmLabel: t('cancelTaskTitle'), danger: true,
+              onConfirm: () => runTaskAction(async () => { await postTaskAction(id, '/cancel'); await load() }),
+            })
+            return
+          }
+          openDialog({
+            title: t('followUp'), message: t('followUpHint'),
+            input: { multiline: true, rows: 4, placeholder: t('followUpPrompt'), required: true },
+            confirmLabel: t('followUp'),
+            onConfirm: (value) => runTaskAction(async () => {
+              await postTaskAction(id, '/follow-up', { instruction: value })
+              await load()
+              setMessage(t('followUpCreated'))
+            }),
+          })
+          return
+        }
+        if (action === 'answer') {
+          openDialog({
+            title: t('answer'), message: t('answerPrompt'),
+            input: { multiline: true, rows: 3, placeholder: t('answerPrompt'), required: true },
+            confirmLabel: t('answer'),
+            onConfirm: (value) => runTaskAction(async () => {
+              await postTaskAction(id, '/answer', { text: value })
+              await load()
+              setMessage(t('answerSent'))
+            }),
+          })
+          return
+        }
+        if (action === 'mark-completed' || action === 'mark-failed') {
+          const targetStatus = action === 'mark-completed' ? 'completed' : 'failed'
+          openDialog({
+            title: action === 'mark-completed' ? t('markCompleted') : t('markFailed'),
+            message: t('statusChangeHint'),
+            input: { multiline: true, rows: 3, placeholder: t('statusNotePlaceholder') },
+            confirmLabel: t('applyStatus'),
+            onConfirm: (value) => runTaskAction(async () => {
+              try {
+                await postTaskAction(id, '/status', { status: targetStatus, note: value })
+              } catch (err) {
+                if (isMissingRouteError(err)) throw new Error(t('statusRouteNeedsRestart'))
+                throw err
+              }
+              await load()
+              setMessage(t('statusUpdated'))
+            }),
+          })
+        }
+      }
       const onRenameDevice = (id, name) => withBusy(async () => {
         const next = String(name || '').trim()
         if (!next) throw new Error(t('nameRequired'))
@@ -745,13 +1051,23 @@ window.__ModuleLoader__.load({
               ? h(ConsoleTab, {
                   status, snapshot, t, busy, message,
                   onRefresh: () => void load(), onHub, onTaskAction, onSend,
-                  onRenameDevice, onRemoveDevice, onToggleDevice, hubOrigin: status && status.hub ? status.hub.origin : '',
+                  onRenameDevice, onRemoveDevice, onToggleDevice,
+                  onToggleTask: toggleTask, onCopyText, expandedTasks,
+                  hubOrigin: status && status.hub ? status.hub.origin : '',
                 })
               : h(SettingsTab, {
                   settings: settingsData && settingsData.settings, secrets: settingsData && settingsData.secrets, status, t, busy, message, onSave,
                 }),
           ),
         ),
+        h(Dialog, {
+          modal,
+          busy,
+          t,
+          onChange: (value) => setModal((prev) => (prev ? { ...prev, value } : prev)),
+          onCancel: () => setModal(null),
+          onConfirm: () => void confirmModal(),
+        }),
       )
     }
 
