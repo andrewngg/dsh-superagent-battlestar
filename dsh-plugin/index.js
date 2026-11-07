@@ -28,6 +28,9 @@ const ROUTE_PREFIX = '/super-butler'
 const MAX_BODY_BYTES = 1024 * 1024
 // 面板“手动改状态”允许的目标状态：完成/失败走 external-result，取消/重新排队走 cancel/retry。
 const MANUAL_TASK_STATUSES = new Set(['completed', 'failed', 'cancelled', 'queued'])
+const MANUAL_FINISH_STATUSES = new Set(['completed', 'failed'])
+// 与 Hub 一致：这些状态下任务仍占用设备，改终态前必须先 cancel，避免设备继续执行。
+const ACTIVE_TASK_STATUSES = new Set(['queued', 'assigned', 'running', 'waiting'])
 
 const SECRET_FIELDS = [
   { key: 'githubToken', ref: 'SUPER_BUTLER_GITHUB_TOKEN', label: 'GitHub Token', env: 'GITHUB_TOKEN' },
@@ -835,7 +838,9 @@ export function apply(ctx, rawConfig = {}) {
         return json(res, out.status, out.data)
       }
       // 手动改状态：把面板里的“完成/失败/取消/重新排队”映射到 Hub 现有的管理接口。
-      // 完成/失败复用 Hub 的 external-result（管理员手动结束任务），其余走 cancel/retry。
+      //  - 先读取任务：进行中的任务先取消（移除设备待执行指令并下发 cancel_task），避免 Hub 与设备状态分叉；
+      //  - Agnes 拆分任务（isPlan）的状态由子任务汇总，只允许取消；
+      //  - 完成/失败复用 Hub 的 external-result；备注为空时沿用原有输出，避免覆盖结果。
       const taskStatus = /^\/api\/tasks\/([^/]+)\/status$/.exec(sub)
       if (method === 'POST' && taskStatus) {
         const body = await readBody(req)
@@ -846,16 +851,50 @@ export function apply(ctx, rawConfig = {}) {
             error: { code: 'bad_request', message: `不支持的状态：${target || '(空)'}` },
           })
         }
-        const id = encodeURIComponent(taskStatus[1])
+        let taskId
+        try {
+          taskId = decodeURIComponent(taskStatus[1])
+        } catch {
+          return json(res, 400, { error: { code: 'bad_request', message: '任务 ID 非法' } })
+        }
+        const id = encodeURIComponent(taskId)
+        const fetched = await hubRequest(`/api/tasks/${id}`)
+        if (fetched.status !== 200 || !fetched.data || !fetched.data.task) {
+          return json(res, fetched.status, fetched.data)
+        }
+        const current = fetched.data.task
+        if (current.isPlan && target !== 'cancelled') {
+          return json(res, 409, {
+            error: { code: 'conflict', message: '长任务拆分的状态由子任务汇总，只能取消' },
+          })
+        }
+        if (MANUAL_FINISH_STATUSES.has(target) && ACTIVE_TASK_STATUSES.has(String(current.status || ''))) {
+          const cancelled = await hubRequest(`/api/tasks/${id}/cancel`, { method: 'POST', body: {} })
+          if (cancelled.status >= 400) {
+            // 状态可能刚好变化（例如设备刚上报结果）：重新读取，只有仍是进行中才返回原错误。
+            const again = await hubRequest(`/api/tasks/${id}`)
+            const latest = again.status === 200 && again.data && again.data.task ? again.data.task : null
+            if (!latest || ACTIVE_TASK_STATUSES.has(String(latest.status || ''))) {
+              return json(res, cancelled.status, cancelled.data)
+            }
+          }
+        }
         let out
         if (target === 'cancelled') {
           out = await hubRequest(`/api/tasks/${id}/cancel`, { method: 'POST', body: {} })
         } else if (target === 'queued') {
           out = await hubRequest(`/api/tasks/${id}/retry`, { method: 'POST', body: {} })
         } else {
+          const previousOutput = current.output
+          const previousText = previousOutput && typeof previousOutput.text === 'string' ? previousOutput.text : ''
+          const previousError = typeof current.error === 'string' ? current.error : ''
           const payload = target === 'completed'
-            ? { text: note || '管理员在 DSH 面板手动标记完成', status: 'completed' }
-            : { text: note || '管理员在 DSH 面板手动标记失败', status: 'failed', error: note || '管理员手动标记失败' }
+            ? { text: note || previousText || '管理员在 DSH 面板手动标记完成', status: 'completed' }
+            : {
+                text: note || previousText || '管理员在 DSH 面板手动标记失败',
+                status: 'failed',
+                error: note || previousError || '管理员手动标记失败',
+              }
           out = await hubRequest(`/api/tasks/${id}/external-result`, { method: 'POST', body: payload })
         }
         return json(res, out.status, out.data)
@@ -890,6 +929,8 @@ export function apply(ctx, rawConfig = {}) {
         return json(res, 200, {
           name: 'BattleStar',
           routes: ['/api/status', '/api/settings', '/api/snapshot', '/api/tasks', '/api/tasks/:id/status', '/api/tasks/:id/follow-up', '/api/tasks/:id/answer', '/api/tasks/:id/archive', '/api/tasks/:id', '/api/devices/:id', '/api/test-credential', '/api/hub/start', '/api/hub/stop'],
+          // 用于确认 Host 侧插件是否已加载最新实现（DSH 桌面端会热加载插件文件）。
+          features: ['task-status-manual', 'task-status-cancel-first'],
         })
       }
       return json(res, 404, { error: { code: 'not_found', message: `未知路由：${method} ${sub}` } })

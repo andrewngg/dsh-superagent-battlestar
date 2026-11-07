@@ -87,7 +87,7 @@ test('module factory and apply register dictionaries, main panel and sidebar ent
   assert.equal(localeRegistrations.length, 1)
   assert.equal(localeRegistrations[0].namespace, 'superButler')
   const { zh, en } = localeRegistrations[0].dictionaries
-  for (const key of ['taskId', 'manualStatus', 'markCompleted', 'markFailed', 'statusUpdated', 'followUpHint', 'statusRouteNeedsRestart']) {
+  for (const key of ['taskId', 'manualStatus', 'markCompleted', 'markFailed', 'statusUpdated', 'followUpHint', 'statusRouteNeedsRestart', 'overwriteHint', 'planStatusHint', 'inputRequired']) {
     assert.ok(zh[key], `zh dictionary is missing ${key}`)
     assert.ok(en[key], `en dictionary is missing ${key}`)
   }

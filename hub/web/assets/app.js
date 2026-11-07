@@ -1884,6 +1884,8 @@
         icon('x'), el('span', { text: '取消' })));
     }
     if (RETRYABLE_STATUS.has(status)) {
+      actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'complete' } },
+        icon('check'), el('span', { text: '标记成功' })));
       actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'retry' } },
         icon('refresh'), el('span', { text: '重试' })));
     }
@@ -2813,6 +2815,7 @@
       }, icon('send'), '回答 Mika'));
     }
     if (RETRYABLE_STATUS.has(status)) {
+      nodes.push(el('button', { type: 'button', className: 'btn btn-ghost btn-sm', onclick: () => completeTaskManually(task.id) }, icon('check'), '标记成功'));
       nodes.push(el('button', { type: 'button', className: 'btn btn-primary btn-sm', onclick: () => retryTask(task.id) }, icon('refresh'), '重新排队'));
     }
     if (!ACTIVE_STATUS.has(status)) {
@@ -2932,8 +2935,36 @@
     }
   }
 
-  function editTaskInstruction(id) {
+  async function completeTaskManually(id) {
     const task = state.tasks.find((item) => item.id === id);
+    if (!task) return;
+    const ok = await confirmDialog({
+      title: '手动标记任务为成功？',
+      message: `任务「${shorten(task.instruction, 60)}」将被直接标记为 completed，原 error 和失败状态会被清除。`,
+      okText: '标记成功',
+      danger: false,
+    });
+    if (!ok) return;
+    try {
+      const res = await api(`/api/tasks/${encodeURIComponent(id)}/external-result`, {
+        method: 'POST',
+        body: {
+          text: '管理员在 BattleStar 手动标记为完成。',
+          status: 'completed',
+          data: { manual: true, previousStatus: task.status },
+        },
+        timeout: 15000,
+      });
+      if (res && res.task) upsertTask(res.task);
+      await refreshNow(false);
+      toast('任务已手动标记为完成', 'success');
+    } catch (err) {
+      if (err.status === 401) return handleAuthLost(err.message);
+      toast(err.message || '手动标记失败', 'error');
+    }
+  }
+
+  function editTaskInstruction(id) {    const task = state.tasks.find((item) => item.id === id);
     if (!task) return;
     cancelFollowUp();
     const requirements = task.requirements || {};
@@ -3329,6 +3360,7 @@
         else if (action === 'open-child') openTaskDrawer(actionBtn.dataset.taskId);
         else if (action === 'cancel') cancelTask(id);
         else if (action === 'retry') retryTask(id);
+        else if (action === 'complete') completeTaskManually(id);
         else if (action === 'archive') archiveTask(id, true);
         else if (action === 'unarchive') archiveTask(id, false);
         else if (action === 'delete') deleteTask(id);

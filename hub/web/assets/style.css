@@ -1883,3 +1883,10 @@ select:focus, input:focus { outline: none; border-color: rgba(124, 140, 255, 0.6
   .dev-scope-row { align-items: stretch; flex-direction: column; gap: 5px; }
   .dev-scope-row select { height: 40px; font-size: 16px; }
 }
+
+/* BattleStar: 任务详情抽屉底部操作栏窄屏换行（避免按钮被裁切看不全） */
+@media (max-width: 600px) {
+  .drawer-foot { flex-wrap: wrap; gap: 7px; }
+  .drawer-foot .spacer { display: none; }
+  .drawer-foot .btn { flex: 1 1 auto; justify-content: center; min-width: 0; }
+}

@@ -21,7 +21,7 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node --test --test-isolation=none test/client-module.test.mjs test/client-render.test.mjs test/status-route.test.mjs"
+    "test": "node --test --test-isolation=none test/client-module.test.mjs test/client-render.test.mjs test/status-route.test.mjs test/status-route-integration.test.mjs"
   },
   "dsh": {
     "bundle": {

@@ -133,6 +133,7 @@ test('TaskRow renders the task id in both collapsed and expanded states', () => 
     onAction: noop,
     onToggle: noop,
     onCopy: noop,
+    hostFeatures: ['task-status-cancel-first'],
   }
 
   const collapsed = render(React.createElement(internals.TaskRow, { ...props, task, expanded: false }))
@@ -149,7 +150,9 @@ test('TaskRow renders the task id in both collapsed and expanded states', () => 
 
 test('TaskDetail renders metadata, manual status buttons and the event timeline', () => {
   const { React, render, internals } = loadInternals()
-  const html = render(React.createElement(internals.TaskDetail, { task, t, busy: false, onAction: noop, onCopy: noop }))
+  const html = render(React.createElement(internals.TaskDetail, {
+    task, t, busy: false, onAction: noop, onCopy: noop, hostFeatures: ['task-status-cancel-first'],
+  }))
   for (const expected of ['task_abc123', 'statusLabel', 'deviceLabel', 'attemptsLabel', 'manualStatus', 'markCompleted', 'markFailed', 'cancel', 'routeReason', 'created']) {
     assert.match(html, new RegExp(expected))
   }
@@ -158,9 +161,34 @@ test('TaskDetail renders metadata, manual status buttons and the event timeline'
 test('TaskDetail hides completed/failed buttons that would be no-ops', () => {
   const { React, render, internals } = loadInternals()
   const completedTask = makeTask({ status: 'completed', output: { text: 'done' } })
-  const html = render(React.createElement(internals.TaskDetail, { task: completedTask, t, busy: false, onAction: noop, onCopy: noop }))
+  const html = render(React.createElement(internals.TaskDetail, {
+    task: completedTask, t, busy: false, onAction: noop, onCopy: noop, hostFeatures: ['task-status-cancel-first'],
+  }))
   assert.doesNotMatch(html, /markCompleted/)
   assert.match(html, /markFailed/)
+})
+
+test('TaskDetail disables forced finish until the host advertises cancel-first support', () => {
+  const { React, render, internals } = loadInternals()
+  const stale = render(React.createElement(internals.TaskDetail, { task, t, busy: false, onAction: noop, onCopy: noop }))
+  assert.match(stale, /statusRouteNeedsRestart/, 'stale host must show the restart hint')
+  assert.match(stale, /markCompleted/, 'the button still renders but is disabled')
+
+  const fresh = render(React.createElement(internals.TaskDetail, {
+    task, t, busy: false, onAction: noop, onCopy: noop, hostFeatures: ['task-status-cancel-first'],
+  }))
+  assert.doesNotMatch(fresh, /statusRouteNeedsRestart/)
+})
+
+test('TaskDetail does not offer manual status on Agnes plan parents', () => {
+  const { React, render, internals } = loadInternals()
+  const planTask = makeTask({ isPlan: true, status: 'running' })
+  const html = render(React.createElement(internals.TaskDetail, { task: planTask, t, busy: false, onAction: noop, onCopy: noop }))
+  assert.doesNotMatch(html, /markCompleted/)
+  assert.doesNotMatch(html, /markFailed/)
+  assert.doesNotMatch(html, /requeue/)
+  assert.match(html, /planStatusHint/)
+  assert.match(html, /cancel/)
 })
 
 test('Dialog renders message, input and confirm button', () => {
@@ -207,6 +235,27 @@ test('Dialog renders message, input and confirm button', () => {
   assert.equal(textareas.length, 1, 'dialog must render a controlled textarea with the typed value')
 })
 
+test('Dialog shows the required-input error and labels its close button', () => {
+  const { React, render, internals } = loadInternals()
+  const html = render(React.createElement(internals.Dialog, {
+    modal: {
+      title: '继续',
+      message: '继续会创建一个新任务',
+      input: { multiline: true, rows: 4, placeholder: '下一步', required: true },
+      value: '',
+      error: 'inputRequired',
+      confirmLabel: '继续',
+    },
+    busy: false,
+    t,
+    onChange: noop,
+    onCancel: noop,
+    onConfirm: noop,
+  }))
+  assert.match(html, /inputRequired/)
+  assert.match(html, /dialogCancel/)
+})
+
 test('ConsoleTab renders devices and the task list without throwing', () => {
   const { React, render, internals } = loadInternals()
   const html = render(React.createElement(internals.ConsoleTab, {
@@ -231,9 +280,11 @@ test('ConsoleTab renders devices and the task list without throwing', () => {
     onToggleTask: noop,
     onCopyText: noop,
     expandedTasks: { task_abc123: true },
+    hostFeatures: ['task-status-cancel-first'],
     hubOrigin: 'http://127.0.0.1:7317',
     busy: false,
     message: '已创建任务',
+    messageTone: 'error',
   }))
   assert.match(html, /Mac mini/)
   assert.match(html, /task_abc123/)

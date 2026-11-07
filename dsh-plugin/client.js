@@ -11,7 +11,8 @@ window.__ModuleLoader__.load({
 
     const NS = 'superButler'
     const PANEL_ID = 'super-butler'
-    const API = '/super-butler/api'
+    const ROOT = '/super-butler'
+    const API = `${ROOT}/api`
 
     const zh = {
       panel: 'BattleStar', title: 'BattleStar', subtitle: '多设备 AI 管家 · 控制台与密钥',
@@ -33,7 +34,7 @@ window.__ModuleLoader__.load({
       cancel: '取消', retry: '重试', output: '输出', error: '错误', events: '事件',
       archive: '归档', unarchive: '取消归档', delete: '删除', deleteConfirm: '确定删除这个任务吗？删除后不可恢复。',
       archived: '已归档', subtasks: 'Agnes 子任务', plan: 'Agnes 长任务拆分',
-      followUp: '继续', followUpPrompt: '输入下一步或修正要求（会带上一步上下文）：', followUpCreated: '已创建下一步任务', thread: '任务线程',
+      followUp: '继续', followUpPrompt: '输入下一步或修正要求（会带上一步上下文）：', followUpCreated: '已创建下一步任务', thread: '任务线程', steps: '步',
       answer: '回答 Mika', answerPrompt: 'Mika 需要你的回答：', answerSent: '回答已发送，Mika 继续执行', waitingAnswer: '等待回答',
       hubSettings: 'Hub 设置', projectRoot: '项目目录', hubPort: 'Hub 端口', autoStart: 'DSH 启动时自动启动 Hub',
       defaultModel: '默认模型', githubUser: 'GitHub 用户名', keys: '私人账号与密钥',
@@ -52,15 +53,18 @@ window.__ModuleLoader__.load({
       emptySecrets: '尚未配置任何私人密钥',
       taskId: '任务 ID', copyId: '复制 ID', copiedId: '任务 ID 已复制', copyInstruction: '复制指令',
       copiedInstruction: '指令已复制', copyFailed: '复制失败，请手动选择文本',
-      detail: '详情', showDetail: '展开任务详情', hideDetail: '收起任务详情', taskInfo: '任务信息',
+      detail: '详情', showDetail: '展开任务详情', hideDetail: '收起任务详情',
       statusLabel: '状态', deviceLabel: '执行设备', priorityLabel: '优先级', timeoutLabel: '超时',
       attemptsLabel: '尝试次数', createdLabel: '创建时间', startedLabel: '开始时间',
       finishedLabel: '结束时间', threadStepLabel: '线程步骤', routeReason: '路由结果', noRoute: '暂无路由信息',
       manualStatus: '手动改状态', markCompleted: '标记完成', markFailed: '标记失败', requeue: '重新排队',
-      statusNotePlaceholder: '备注（可选），会写入任务事件',
+      statusNotePlaceholder: '备注（可选）：备注会作为新的输出/错误，留空保留原输出',
       applyStatus: '应用', statusUpdated: '任务状态已更新',
-      statusChangeHint: '手动改状态会直接结束任务，设备之后上报的结果会被忽略。',
-      statusRouteNeedsRestart: 'Host 插件已更新，请重启 DSH 后再使用手动改状态',
+      statusChangeHint: '进行中的任务会先取消设备执行，再改成手动状态；设备之后上报的结果会被忽略。',
+      overwriteHint: '该任务已有结果，改状态会覆盖现有输出/错误（备注为空时保留原输出）。',
+      planStatusHint: 'Agnes 长任务拆分的状态由子任务汇总，只能取消，不能手动改状态。',
+      inputRequired: '请先填写内容',
+      statusRouteNeedsRestart: 'Host 插件还未提供手动改状态接口，请重启 DSH 后重试',
       followUpHint: '继续会创建一个新任务，并自动带上当前任务的结果作为上下文。',
       activeFollowUpHint: '任务还在进行中，结束后才能继续；也可以先取消任务再继续。',
       cancelTaskTitle: '取消任务', dialogOk: '确定', dialogCancel: '取消', close: '关闭',
@@ -85,7 +89,7 @@ window.__ModuleLoader__.load({
       cancel: 'Cancel', retry: 'Retry', output: 'Output', error: 'Error', events: 'Events',
       archive: 'Archive', unarchive: 'Unarchive', delete: 'Delete', deleteConfirm: 'Delete this task permanently?',
       archived: 'Archived', subtasks: 'Agnes subtasks', plan: 'Agnes task split',
-      followUp: 'Continue', followUpPrompt: 'Enter the next step or correction (previous context will be included):', followUpCreated: 'Follow-up task created', thread: 'Task thread',
+      followUp: 'Continue', followUpPrompt: 'Enter the next step or correction (previous context will be included):', followUpCreated: 'Follow-up task created', thread: 'Task thread', steps: 'steps',
       answer: 'Answer Mika', answerPrompt: 'Mika needs your answer:', answerSent: 'Answer sent; Mika continues', waitingAnswer: 'Waiting for answer',
       hubSettings: 'Hub settings', projectRoot: 'Project root', hubPort: 'Hub port', autoStart: 'Start hub with DSH',
       defaultModel: 'Default model', githubUser: 'GitHub username', keys: 'Private accounts and keys',
@@ -104,15 +108,18 @@ window.__ModuleLoader__.load({
       emptySecrets: 'No private keys configured yet',
       taskId: 'Task ID', copyId: 'Copy ID', copiedId: 'Task ID copied', copyInstruction: 'Copy instruction',
       copiedInstruction: 'Instruction copied', copyFailed: 'Copy failed; select the text manually',
-      detail: 'Details', showDetail: 'Show task details', hideDetail: 'Hide task details', taskInfo: 'Task info',
+      detail: 'Details', showDetail: 'Show task details', hideDetail: 'Hide task details',
       statusLabel: 'Status', deviceLabel: 'Device', priorityLabel: 'Priority', timeoutLabel: 'Timeout',
       attemptsLabel: 'Attempts', createdLabel: 'Created', startedLabel: 'Started',
       finishedLabel: 'Finished', threadStepLabel: 'Thread step', routeReason: 'Route', noRoute: 'No route info',
       manualStatus: 'Change status manually', markCompleted: 'Mark completed', markFailed: 'Mark failed', requeue: 'Re-queue',
-      statusNotePlaceholder: 'Optional note, stored in the task events',
+      statusNotePlaceholder: 'Optional note: it becomes the new output/error; leave blank to keep the old output',
       applyStatus: 'Apply', statusUpdated: 'Task status updated',
-      statusChangeHint: 'Changing status ends the task immediately; later device reports are ignored.',
-      statusRouteNeedsRestart: 'Host plugin updated; restart DSH to use manual status changes',
+      statusChangeHint: 'Active tasks are cancelled on the device first, then switched to the manual status; later device reports are ignored.',
+      overwriteHint: 'This task already has a result; changing its status overwrites the output/error (leave the note blank to keep the old output).',
+      planStatusHint: 'An Agnes plan status is derived from its subtasks; it can only be cancelled, not changed manually.',
+      inputRequired: 'Please enter a value first',
+      statusRouteNeedsRestart: 'The host plugin has no manual status route yet; restart DSH and retry',
       followUpHint: 'Continue creates a new task with the current result as context.',
       activeFollowUpHint: 'The task is still active; it can continue after it ends. You can cancel it first.',
       cancelTaskTitle: 'Cancel task', dialogOk: 'OK', dialogCancel: 'Cancel', close: 'Close',
@@ -237,11 +244,16 @@ window.__ModuleLoader__.load({
       if (!ok) throw new Error('copy failed')
     }
 
-    // Host 插件里还没有 /status 路由时（未重启 Harness）给出明确提示，而不是原始 404。
+    // Host 插件里还没有 /status 路由时给出明确提示，而不是原始 404。
+    // 旧 Host 的未知路由提示固定为「未知路由：METHOD /path」；Hub 自身的 404（任务不存在）不在此列。
     function isMissingRouteError(err) {
       const message = err && err.message ? String(err.message) : ''
-      return /未知路由|not_found|HTTP 404|接口不存在|404/.test(message)
+      return /未知路由/.test(message)
     }
+
+    // 手动改状态只对非拆分的普通任务开放：Agnes 拆分任务的状态由子任务汇总。
+    const TERMINAL_TASK_STATUS = ['completed', 'failed', 'timeout', 'cancelled']
+    const isTerminalTask = (status) => TERMINAL_TASK_STATUS.includes(status)
 
     function ButlerIcon({ size }) {
       return h('svg', {
@@ -334,9 +346,11 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function TaskDetail({ task, t, busy, onAction, onCopy }) {
+    function TaskDetail({ task, t, busy, onAction, onCopy, hostFeatures }) {
       const active = isActiveTask(task.status)
       const retryable = isRetryableTask(task.status)
+      // 旧版 Host 的 /status 没有「先取消再结束」逻辑，避免设备与 Hub 状态分叉，先禁用强制结束。
+      const canForceFinish = (hostFeatures || []).includes('task-status-cancel-first')
       const rows = [
         [t('statusLabel'), task.status],
         [t('deviceLabel'), task.assignedDeviceName || '-'],
@@ -372,20 +386,33 @@ window.__ModuleLoader__.load({
         h('div', { style: { borderTop: `1px solid ${COLORS.border}`, paddingTop: 8 } },
           h('div', { style: { ...row, gap: 8, flexWrap: 'wrap', marginBottom: 6 } },
             h('span', { style: { fontSize: 12, fontWeight: 600 } }, t('manualStatus')),
-            task.status !== 'completed'
-              ? h('button', { style: miniBtn(false, busy), disabled: busy, onClick: () => onAction(task, 'mark-completed') }, t('markCompleted'))
+            !task.isPlan && task.status !== 'completed'
+              ? h('button', {
+                  style: miniBtn(false, busy || !canForceFinish),
+                  disabled: busy || !canForceFinish,
+                  title: canForceFinish ? '' : t('statusRouteNeedsRestart'),
+                  onClick: () => onAction(task, 'mark-completed'),
+                }, t('markCompleted'))
               : null,
-            task.status !== 'failed'
-              ? h('button', { style: miniBtn(false, busy), disabled: busy, onClick: () => onAction(task, 'mark-failed') }, t('markFailed'))
+            !task.isPlan && task.status !== 'failed'
+              ? h('button', {
+                  style: miniBtn(false, busy || !canForceFinish),
+                  disabled: busy || !canForceFinish,
+                  title: canForceFinish ? '' : t('statusRouteNeedsRestart'),
+                  onClick: () => onAction(task, 'mark-failed'),
+                }, t('markFailed'))
               : null,
-            retryable
+            !task.isPlan && retryable
               ? h('button', { style: miniBtn(false, busy), disabled: busy, onClick: () => onAction(task, 'retry') }, t('requeue'))
               : null,
             active
               ? h('button', { style: miniBtn(true, busy), disabled: busy, onClick: () => onAction(task, 'cancel') }, t('cancel'))
               : null,
           ),
-          h('div', { style: { ...muted, fontSize: 11, lineHeight: 1.5 } }, t('statusChangeHint')),
+          h('div', { style: { ...muted, fontSize: 11, lineHeight: 1.5 } }, task.isPlan ? t('planStatusHint') : t('statusChangeHint')),
+          !task.isPlan && !canForceFinish
+            ? h('div', { style: { ...muted, color: COLORS.warn, fontSize: 11, lineHeight: 1.5 } }, t('statusRouteNeedsRestart'))
+            : null,
         ),
         events.length
           ? h('div', { style: { borderTop: `1px solid ${COLORS.border}`, paddingTop: 8 } },
@@ -403,7 +430,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function TaskRow({ task, t, tasks, expanded, busy, onAction, onToggle, onCopy }) {
+    function TaskRow({ task, t, tasks, expanded, busy, onAction, onToggle, onCopy, hostFeatures }) {
       const data = task.output && task.output.data ? task.output.data : null
       const active = isActiveTask(task.status)
       const retryable = isRetryableTask(task.status)
@@ -429,7 +456,7 @@ window.__ModuleLoader__.load({
                   onToggle()
                 }
               },
-              style: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, cursor: 'pointer', outline: 'none' },
+              style: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, cursor: 'pointer' },
             },
               h(Badge, { tone: statusTone(task.status) }, task.status === 'waiting' ? t('waitingAnswer') : task.status),
               task.archived ? h(Badge, { tone: 'idle' }, t('archived')) : null,
@@ -450,7 +477,7 @@ window.__ModuleLoader__.load({
             active
               ? h('button', { style: { ...btn(false, busy), padding: '3px 8px', fontSize: 12 }, disabled: busy, onClick: () => onAction(task, 'cancel') }, t('cancel'))
               : null,
-            retryable
+            !task.isPlan && retryable
               ? h('button', { style: { ...btn(false, busy), padding: '3px 8px', fontSize: 12 }, disabled: busy, onClick: () => onAction(task, 'retry') }, t('retry'))
               : null,
             h('button', {
@@ -466,7 +493,7 @@ window.__ModuleLoader__.load({
             h('button', { style: { ...btn(false, busy), padding: '3px 8px', fontSize: 12 }, disabled: busy, onClick: onToggle }, expanded ? t('hideDetail') : t('detail')),
           ),
         ),
-        expanded ? h(TaskDetail, { task, t, busy, onAction, onCopy }) : null,
+        expanded ? h(TaskDetail, { task, t, busy, onAction, onCopy, hostFeatures }) : null,
         childTasks.length
           ? h('div', { style: { marginTop: 8, padding: 8, borderRadius: 8, background: COLORS.layer2, border: `1px solid ${COLORS.border}` } },
               h('div', { style: { ...muted, marginBottom: 5 } }, `${t('subtasks')} ${finishedChildren.length}/${childTasks.length}`),
@@ -482,7 +509,7 @@ window.__ModuleLoader__.load({
           : null,
         threadTasks.length
           ? h('div', { style: { marginTop: 8, padding: 8, borderRadius: 8, background: 'rgba(124,140,255,0.06)', border: '1px dashed rgba(148,163,255,0.25)' } },
-              h('div', { style: { ...muted, marginBottom: 5 } }, `${t('thread')} · ${threadTasks.length + 1} 步`),
+              h('div', { style: { ...muted, marginBottom: 5 } }, `${t('thread')} · ${threadTasks.length + 1} ${t('steps')}`),
               ...threadTasks.map((child) => h('div', {
                 key: child.id,
                 style: { ...row, gap: 8, padding: '5px 0', borderTop: `1px solid ${COLORS.border}` },
@@ -515,7 +542,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function ConsoleTab({ status, snapshot, t, onRefresh, onHub, onTaskAction, onSend, onRenameDevice, onRemoveDevice, onToggleDevice, onToggleTask, onCopyText, expandedTasks, hubOrigin, busy, message }) {
+    function ConsoleTab({ status, snapshot, t, onRefresh, onHub, onTaskAction, onSend, onRenameDevice, onRemoveDevice, onToggleDevice, onToggleTask, onCopyText, expandedTasks, hubOrigin, busy, message, messageTone, hostFeatures }) {
       const devices = (snapshot && snapshot.devices) || []
       const allTasks = (snapshot && snapshot.tasks) || []
       const tasks = allTasks.filter((task) => !task.parentTaskId && !task.replyToTaskId)
@@ -561,7 +588,12 @@ window.__ModuleLoader__.load({
               : h('button', { style: btn(true, busy), onClick: () => onHub('start'), disabled: busy }, t('start')),
           ),
         ),
-        message ? h('div', { style: { ...muted, color: COLORS.sub } }, message) : null,
+        message
+          ? h('div', {
+              style: { ...muted, color: messageTone === 'error' ? COLORS.err : COLORS.sub, lineHeight: 1.5 },
+              role: messageTone === 'error' ? 'alert' : 'status',
+            }, message)
+          : null,
         h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12 } },
           h(Stat, { label: t('online'), value: `${stats.devicesOnline ?? 0}/${stats.devicesTotal ?? devices.length}` }),
           h(Stat, { label: t('runningTasks'), value: (stats.tasksRunning ?? 0) + (stats.tasksWaiting ?? 0) }),
@@ -614,6 +646,7 @@ window.__ModuleLoader__.load({
                 onAction: onTaskAction,
                 onToggle: () => onToggleTask(task.id),
                 onCopy: onCopyText,
+                hostFeatures,
               })))
             : h('div', { style: { ...card, ...muted } }, t('noTasks')),
         ),
@@ -754,7 +787,11 @@ window.__ModuleLoader__.load({
         },
           h('div', { style: { ...row, justifyContent: 'space-between', gap: 10 } },
             h('h3', { style: { margin: 0, fontSize: 15 } }, modal.title),
-            h('button', { style: { ...btn(false), padding: '2px 8px', fontSize: 12 }, onClick: onCancel }, '×'),
+            h('button', {
+              style: { ...btn(false), padding: '2px 8px', fontSize: 12 },
+              'aria-label': t('close'),
+              onClick: onCancel,
+            }, '×'),
           ),
           modal.message ? h('div', { style: { ...muted, marginTop: 8, lineHeight: 1.6, whiteSpace: 'pre-wrap' } }, modal.message) : null,
           modal.input
@@ -770,13 +807,14 @@ window.__ModuleLoader__.load({
                     style: { ...inputStyle, marginTop: 10 },
                   }))
             : null,
+          modal.error ? h('div', { style: { ...muted, color: COLORS.err, marginTop: 8 } }, modal.error) : null,
           h('div', { style: { ...row, justifyContent: 'flex-end', gap: 8, marginTop: 14 } },
             h('button', { style: btn(false, busy), disabled: busy, onClick: onCancel }, t('dialogCancel')),
             h('button', {
               style: { ...btn(true, busy), ...dangerStyle },
               disabled: busy,
               onClick: () => void onConfirm(),
-            }, busy ? t('saving') : (modal.confirmLabel || t('dialogOk'))),
+            }, modal.confirmLabel || t('dialogOk')),
           ),
         ),
       )
@@ -790,11 +828,13 @@ window.__ModuleLoader__.load({
       const [settingsData, setSettingsData] = useState(null)
       const [busy, setBusy] = useState(false)
       const [message, setMessage] = useState('')
+      const [messageTone, setMessageTone] = useState('')
       const [error, setError] = useState('')
       const [editingHub, setEditingHub] = useState(false)
       const [hubName, setHubName] = useState('')
       const [expandedTasks, setExpandedTasks] = useState({})
       const [modal, setModal] = useState(null)
+      const [hostFeatures, setHostFeatures] = useState([])
       const hubDisplayName = (settingsData && settingsData.settings && settingsData.settings.hubNickname) || t('title')
 
       useEffect(() => { setHubName(hubDisplayName) }, [hubDisplayName])
@@ -808,14 +848,19 @@ window.__ModuleLoader__.load({
 
       const load = useCallback(async () => {
         try {
-          const [statusRes, snapshotRes, settingsRes] = await Promise.all([
+          const [statusRes, snapshotRes, settingsRes, rootRes] = await Promise.all([
             call('/status'),
             call('/snapshot?limit=80').catch(() => null),
             call('/settings').catch(() => null),
+            // 根路由列出 Host 能力，用来判断 /status 是否已带「先取消再结束」逻辑。
+            fetch(`${ROOT}/`, { headers: { Accept: 'application/json' } })
+              .then((res) => (res.ok ? res.json() : null))
+              .catch(() => null),
           ])
           setStatus(statusRes)
           if (snapshotRes) setSnapshot(snapshotRes)
           if (settingsRes) setSettingsData(settingsRes)
+          setHostFeatures(rootRes && Array.isArray(rootRes.features) ? rootRes.features : [])
           setError('')
         } catch (err) {
           setError(err.message || t('apiUnavailable'))
@@ -830,13 +875,18 @@ window.__ModuleLoader__.load({
         return () => { alive = false; clearInterval(timer) }
       }, [load])
 
+      const notify = (text, tone = '') => {
+        setMessage(String(text || ''))
+        setMessageTone(tone)
+      }
+
       const withBusy = async (fn) => {
         setBusy(true)
-        setMessage('')
+        notify('')
         try {
           await fn()
         } catch (err) {
-          setMessage(err.message || t('taskFailed'))
+          notify(err.message || t('taskFailed'), 'error')
         } finally {
           setBusy(false)
         }
@@ -845,13 +895,13 @@ window.__ModuleLoader__.load({
       const onHub = (action) => withBusy(async () => {
         await call(`/hub/${action}`, { method: 'POST', body: '{}' })
         await load()
-        setMessage(action === 'start' ? t('running') : t('stopped'))
+        notify(action === 'start' ? t('running') : t('stopped'))
       })
       const onSend = (task) => withBusy(async () => {
         const res = await call('/tasks', { method: 'POST', body: JSON.stringify(task) })
         await load()
         const info = res && res.task && res.task.route ? res.task.route.reason : ''
-        setMessage(`${t('sent')}${info ? ` · ${info}` : ''}`)
+        notify(`${t('sent')}${info ? ` · ${info}` : ''}`)
       })
       const taskApi = (id, suffix) => `/tasks/${encodeURIComponent(id)}${suffix || ''}`
       const postTaskAction = (id, suffix, body) => call(taskApi(id, suffix), {
@@ -862,9 +912,9 @@ window.__ModuleLoader__.load({
       const onCopyText = async (text, okMessage) => {
         try {
           await copyToClipboard(text)
-          setMessage(okMessage || t('copied'))
+          notify(okMessage || t('copied'))
         } catch {
-          setMessage(t('copyFailed'))
+          notify(t('copyFailed'), 'error')
         }
       }
       const openDialog = (options) => setModal({ value: '', ...options })
@@ -872,11 +922,13 @@ window.__ModuleLoader__.load({
         const current = modal
         if (!current) return
         const value = String(current.value || '').trim()
-        if (current.input && current.input.required && !value) return
+        if (current.input && current.input.required && !value) {
+          setModal((prev) => (prev ? { ...prev, error: t('inputRequired') } : prev))
+          return
+        }
         setModal(null)
         if (typeof current.onConfirm === 'function') await current.onConfirm(value)
       }
-      const runTaskAction = (fn) => withBusy(fn)
       const onTaskAction = (task, action) => {
         if (!task) return
         const id = task.id
@@ -884,14 +936,14 @@ window.__ModuleLoader__.load({
         if (action === 'cancel') {
           openDialog({
             title: t('cancelTaskTitle'), message: t('cancelConfirm'), confirmLabel: t('cancel'), danger: true,
-            onConfirm: () => runTaskAction(async () => { await postTaskAction(id, '/cancel'); await load() }),
+            onConfirm: () => withBusy(async () => { await postTaskAction(id, '/cancel'); await load() }),
           })
           return
         }
         if (action === 'delete') {
           openDialog({
             title: t('delete'), message: t('deleteConfirm'), confirmLabel: t('delete'), danger: true,
-            onConfirm: () => runTaskAction(async () => { await call(taskApi(id), { method: 'DELETE' }); await load() }),
+            onConfirm: () => withBusy(async () => { await call(taskApi(id), { method: 'DELETE' }); await load() }),
           })
           return
         }
@@ -900,19 +952,23 @@ window.__ModuleLoader__.load({
             title: action === 'archive' ? t('archive') : t('unarchive'),
             message: `${t('taskId')}: ${task.id}`,
             confirmLabel: action === 'archive' ? t('archive') : t('unarchive'),
-            onConfirm: () => runTaskAction(async () => { await postTaskAction(id, `/${action}`); await load() }),
+            onConfirm: () => withBusy(async () => { await postTaskAction(id, `/${action}`); await load() }),
           })
           return
         }
         if (action === 'retry') {
-          runTaskAction(async () => { await postTaskAction(id, '/retry'); await load() })
+          if (task.isPlan) {
+            openDialog({ title: t('requeue'), message: t('planStatusHint'), confirmLabel: t('close'), onConfirm: () => {} })
+            return
+          }
+          withBusy(async () => { await postTaskAction(id, '/retry'); await load() })
           return
         }
         if (action === 'follow-up') {
           if (active) {
             openDialog({
               title: t('followUp'), message: t('activeFollowUpHint'), confirmLabel: t('cancelTaskTitle'), danger: true,
-              onConfirm: () => runTaskAction(async () => { await postTaskAction(id, '/cancel'); await load() }),
+              onConfirm: () => withBusy(async () => { await postTaskAction(id, '/cancel'); await load() }),
             })
             return
           }
@@ -920,10 +976,10 @@ window.__ModuleLoader__.load({
             title: t('followUp'), message: t('followUpHint'),
             input: { multiline: true, rows: 4, placeholder: t('followUpPrompt'), required: true },
             confirmLabel: t('followUp'),
-            onConfirm: (value) => runTaskAction(async () => {
+            onConfirm: (value) => withBusy(async () => {
               await postTaskAction(id, '/follow-up', { instruction: value })
               await load()
-              setMessage(t('followUpCreated'))
+              notify(t('followUpCreated'))
             }),
           })
           return
@@ -933,22 +989,27 @@ window.__ModuleLoader__.load({
             title: t('answer'), message: t('answerPrompt'),
             input: { multiline: true, rows: 3, placeholder: t('answerPrompt'), required: true },
             confirmLabel: t('answer'),
-            onConfirm: (value) => runTaskAction(async () => {
+            onConfirm: (value) => withBusy(async () => {
               await postTaskAction(id, '/answer', { text: value })
               await load()
-              setMessage(t('answerSent'))
+              notify(t('answerSent'))
             }),
           })
           return
         }
         if (action === 'mark-completed' || action === 'mark-failed') {
+          if (task.isPlan) {
+            openDialog({ title: t('manualStatus'), message: t('planStatusHint'), confirmLabel: t('close'), onConfirm: () => {} })
+            return
+          }
           const targetStatus = action === 'mark-completed' ? 'completed' : 'failed'
+          const terminal = isTerminalTask(task.status)
           openDialog({
             title: action === 'mark-completed' ? t('markCompleted') : t('markFailed'),
-            message: t('statusChangeHint'),
+            message: terminal ? `${t('statusChangeHint')}\n${t('overwriteHint')}` : t('statusChangeHint'),
             input: { multiline: true, rows: 3, placeholder: t('statusNotePlaceholder') },
             confirmLabel: t('applyStatus'),
-            onConfirm: (value) => runTaskAction(async () => {
+            onConfirm: (value) => withBusy(async () => {
               try {
                 await postTaskAction(id, '/status', { status: targetStatus, note: value })
               } catch (err) {
@@ -956,7 +1017,7 @@ window.__ModuleLoader__.load({
                 throw err
               }
               await load()
-              setMessage(t('statusUpdated'))
+              notify(t('statusUpdated'))
             }),
           })
         }
@@ -966,13 +1027,13 @@ window.__ModuleLoader__.load({
         if (!next) throw new Error(t('nameRequired'))
         await call(`/devices/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ name: next }) })
         await load()
-        setMessage(t('deviceRenamed'))
+        notify(t('deviceRenamed'))
       })
       const onRemoveDevice = (device) => withBusy(async () => {
         if (!window.confirm(t('removeDeviceConfirm'))) return
         await call(`/devices/${encodeURIComponent(device.id)}`, { method: 'DELETE' })
         await load()
-        setMessage(t('deviceRemoved'))
+        notify(t('deviceRemoved'))
       })
       const onToggleDevice = (device) => withBusy(async () => {
         const res = await call(`/devices/${encodeURIComponent(device.id)}`, {
@@ -980,17 +1041,18 @@ window.__ModuleLoader__.load({
           body: JSON.stringify({ disabled: !device.disabled }),
         })
         await load()
-        setMessage(res && res.device && res.device.disabled ? t('deviceDisabled') : t('deviceEnabled'))
+        notify(res && res.device && res.device.disabled ? t('deviceDisabled') : t('deviceEnabled'))
       })
       const onSave = async (payload) => {
         setBusy(true)
+        notify('')
         try {
           const res = await call('/settings', { method: 'POST', body: JSON.stringify(payload) })
           await load()
-          setMessage(t('saved'))
+          notify(t('saved'))
           return res
         } catch (err) {
-          setMessage(err.message || t('settingsFailed'))
+          notify(err.message || t('settingsFailed'), 'error')
           return null
         } finally {
           setBusy(false)
@@ -1000,7 +1062,7 @@ window.__ModuleLoader__.load({
         const next = String(hubName || '').trim()
         if (!next) return
         const res = await onSave({ settings: { hubNickname: next } })
-        if (res) { setEditingHub(false); setMessage(t('hubNicknameSaved')) }
+        if (res) { setEditingHub(false); notify(t('hubNicknameSaved')) }
       }
 
       const header = h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' } },
@@ -1049,10 +1111,10 @@ window.__ModuleLoader__.load({
           h('div', { style: { marginTop: 16 } },
             tab === 'console'
               ? h(ConsoleTab, {
-                  status, snapshot, t, busy, message,
+                  status, snapshot, t, busy, message, messageTone,
                   onRefresh: () => void load(), onHub, onTaskAction, onSend,
                   onRenameDevice, onRemoveDevice, onToggleDevice,
-                  onToggleTask: toggleTask, onCopyText, expandedTasks,
+                  onToggleTask: toggleTask, onCopyText, expandedTasks, hostFeatures,
                   hubOrigin: status && status.hub ? status.hub.origin : '',
                 })
               : h(SettingsTab, {
