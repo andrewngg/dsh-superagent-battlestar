@@ -2,8 +2,10 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fsp = require('node:fs/promises');
+const path = require('node:path');
 
-const { startTestHub, request, makeManifest, registerDevice, adminHeaders } = require('./_helpers.js');
+const { startTestHub, startHubAt, makeTempDir, request, makeManifest, registerDevice, adminHeaders } = require('./_helpers.js');
 
 test('长任务拆分：父任务包含子任务，子任务全部完成后父任务完成', async (t) => {
   const env = await startTestHub(t, {
@@ -34,6 +36,8 @@ test('长任务拆分：父任务包含子任务，子任务全部完成后父�
   const children = parent.childTaskIds.map((id) => env.hub.getTask(id));
   assert.ok(children.every((child) => child && child.parentTaskId === parent.id));
   assert.ok(children.every((child) => child.assignedDeviceId === device.deviceId));
+  // 规划器给 120s，兜底后不应低于 300s（否则网页检索类子任务必然超时）
+  assert.ok(children.every((child) => child.timeoutSec >= 300), '规划子任务超时应兜底到 300s');
 
   for (const child of children) {
     env.hub.handleAck(env.hub.devices.get(device.deviceId), child.id);
@@ -42,6 +46,76 @@ test('长任务拆分：父任务包含子任务，子任务全部完成后父�
   const finishedParent = env.hub.getTask(parent.id);
   assert.equal(finishedParent.status, 'completed');
   assert.match(finishedParent.output.text, /2 个子任务/);
+});
+
+test('规划子任务超时兜底：新建与手动重试都不低于 300s', async (t) => {
+  const env = await startTestHub(t, {
+    planner: async () => ({
+      title: '超时兜底',
+      subtasks: [
+        { instruction: '网页检索子任务', timeoutSec: 60 },
+        { instruction: '生成报告子任务', timeoutSec: 90 },
+      ],
+    }),
+  });
+  const device = await registerDevice(env, makeManifest({ skills: [{ id: 'office-docx' }] }));
+  const deviceObj = env.hub.devices.get(device.deviceId);
+  const parent = await env.hub.createPlanTask({
+    instruction: '长任务',
+    requirements: { skills: ['office-docx'] },
+    timeoutSec: 1800,
+    split: true,
+  });
+  const first = env.hub.getTask(parent.childTaskIds[0]);
+  assert.equal(first.timeoutSec, 300, '新建的规划子任务超时应兜底到 300s');
+
+  env.hub.handleAck(deviceObj, first.id);
+  env.hub.handleResult(deviceObj, first.id, { ok: false, error: '模拟失败' });
+  assert.equal(env.hub.getTask(first.id).status, 'failed');
+
+  // 模拟旧数据/手工改回过短超时，重试时应再次兜底
+  env.hub.getTask(first.id).timeoutSec = 60;
+  const retried = env.hub.retryTask(env.hub.getTask(first.id));
+  assert.equal(retried.timeoutSec, 300, '重试规划子任务时应兜底到 300s');
+});
+
+test('旧数据恢复：规划子任务超时低于 300s 时自动兜底', async (t) => {
+  const dataDir = await makeTempDir('butler-plan-migrate-');
+  t.after(() => fsp.rm(dataDir, { recursive: true, force: true }));
+
+  const first = await startHubAt(dataDir, {
+    planner: async () => ({
+      title: '旧数据',
+      subtasks: [
+        { instruction: '子任务一', timeoutSec: 60 },
+        { instruction: '子任务二', timeoutSec: 90 },
+      ],
+    }),
+  });
+  await registerDevice(first, makeManifest({ skills: [{ id: 'office-docx' }] }));
+  const parent = await first.hub.createPlanTask({
+    instruction: '父任务',
+    requirements: { skills: ['office-docx'] },
+    timeoutSec: 1800,
+    split: true,
+  });
+  await first.hub.close();
+
+  // 模拟历史数据：把子任务超时改回旧值
+  const stateFile = path.join(dataDir, 'state.json');
+  const state = JSON.parse(await fsp.readFile(stateFile, 'utf8'));
+  for (const task of state.tasks) {
+    if (task.parentTaskId) task.timeoutSec = 60;
+  }
+  await fsp.writeFile(stateFile, JSON.stringify(state));
+
+  const second = await startHubAt(dataDir);
+  try {
+    const child = second.hub.getTask(parent.childTaskIds[0]);
+    assert.equal(child.timeoutSec, 300, '旧数据恢复后应自动兜底到 300s');
+  } finally {
+    await second.hub.close();
+  }
 });
 
 test('任务归档与删除 API', async (t) => {

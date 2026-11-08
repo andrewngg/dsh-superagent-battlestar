@@ -9,6 +9,9 @@ hub/data/
 device-agent/.state/
 worker-workspace/
 
+# 任务执行记录（含任务原文/输出，可能含私人信息，绝不提交）
+/task-records/
+
 # Build / toolchain artifacts
 toolchain/
 android/build/

@@ -138,6 +138,23 @@ test('stripAnsi：去掉终端颜色码', () => {
   assert.equal(worker.stripAnsi('\u001b[32mok\u001b[0m'), 'ok');
 });
 
+test('describeHermesExit：无输出时给出 HERMES_HOME / 沙箱提示', () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'butler-hermes-exit-'));
+  try {
+    assert.equal(worker.hermesHomeProblem(home), '');
+    assert.match(worker.describeHermesExit(1, 'boom', home), /boom/);
+    const silent = worker.describeHermesExit(1, '', home);
+    assert.match(silent, /退出码 1/);
+    assert.match(silent, /无输出/);
+    assert.match(silent, /HERMES_HOME/);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test('buildHermesArgs：会话续聊参数', () => {
   const args = worker.buildHermesArgs({ instruction: '继续', sessionId: 'local-abc123' });
   assert.ok(args.includes('--resume'));

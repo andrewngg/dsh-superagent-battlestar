@@ -7,8 +7,9 @@
   <meta name="color-scheme" content="dark">
   <meta name="description" content="BattleStar 多设备智能管家控制台">
   <title>BattleStar · 控制台</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="assets/vendor/select2.min.css">
-  <link rel="stylesheet" href="assets/style.css?v=20261107a">
+  <link rel="stylesheet" href="assets/style.css?v=20261108f">
 </head>
 <body>
   <!-- 静态图标库（仅常量路径，不承载用户数据） -->
@@ -35,6 +36,8 @@
       <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 3v8"/><path d="M6.2 6.2a8.4 8.4 0 1 0 11.6 0"/></symbol>
       <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></symbol>
       <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/></symbol>
+      <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.4"/></symbol>
+      <symbol id="i-flag" viewBox="0 0 24 24"><path d="M5.5 21V3.5"/><path d="M5.5 4.5h12l-2.4 4 2.4 4h-12"/></symbol>
     </defs>
   </svg>
 
@@ -156,6 +159,21 @@
             </div>
             <div id="task-list" class="task-list" aria-live="polite"></div>
           </section>
+
+          <section class="panel section-goals" id="section-goals" data-tab-panel="goals">
+            <div class="panel-head">
+              <div>
+                <h2>长期目标</h2>
+                <p class="panel-sub" id="goals-sub">正在加载…</p>
+              </div>
+              <div class="panel-head-actions">
+                <button type="button" class="btn btn-ghost btn-sm" id="goal-new">
+                  <svg class="icon"><use href="#i-target"></use></svg><span>新建目标</span>
+                </button>
+              </div>
+            </div>
+            <div id="goal-list" class="goal-list" aria-live="polite"></div>
+          </section>
         </div>
 
         <aside class="col-rail">
@@ -249,7 +267,7 @@
             <div class="panel-head">
               <div><h2>实时动态</h2><p class="panel-sub" id="activity-sub">等待事件…</p></div>
             </div>
-            <ul id="activity-list" class="activity-list"></ul>
+            <ul id="activity-list" class="activity-list" data-i18n-skip></ul>
           </section>
         </aside>
       </div>
@@ -273,7 +291,7 @@
           <strong>开发者模式</strong>
           <span>只允许修改 super-butler 仓库；不要输出或提交私人 token、密钥、个人资料。修改会直接生效，请自行确认测试结果。</span>
         </div>
-        <div id="dev-chat-log" class="dev-chat-log" aria-live="polite">
+        <div id="dev-chat-log" class="dev-chat-log" aria-live="polite" data-i18n-skip>
           <div class="dev-empty">告诉 DSH 要改什么，例如：把任务卡片的按钮改成两列，并修复移动端溢出。</div>
         </div>
         <div class="dev-scope-row">
@@ -294,25 +312,32 @@
         </form>
       </section>
     </main>
-
-    <nav class="mobile-tabs" id="mobile-nav" aria-label="主导航">
-      <button type="button" class="mobile-tab is-active" data-tab="status" aria-selected="true">
-        <svg class="icon"><use href="#i-devices"></use></svg><span>状态</span>
-      </button>
-      <button type="button" class="mobile-tab" data-tab="tasks" aria-selected="false">
-        <svg class="icon"><use href="#i-tasks"></use></svg><span>任务</span>
-      </button>
-      <button type="button" class="mobile-tab" data-tab="command" aria-selected="false">
-        <svg class="icon"><use href="#i-terminal"></use></svg><span>指令</span>
-      </button>
-      <button type="button" class="mobile-tab" data-tab="developer" aria-selected="false">
-        <svg class="icon"><use href="#i-edit"></use></svg><span>开发</span>
-      </button>
-      <button type="button" class="mobile-tab" data-tab="settings" aria-selected="false">
-        <svg class="icon"><use href="#i-gear"></use></svg><span>设置</span>
-      </button>
-    </nav>
   </div>
+
+  <!-- 汉堡菜单：挂在 body 级，用 fixed 跟随当前视口（不受 .app 动画/transform 影响） -->
+  <nav class="mobile-tabs" id="mobile-nav" aria-label="主导航">
+    <button type="button" class="mobile-tab is-active" data-tab="status" aria-selected="true">
+      <svg class="icon"><use href="#i-devices"></use></svg><span>状态</span>
+    </button>
+    <button type="button" class="mobile-tab" data-tab="tasks" aria-selected="false">
+      <svg class="icon"><use href="#i-tasks"></use></svg><span>任务</span>
+    </button>
+    <button type="button" class="mobile-tab" data-tab="goals" aria-selected="false">
+      <svg class="icon"><use href="#i-target"></use></svg><span>目标</span>
+    </button>
+    <button type="button" class="mobile-tab" data-tab="command" aria-selected="false">
+      <svg class="icon"><use href="#i-terminal"></use></svg><span>指令</span>
+    </button>
+    <button type="button" class="mobile-tab" data-tab="developer" aria-selected="false">
+      <svg class="icon"><use href="#i-edit"></use></svg><span>开发</span>
+    </button>
+    <button type="button" class="mobile-tab" data-tab="settings" aria-selected="false">
+      <svg class="icon"><use href="#i-gear"></use></svg><span>设置</span>
+    </button>
+    <button type="button" class="mobile-tab" data-action="records">
+      <svg class="icon"><use href="#i-clock"></use></svg><span>执行记录</span>
+    </button>
+  </nav>
 
   <!-- ============ 详情抽屉 ============ -->
   <div id="drawer-root" class="drawer-root" hidden>
@@ -353,6 +378,7 @@
 
   <script src="assets/vendor/jquery.min.js" defer></script>
   <script src="assets/vendor/select2.min.js" defer></script>
-  <script src="assets/app.js?v=20261106l" defer></script>
+  <script src="assets/i18n.js?v=20261108g" defer></script>
+  <script src="assets/app.js?v=20261108h" defer></script>
 </body>
 </html>

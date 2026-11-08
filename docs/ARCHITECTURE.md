@@ -118,9 +118,13 @@ score = 100
 ### 3.4 命令与执行
 
 - Hub 不执行任何用户代码；它只把 `run_task` 命令交给设备代理。
-- 设备代理收到命令后先 `ack`（assigned→running），再交给执行器，定期 `progress`，最终 `result`。
+- 设备代理收到命令后先 `ack`（assigned→running），再交给执行器，定期 `progress`（执行期间额外发 `keepalive` 续期超时窗口），最终 `result`。
 - 执行器可插拔：`simulate`（演示）、`dsh-cli`（命令模板调用 DSH）、`shell`、`http`（设备本地服务）、`ollama`。
-- 设备端限制并发（`limits.maxConcurrentTasks`）与超时；超时会主动回报失败，Hub 之后可按需重试或改派。
+- 设备端限制并发（`limits.maxConcurrentTasks`）；Hub 的单任务超时按“最后一次设备活动”计时（keepalive 续期），设备失联/卡死才超时，实际时长由执行器 `timeoutMs` 约束；超时后设备主动回报失败，Hub 可按需重试或改派。
+- 自动重试：运行超时在 `maxAttempts` 内由 Hub 自动重新排队（先下发 `cancel_task`），不需要人工点「重试」。
+- 系统自重启：`POST /api/system/restart`（或控制台「设置 → 系统维护 → 重启整套系统」）先给在线设备下发 `restart_agent`，各代理拉起新进程后优雅退出，随后 Hub 自身 re-exec；自重启恢复时运行中的任务自动重新排队，不占用重试次数。
+- 任务执行记录（backtrace）：Hub 每次任务变更都会落一份 Markdown 到 `BUTLER_RECORD_DIR`（默认 `<仓库>/task-records/`，gitignored），含指令/输出/事件时间线（带事件间隔）/耗时分解/路由/相关日志，并维护 `index.md` 总索引；关闭/自重启前强制落盘，也可用 `scripts/export-task-records.js` 离线补导。
+- 控制台：顶栏「执行记录」抽屉通过 `GET /api/records` / `/api/records/:id` 浏览 Markdown（搜索、状态筛选、复制、下载、父子任务互跳）；设置页「系统默认语言」写入 `hub/data/settings.json`（默认 zh-CN，可切 en），前端 `assets/i18n.js` 负责界面本地化（任务数据保持原文）。
 
 ### 3.5 手机端
 
@@ -128,6 +132,28 @@ score = 100
 - 之后每次启动自动直连；加载失败显示本地错误页，可重试或改配置。
 - 页面通过 SSE 接收增量事件，断线自动重连；无法建立 SSE 时降级为 5 秒轮询快照。
 - 手机与 Hub 必须处于同一内网（或通过 WireGuard/Tailscale 等组网）；不建议把 7317 端口直接暴露公网。
+
+### 3.6 长期目标（Goals）
+
+```mermaid
+flowchart TD
+  G[目标 active + schedule] -->|Hub 每 30s 扫描| D{nextCheckAt 到点?}
+  D -->|否| W[等待]
+  D -->|是| R{runningTaskId?}
+  R -->|已有跟进任务| W
+  R -->|无| T[createTask: goalId + 进度/风险/建议指令]
+  T --> H[普通路由与执行]
+  H --> F[任务结束]
+  F --> S[回写 lastSummary/checks<br/>重排 nextCheckAt]
+  S --> G
+  U[用户立即跟进] --> T
+  U2[暂停/恢复/停止] --> G
+```
+
+- 目标不是新任务类型：每次跟进就是一条普通任务，通过 `task.goalId` 关联，复用路由/并发/重试/记录全套机制；优先级手动 7、定时 4。
+- 调度由 Hub 内置定时器完成（`BUTLER_GOAL_TICK_MS`，默认 30000ms），无需外部 cron；Hub 停机期间错过的检查不补跑，恢复后按计划排下一次。
+- 同一个目标同时只允许一条跟进任务（`runningTaskId` 防重），避免目标检查自我叠加。
+- 目标持久化在 `state.json` 的 `goals` 字段；任务结束回调 `_goalTaskFinished` 写入 `checks`（最多 20 条）与 `lastSummary`，并通过 SSE `goal.updated` 实时推给控制台。
 
 ## 4. 数据模型
 
@@ -159,7 +185,13 @@ score = 100
 状态机：`queued → assigned → running → completed | failed | timeout`，任意可 `cancelled`，失败可 `retry` 重新入队。
 任务保存完整事件时间线与路由解释；`output` 支持文本、Markdown、artifacts（文件/链接）。
 
-### 4.3 事件（Event）
+### 4.3 长期目标（Goal）
+
+状态机：`active ⇄ paused`，可 `stopped`（用户停止，终态）或 `completed`（目标达成，终态）；`stopped/completed` 不再自动排期。
+字段：`id/title/description/status/schedule/nextCheckAt/lastCheckAt/lastCheckStatus/lastSummary/runningTaskId/taskIds[]/checks[]`（最近 20 次跟进记录，含时间/任务/状态/摘要/错误）。
+`schedule` 为 `{type:'daily',time:'HH:mm'}`（本地时区，默认 09:00）或 `{type:'interval',minutes}`（5 分钟–7 天）。
+
+### 4.4 事件（Event）
 
 设备与任务的变更都产生事件，经 SSE 推送给所有控制台；Hub 本身保留最近事件用于快照与排查。
 

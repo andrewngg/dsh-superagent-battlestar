@@ -78,7 +78,8 @@ queued ──route──▶ assigned ──ack──▶ running ──result─�
    ▲                 │                  │
    └──re-route◀──────┘ (ack 超时/设备离线)  └──result(ok:false)──▶ failed
 queued/assigned/running ──cancel──▶ cancelled
-assigned/running ──timeout──▶ timeout (可重试)
+assigned/running ──timeout──▶ retry（maxAttempts 内自动重排，取消旧执行）──▶ assigned
+                              └─ 重试用尽 ──▶ timeout（可人工重试；超时窗口 = timeoutSec，设备 keepalive 可续期）
 ```
 
 ## 5. 端点
@@ -110,6 +111,8 @@ Body: `{ ok:true }` → `{ ok:true, task }`；幂等。ack 后任务 `assigned �
 
 `POST /api/devices/:id/tasks/:taskId/progress`
 Body: `{ message:"正在解析表格…", percent?:0-100, logs?:["…"] }` → `{ ok:true }`
+Body（保活）: `{ keepalive:true }` → `{ ok:true }`；只续期该任务的超时窗口（见 §4），不写入进度、不广播事件。
+设备在任务执行期间应周期性发送（建议间隔 ≤ timeoutSec/2，默认 15s），Hub 以此判断“设备还活着”。
 
 `POST /api/devices/:id/tasks/:taskId/result`
 Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?}], data?:any }, error?:string, durationMs?:number }`
@@ -119,7 +122,21 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
 
 ### 5.4 手机/控制台（管理员令牌）
 
-- `GET /api/snapshot?limit=50` → `{ server:{version,uptimeSec,hubTime}, stats:{devicesTotal,devicesOnline,tasksQueued,tasksAssigned,tasksRunning,tasksCompleted,tasksFailed}, devices:[Device], tasks:[Task], events:[Event] }`
+- `GET /api/snapshot?limit=50` → `{ server:{version,uptimeSec,hubTime}, settings:{language}, stats:{...}, devices:[Device], tasks:[Task], goals:[Goal], events:[Event] }`
+- `GET /api/settings` → `{ settings:{ language }, supportedLanguages:['zh-CN','en'], hubTime }`
+- `PATCH|PUT /api/settings` body `{ language:'zh-CN'|'en' }` → `{ settings, hubTime }`；持久化到 `<dataDir>/settings.json`，并广播 SSE `settings.updated`。
+- `GET /api/goals?status=` → `{ goals:[Goal], hubTime }`
+- `POST /api/goals` body `{ title, description?, schedule?, requirements? }` → `{ goal, hubTime }`
+  - `schedule`: `{ type:'daily', time:'HH:mm' }`（默认）或 `{ type:'interval', minutes:5..10080 }`；缺省为每天 09:00。
+  - 生命周期：`active | paused | stopped | completed`；创建默认 `active`，并按计划计算 `nextCheckAt`。
+- `GET /api/goals/:id` → `{ goal }`
+- `PATCH|PUT /api/goals/:id` body `{ title?, description?, schedule?, status? }` → `{ goal }`；恢复为 `active` 时从当前时间重新排期，不补跑错过的检查。
+- `POST /api/goals/:id/check` → `{ goal, task, hubTime }`：立即创建一次跟进任务（`task.goalId` 指向目标）；该目标已有执行中的跟进任务时返回 409。
+- `DELETE /api/goals/:id` → `{ ok:true }`（已创建的历史任务保留）。
+  - Hub 每 `goalTickMs`（默认 30s）扫描到点的 active 目标，自动创建跟进任务；任务结束后把输出写回目标的 `checks/lastSummary` 并重排下一次。
+  - 跟进任务是普通任务（`goalId` 关联），优先级手动 7 / 定时 4，`timeoutSec=600`、`maxAttempts=2`，消耗一条设备并发槽位。
+- `GET /api/records?q=&status=&limit=&offset=` → `{ records:[{ taskId,status,createdAt,durationMs,device,summary,error,hasFile,size,updatedAt,file,parentTaskId,isPlan,archived }], total, limit, offset, recordDir }`
+- `GET /api/records/:taskId` → `{ record:{ taskId, file, markdown, size, updatedAt, task? } }`；`?format=md` 直接返回 `text/markdown`（附件下载）。
 - `GET /api/devices` → `{ devices:[Device], hubTime }`
 - `GET /api/devices/:id` → `{ device:Device }`
 - `PATCH /api/devices/:id` body `{ name?, tags?, disabled? }` → `{ device }`
@@ -131,7 +148,12 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
 - `GET /api/tasks?status=&deviceId=&limit=100` → `{ tasks:[Task] }`
 - `GET /api/tasks/:id` → `{ task:Task }`
 - `POST /api/tasks/:id/cancel` → `{ task }`
-- `POST /api/tasks/:id/retry` → `{ task }`（`failed|timeout|cancelled` 可重试，重新入队路由）
+- `POST /api/tasks/:id/retry` → `{ task }`（`failed|timeout|cancelled` 可重试，重新入队路由；超时任务在 `maxAttempts` 内会自动重试，无需人工调用）
+- `POST /api/system/restart` body `{ reason? }` → `202 { ok:true, restarting:true, devices:N, delayMs }`
+  - 整套系统自重启：先向在线设备下发 `restart_agent`，`delayMs`（默认 12s，覆盖设备心跳周期）后 Hub 进程自行重启。
+  - Hub 以自重启语义恢复：运行中/等待回答的任务自动重新排队，不占用重试次数；规划父任务保持 running 等待子任务收尾。
+  - 重复调用幂等（返回 `alreadyRequested:true`）；未启用自重启时返回 409。
+- `GET /api/health` 额外返回 `features:{ progressKeepalive, autoRetryOnTimeout, selfRestart, restartedFromSelf }`，便于客户端确认能力。
 
 ### 5.5 事件流
 
@@ -143,6 +165,9 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
 | `device.updated` | `{ device }` |
 | `device.online` / `device.offline` | `{ deviceId, name, at }` |
 | `task.created` / `task.updated` / `task.completed` / `task.failed` | `{ task }` |
+| `settings.updated` | `{ settings, at }` |
+| `goal.created` / `goal.updated` | `{ goal, at }` |
+| `goal.deleted` | `{ goalId, at }` |
 | `log` | `{ level, message, at }` |
 | `ping` | `{ hubTime }`（每 15s，防代理断流） |
 
@@ -183,10 +208,30 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
   "createdAt":"...", "updatedAt":"...", "startedAt":"...", "finishedAt":null,
   "attempts":1, "maxAttempts":2, "timeoutSec":300,
   "output":null, "error":null,
+  "goalId":null,
   "route":{"reason":"matched 2 candidates; picked dev_ab12cd34 (score 118)",
            "candidates":[{"deviceId":"dev_ab12cd34","score":118,"matched":["skill:office-docx"]}],
            "excluded":[{"deviceId":"dev_z","reason":"missing model:deepseek-chat"}]},
   "events":[{"at":"...","type":"created","message":"任务已创建"}]
+}
+```
+
+### Goal（长期目标）
+
+```jsonc
+{
+  "id":"goal_a1b2c3",
+  "title":"持续跟进求职进展",
+  "description":"每周整理投递与面试结果，给出下一步建议",
+  "status":"active",                       // active | paused | stopped | completed
+  "schedule":{"type":"daily","time":"09:30"}, // 或 {"type":"interval","minutes":120}
+  "requirements":null,
+  "nextCheckAt":"2026-11-09T01:30:00.000Z",
+  "lastCheckAt":null, "lastCheckStatus":null, "lastSummary":"",
+  "lastTaskId":null, "runningTaskId":null,
+  "taskIds":[],
+  "checks":[{"at":"...","taskId":"task_x","status":"completed","summary":"当前进度…","error":null}],
+  "createdAt":"...", "updatedAt":"...", "stoppedAt":null
 }
 ```
 
@@ -202,6 +247,13 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
 }
 ```
 
+| type | 说明 |
+| --- | --- |
+| `run_task` | 执行任务（ack → progress/keepalive → result） |
+| `cancel_task` | 中止任务；设备执行器应收到 abort |
+| `answer_task` | 把用户回答交给等待中的任务 |
+| `restart_agent` | 设备代理自重启：拉起新进程后优雅退出（不受并发槽位限制，优先处理） |
+
 ## 7. 路由评分（Hub 必须实现，测试可依赖）
 
 1. 过滤：`disabled`、`!online`、`load.running >= limits.maxConcurrentTasks`、缺少所需能力 → 排除并记录原因。
@@ -212,10 +264,13 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
 ## 8. 设备代理行为约定
 
 - 启动：读取配置 → 探测能力（DSH profile / Ollama / 配置覆盖）→ 注册（保存 deviceId/deviceToken 到本地状态文件）→ 心跳循环（10s）。
-- 命令：优先通过心跳响应领取；空闲时用长轮询（25s）。收到 `run_task` 先 ack，再按 `maxConcurrentTasks` 并发执行，周期 progress，最后 result。
+- 命令：优先通过心跳响应领取；空闲时用长轮询（25s）。收到 `run_task` 先 ack，再按 `maxConcurrentTasks` 并发执行，周期 progress（执行期间额外发送 `keepalive`），最后 result。
 - 执行器（可插拔）：`simulate`（默认演示）、`cli`（本机 CLI：Hermes / OpenCode / shell）、`dsh-cli`（命令模板，如 `dsh run --print {instruction}`）、`shell`（命令模板）、`http`（POST 到设备本地服务）、`ollama`（`/api/generate`）、`comfyui`（提交工作流并下载生成图片）、`mika`（调用 Mika CLI 指挥 Android 手机）。
 - 断线：后台指数退避重连（1s→30s）；重启后凭本地状态恢复注册，不重复占号。
-- 设备侧必须限制单任务并发与超时；超时主动 result(ok:false, error:"timeout")。
+- 超时语义：Hub 的单任务超时是“静默窗口”（默认 `timeoutSec`，设备 keepalive 会续期），设备失联或卡死才会超时；实际执行时长由执行器自身的 `timeoutMs` 约束。设备侧同样以 keepalive 续期看门狗，超时主动 result(ok:false, error:"timeout")。
+- 自动重试：任务运行超时后，若 `autoRetry` 未显式关闭且 `attempts < maxAttempts`，Hub 会自动下发 `cancel_task` 并重新排队，无需人工点「重试」。
+- 自重启：收到 `restart_agent` 时，设备代理立即拉起一个新代理进程（同参数/同环境/继承日志输出）再优雅退出；当前执行中的任务被中止，由 Hub 在自重启恢复时自动重新排队。
+- 长任务拆分：规划器给子任务的 `timeoutSec` 低于 300s 时由 Hub 兜底到 300s（且不超过父任务预算），避免网页检索类子任务被过短超时误杀。
 
 ## 9. 安全边界（家用 LAN）
 

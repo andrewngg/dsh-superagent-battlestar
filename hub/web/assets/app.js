@@ -27,6 +27,20 @@
   const ACTIVE_STATUS = new Set(['queued', 'assigned', 'running', 'waiting']);
   const RETRYABLE_STATUS = new Set(['failed', 'timeout', 'cancelled']);
 
+  const GOAL_STATUS = {
+    active: { label: '进行中', tone: 'active' },
+    paused: { label: '已暂停', tone: 'paused' },
+    stopped: { label: '已停止', tone: 'stopped' },
+    completed: { label: '已完成', tone: 'completed' },
+  };
+  const GOAL_CHECK_STATUS = {
+    running: '检查中',
+    completed: '检查成功',
+    failed: '检查失败',
+    timeout: '检查超时',
+    cancelled: '检查已取消',
+  };
+
   const DEVICE_STATUS = { idle: '空闲', busy: '忙碌', degraded: '降级', offline: '离线', disabled: '已禁用' };
   const PLATFORM_LABEL = { windows: 'Windows', macos: 'macOS', linux: 'Linux', android: 'Android', other: '其他' };
   const KIND_LABEL = { dsh: 'DSH 智能体', ollama: 'Ollama', 'openai-gateway': '模型网关', custom: '自定义' };
@@ -55,7 +69,36 @@
     requeued: '重新排队',
     device: '设备',
   };
-  const TABS = new Set(['status', 'tasks', 'command', 'developer', 'settings']);
+  const TABS = new Set(['status', 'tasks', 'command', 'goals', 'developer', 'settings']);
+
+  /* 多语言：ButlerI18n 由 assets/i18n.js 提供（默认中文时不做任何处理） */
+  const I18N = window.ButlerI18n || null;
+  const tr = (key, vars) => (I18N ? I18N.t(key, vars) : key);
+  const currentLang = () => (I18N ? I18N.getLang() : 'zh-CN');
+  const trStatus = (status) => {
+    const key = `status.${status}`;
+    const text = tr(key);
+    return text === key ? status || '—' : text;
+  };
+  const applyLanguageFromServer = (serverLang) => {
+    if (!I18N) return;
+    const next = I18N.effectiveLang(serverLang);
+    if (next !== I18N.getLang()) I18N.setLang(next, { persist: false });
+  };
+
+  /* 同步翻译（英文模式下渲染时立即翻译，避免先出现中文再被异步改英文的闪烁） */
+  const tx = (value) => {
+    const text = String(value == null ? '' : value);
+    if (!I18N) return text;
+    const translated = I18N.translateLegacy(text);
+    return translated === null ? text : translated;
+  };
+  const TX_ATTRS = new Set(['title', 'placeholder', 'aria-label', 'alt']);
+  function attrText(name, value) {
+    if (value === true) return '';
+    const text = String(value);
+    return TX_ATTRS.has(name) ? tx(text) : text;
+  }
 
   const $ = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -72,19 +115,19 @@
       for (const [key, value] of Object.entries(props)) {
         if (value === null || value === undefined || value === false) continue;
         if (key === 'className' || key === 'class') node.className = value;
-        else if (key === 'text') node.textContent = String(value);
+        else if (key === 'text') node.textContent = tx(value);
         else if (key === 'dataset') Object.assign(node.dataset, value);
         else if (key === 'style' && typeof value === 'object') Object.assign(node.style, value);
         else if (key === 'html') node.innerHTML = value; // 仅用于本文件内受信任的常量图标
         else if (key === 'attrs') {
           for (const [attrName, attrValue] of Object.entries(value || {})) {
             if (attrValue === null || attrValue === undefined || attrValue === false) continue;
-            node.setAttribute(attrName, attrValue === true ? '' : String(attrValue));
+            node.setAttribute(attrName, attrText(attrName, attrValue));
           }
         } else if (key.startsWith('on') && typeof value === 'function') node.addEventListener(key.slice(2).toLowerCase(), value);
         else if (key === 'value') node.setAttribute('value', String(value));
         else if (key === 'tabIndex') node.setAttribute('tabindex', String(value));
-        else node.setAttribute(key, value === true ? '' : String(value));
+        else node.setAttribute(key, attrText(key, value));
       }
     }
     appendChildren(node, children);
@@ -94,7 +137,7 @@
   function appendChildren(node, children) {
     for (const child of children.flat(6)) {
       if (child === null || child === undefined || child === false) continue;
-      node.appendChild(child instanceof Node ? child : document.createTextNode(String(child)));
+      node.appendChild(child instanceof Node ? child : document.createTextNode(tx(String(child))));
     }
   }
 
@@ -125,6 +168,19 @@
     if (d < 86400000) return `${Math.floor(d / 3600000)} 小时前`;
     if (d < 604800000) return `${Math.floor(d / 86400000)} 天前`;
     return fmtDate(iso);
+  }
+
+  /** 未来时间（下次跟进）：即将跟进 / x 分钟后 / x 小时后 / x 天后。 */
+  function fmtRelFuture(iso, now = Date.now()) {
+    const t = parseIso(iso);
+    if (t === null) return '—';
+    const d = t - now;
+    if (d <= 0) return '即将跟进';
+    if (d < 60000) return '不到 1 分钟后';
+    if (d < 3600000) return `${Math.floor(d / 60000)} 分钟后`;
+    if (d < 86400000) return `${Math.floor(d / 3600000)} 小时后`;
+    if (d < 604800000) return `${Math.floor(d / 86400000)} 天后`;
+    return fmtDateTime(iso);
   }
 
   function fmtDate(iso) {
@@ -190,11 +246,18 @@
     connected: false,
     health: null,
     server: null,
+    settings: null,
     devices: new Map(),
     tasks: [],
     stats: null,
     activity: [],
     history: [],
+    goals: [],
+    goalsLoaded: false,
+    goalsLoading: false,
+    goalsError: '',
+    goalsSupported: false,
+    goalsHubTime: '',
     taskFilter: 'all',
     selectedSkills: new Set(),
     pendingAttachments: [],
@@ -210,9 +273,11 @@
     poll: { timer: 0, inFlight: false },
     snapshotTimer: 0,
     relTimer: 0,
-    sigs: { stats: '', devices: '', tasks: '', composer: '', activity: '', settings: '' },
+    sigs: { stats: '', devices: '', tasks: '', composer: '', activity: '', settings: '', goals: '' },
+    records: { items: [], total: 0, recordDir: '', q: '', status: '', loading: false, error: '', detail: null },
   };
   const taskNotifyState = new Map();
+  const goalBusy = new Set();
   const devState = { busy: false, jobId: '', timer: 0, pollFailures: 0, messages: [] };
 
   /* ==================================================================
@@ -362,7 +427,7 @@
   function setLoading(show, text) {
     const view = $('#loading-view');
     if (show) {
-      $('#loading-text').textContent = text || '正在连接中枢…';
+      $('#loading-text').textContent = tx(text || '正在连接中枢…');
       view.hidden = false;
     } else {
       view.hidden = true;
@@ -375,9 +440,9 @@
       const ok = $('#modal-ok');
       const cancel = $('#modal-cancel');
       const backdrop = $('.modal-backdrop', root);
-      $('#modal-title').textContent = title;
-      $('#modal-message').textContent = message;
-      ok.textContent = okText;
+      $('#modal-title').textContent = tx(title || '确认操作');
+      $('#modal-message').textContent = tx(message);
+      ok.textContent = tx(okText);
       ok.className = 'btn ' + (danger ? 'btn-danger' : 'btn-primary');
 
       const cleanup = (result) => {
@@ -423,7 +488,7 @@
     const btn = $('#connect-btn');
     btn.disabled = busy;
     $('.spinner', btn).hidden = !busy;
-    $('.btn-label', btn).textContent = busy ? '连接中…' : '测试并连接';
+    $('.btn-label', btn).textContent = tx(busy ? '连接中…' : '测试并连接');
   }
 
   function showConnectView(message) {
@@ -487,6 +552,13 @@
     state.tasks = [];
     state.stats = null;
     state.routeTask = null;
+    state.goals = [];
+    state.goalsLoaded = false;
+    state.goalsLoading = false;
+    state.goalsError = '';
+    state.goalsSupported = false;
+    goalBusy.clear();
+    state.sigs.goals = '';
     hideDrawer();
     showConnectView(message || '管理员令牌已失效，请重新连接');
     $('#admin-token').focus();
@@ -513,6 +585,13 @@
     state.stats = null;
     state.activity = [];
     state.routeTask = null;
+    state.goals = [];
+    state.goalsLoaded = false;
+    state.goalsLoading = false;
+    state.goalsError = '';
+    state.goalsSupported = false;
+    goalBusy.clear();
+    state.sigs.goals = '';
     state.autoOpenDone = false;
     hideDrawer();
     scrubUrlToken();
@@ -532,7 +611,7 @@
     if (!pill) return;
     pill.dataset.state = status;
     const text = $('#sse-text');
-    if (text) text.textContent = SSE_TEXT[status] || status;
+    if (text) text.textContent = tx(SSE_TEXT[status] || status);
     refreshSettings();
   }
 
@@ -577,6 +656,7 @@
     const named = [
       'device.updated', 'device.online', 'device.offline',
       'task.created', 'task.updated', 'task.completed', 'task.failed',
+      'goal.created', 'goal.updated', 'goal.deleted',
       'log', 'ping',
     ];
     for (const name of named) {
@@ -681,8 +761,18 @@
     if (name === 'device.updated') return onDeviceUpdated(payload.device);
     if (name === 'device.online' || name === 'device.offline') return onDevicePresence(name, payload);
     if (name.startsWith('task.')) return onTaskEvent(name, payload.task);
+    if (name.startsWith('goal.')) return onGoalEvent(name, payload);
+    if (name === 'settings.updated') return onSettingsUpdated(payload);
     if (name === 'log') return onLogEvent(payload);
     if (name === 'ping') return;
+  }
+
+  function onSettingsUpdated(payload) {
+    const settings = payload && payload.settings && typeof payload.settings === 'object' ? payload.settings : null;
+    if (!settings) return;
+    state.settings = settings;
+    applyLanguageFromServer(settings.language);
+    refreshSettings();
   }
 
   /* ==================================================================
@@ -697,7 +787,18 @@
     state.tasks = tasks;
     if (data.stats && typeof data.stats === 'object') state.stats = data.stats;
     if (data.server && typeof data.server === 'object') state.server = data.server;
+    if (data.settings && typeof data.settings === 'object') {
+      state.settings = data.settings;
+      applyLanguageFromServer(data.settings.language);
+    }
     if (Array.isArray(data.events)) state.activity = data.events.slice();
+    if (Array.isArray(data.goals)) {
+      state.goals = data.goals.filter((goal) => goal && goal.id);
+      state.goalsLoaded = true;
+      state.goalsSupported = true;
+      state.goalsError = '';
+      state.sigs.goals = '';
+    }
     if (!state.health || !state.health.version) {
       state.health = {
         ...(state.health || {}),
@@ -709,6 +810,7 @@
     maybeAutoOpen();
     if (state.drawer.open) refreshOpenDrawer();
     syncTaskNotifications();
+    ensureGoalsLoaded();
   }
 
   /** 把任务进度/完成事件桥接给 Android APK（浏览器中不存在 ButlerBridge，自动忽略）。 */
@@ -1066,7 +1168,7 @@
 
   function setText(sel, value) {
     const node = $(sel);
-    if (node) node.textContent = value;
+    if (node) node.textContent = tx(value);
   }
 
   function statusBadge(status) {
@@ -1158,11 +1260,15 @@
       const now = Date.now();
       $$('[data-rel]').forEach((node) => {
         const iso = node.dataset.rel;
-        if (iso) node.textContent = (node.dataset.relPrefix || '') + fmtRel(iso, now);
+        if (iso) node.textContent = tx((node.dataset.relPrefix || '') + fmtRel(iso, now));
       });
       $$('[data-live-duration]').forEach((node) => {
         const start = parseIso(node.dataset.liveDuration);
-        if (start !== null) node.textContent = fmtDuration(now - start);
+        if (start !== null) node.textContent = tx(fmtDuration(now - start));
+      });
+      $$('[data-rel-future]').forEach((node) => {
+        const iso = node.dataset.relFuture;
+        if (iso) node.textContent = tx(fmtRelFuture(iso, now));
       });
     }, 15000);
   }
@@ -1440,10 +1546,10 @@
       if ($select) {
         $select.select2({
           width: '100%',
-          placeholder: '选择技能（可多选）',
+          placeholder: tx('选择技能（可多选）'),
           allowClear: true,
           closeOnSelect: false,
-          language: { noResults: () => '没有可用技能' },
+          language: { noResults: () => tx('没有可用技能') },
         });
         $select.val(selected).trigger('change.select2');
       } else {
@@ -1479,23 +1585,23 @@
     node.replaceChildren();
     if (deviceId) {
       const device = state.devices.get(deviceId);
-      node.appendChild(document.createTextNode('指定设备：'));
+      node.appendChild(document.createTextNode(tx('指定设备：')));
       node.appendChild(el('b', { text: device ? device.name : deviceId }));
-      if (device && !device.online) node.appendChild(document.createTextNode('（当前离线，任务将排队）'));
+      if (device && !device.online) node.appendChild(document.createTextNode(tx('（当前离线，任务将排队）')));
       return;
     }
     const matched = agg.devices.filter((d) => localMatch(d, { model, skills, deviceId: '' }));
     if (!state.connected) {
-      node.textContent = '等待连接 Hub…';
+      node.textContent = tx('等待连接 Hub…');
       return;
     }
     if (!agg.devices.length) {
-      node.textContent = '暂无在线设备，发送后将排队等待上线';
+      node.textContent = tx('暂无在线设备，发送后将排队等待上线');
       return;
     }
-    node.appendChild(document.createTextNode(model || skills.length ? '匹配要求的在线设备：' : '自动路由：'));
+    node.appendChild(document.createTextNode(tx(model || skills.length ? '匹配要求的在线设备：' : '自动路由：')));
     node.appendChild(el('b', { text: `${matched.length} / ${agg.devices.length} 台` }));
-    if (!matched.length) node.appendChild(document.createTextNode(' · 将排队等待设备'));
+    if (!matched.length) node.appendChild(document.createTextNode(tx(' · 将排队等待设备')));
   }
 
   function setSendBusy(busy) {
@@ -1503,7 +1609,7 @@
     const btn = $('#send-btn');
     btn.disabled = busy;
     const label = $('span', btn);
-    if (label) label.textContent = busy ? '发送中…' : '发送指令';
+    if (label) label.textContent = tx(busy ? '发送中…' : '发送指令');
   }
 
   function localizeRouteReason(reason) {
@@ -1971,6 +2077,647 @@
   }
 
   /* ==================================================================
+   * 长期目标
+   * ================================================================== */
+  function goalById(id) {
+    return state.goals.find((goal) => goal && goal.id === id) || null;
+  }
+
+  function goalPlanText(schedule) {
+    const value = schedule && typeof schedule === 'object' ? schedule : {};
+    if (value.type === 'interval') {
+      const minutes = Math.max(1, Math.round(num(value.minutes, 60)));
+      if (minutes % 60 === 0) return `每 ${minutes / 60} 小时`;
+      return `每 ${minutes} 分钟`;
+    }
+    if (value.type === 'daily') {
+      const time = /^\d{2}:\d{2}$/.test(str(value.time)) ? str(value.time) : '09:00';
+      return `每天 ${time}`;
+    }
+    return '未设置计划';
+  }
+
+  function goalStatusBadge(goal) {
+    const status = goal && GOAL_STATUS[goal.status] ? goal.status : 'active';
+    return el('span', { className: 'status-badge', dataset: { status }, text: GOAL_STATUS[status].label });
+  }
+
+  /** 用户数据（标题/描述/建议/错误）不参与界面翻译。 */
+  function goalRawText(tag, className, text) {
+    const node = el(tag, { className, attrs: { 'data-i18n-skip': '' } });
+    node.textContent = text == null ? '' : String(text);
+    return node;
+  }
+
+  function goalCheckState(goal) {
+    const status = str(goal.lastCheckStatus);
+    if (!status) return null;
+    return el('span', { className: 'goal-check-state', dataset: { status } },
+      icon(status === 'failed' || status === 'timeout' ? 'alert' : 'check'),
+      el('span', { text: GOAL_CHECK_STATUS[status] || status }),
+    );
+  }
+
+  function goalNextNode(goal) {
+    return el('span', { className: 'goal-next' },
+      icon('clock'),
+      el('span', { className: 'goal-next-label', text: '下次跟进' }),
+      el('span', { className: 'goal-next-val', dataset: { relFuture: goal.nextCheckAt || '' }, text: fmtRelFuture(goal.nextCheckAt) }),
+    );
+  }
+
+  function goalMetaNode(goal) {
+    const meta = el('div', { className: 'goal-meta' });
+    const last = goal.lastCheckAt
+      ? el('span', { className: 'goal-check-state' },
+        el('span', { className: 'goal-summary-label', text: '上次检查' }),
+        relNode(goal.lastCheckAt),
+      )
+      : el('span', { className: 'goal-check-state' },
+        el('span', { className: 'goal-summary-label', text: '上次检查' }),
+        el('span', { text: '暂无检查记录' }),
+      );
+    meta.appendChild(last);
+    const stateNode = goalCheckState(goal);
+    if (stateNode) meta.appendChild(stateNode);
+    return meta;
+  }
+
+  function goalActionBtn(action, label) {
+    return el('button', { type: 'button', className: 'link-btn', dataset: { action } }, el('span', { text: label }));
+  }
+
+  function goalCard(goal) {
+    const status = goal.status || 'active';
+    const busy = goalBusy.has(goal.id);
+    const running = Boolean(goal.runningTaskId) || busy;
+    const card = el('article', {
+      className: 'goal-card',
+      dataset: { id: goal.id, status },
+      attrs: { role: 'button', tabindex: '0', 'aria-label': goal.title || '目标' },
+    });
+
+    const top = el('div', { className: 'goal-top' },
+      goalStatusBadge(goal),
+      el('span', { className: 'goal-plan' }, icon('clock'), el('span', { text: goalPlanText(goal.schedule) })),
+    );
+    if (status === 'active' && goal.nextCheckAt) top.appendChild(goalNextNode(goal));
+    card.appendChild(top);
+
+    card.appendChild(goalRawText('h3', 'goal-title', goal.title || '未命名目标'));
+
+    const summaryNode = el('p', { className: 'goal-summary' },
+      el('span', { className: 'goal-summary-label', text: '上次建议' }),
+    );
+    if (str(goal.lastSummary)) {
+      summaryNode.appendChild(goalRawText('span', '', shorten(goal.lastSummary, 120)));
+    } else {
+      summaryNode.appendChild(el('span', { className: 'goal-summary-empty', text: '还没有检查记录，点击「立即跟进」查看建议。' }));
+    }
+    card.appendChild(summaryNode);
+
+    card.appendChild(goalMetaNode(goal));
+
+    const actions = el('div', { className: 'goal-actions' });
+    if (status === 'active' || status === 'paused') {
+      const check = el('button', { type: 'button', className: 'link-btn', dataset: { action: 'check' } },
+        icon('send'), el('span', { text: running ? '跟进中…' : '立即跟进' }));
+      check.disabled = running;
+      actions.appendChild(check);
+    }
+    if (status === 'active') actions.appendChild(goalActionBtn('pause', '暂停'));
+    else if (status === 'paused') actions.appendChild(goalActionBtn('resume', '恢复'));
+    if (status === 'active' || status === 'paused') actions.appendChild(goalActionBtn('stop', '停止'));
+    actions.appendChild(goalActionBtn('details', '详情'));
+    actions.appendChild(goalActionBtn('delete', '删除'));
+    if (busy) actions.querySelectorAll('button').forEach((btn) => { btn.disabled = true; });
+    card.appendChild(actions);
+    return card;
+  }
+
+  function updateGoalsSub(goals) {
+    const active = goals.filter((goal) => goal && goal.status === 'active').length;
+    setText('#goals-sub', `${active} 个进行中 · 共 ${goals.length} 个目标`);
+  }
+
+  function renderGoals() {
+    const list = $('#goal-list');
+    if (!list) return;
+    const goals = state.goals;
+    const sig = JSON.stringify({
+      goals,
+      loaded: state.goalsLoaded,
+      loading: state.goalsLoading,
+      error: state.goalsError,
+      busy: Array.from(goalBusy),
+    });
+    if (sig === state.sigs.goals && list.childElementCount) {
+      updateGoalsSub(goals);
+      return;
+    }
+    state.sigs.goals = sig;
+
+    const newBtn = $('#goal-new');
+    if (newBtn) {
+      newBtn.disabled = Boolean(state.goalsError && !state.goalsSupported);
+      newBtn.title = state.goalsError || '';
+    }
+
+    list.replaceChildren();
+    if (!goals.length && (state.goalsLoading || !state.goalsLoaded)) {
+      list.appendChild(el('p', { className: 'goal-checks-empty', text: '正在载入目标…' }));
+      setText('#goals-sub', '正在载入目标…');
+      return;
+    }
+    if (state.goalsError && !goals.length) {
+      list.appendChild(emptyState({
+        iconName: 'target',
+        title: '目标载入失败',
+        desc: state.goalsError,
+      }));
+      const retry = el('button', { type: 'button', className: 'btn btn-ghost btn-sm', dataset: { action: 'reload-goals' } },
+        icon('refresh'), el('span', { text: '重试' }));
+      list.appendChild(el('div', { style: { textAlign: 'center', padding: '2px 0 8px' } }, retry));
+      setText('#goals-sub', '目标载入失败');
+      return;
+    }
+    if (!goals.length) {
+      list.appendChild(emptyState({
+        iconName: 'target',
+        title: '还没有长期目标',
+        desc: '创建一个目标，Hub 会按计划定时自动检查进度并给出建议。',
+      }));
+      setText('#goals-sub', 'Hub 会按计划定时创建任务检查进度并给出建议。');
+      return;
+    }
+    for (const goal of goals) list.appendChild(goalCard(goal));
+    updateGoalsSub(goals);
+  }
+
+  function ensureGoalsLoaded() {
+    if (!state.connected || state.goalsLoaded || state.goalsLoading) return;
+    void loadGoals();
+  }
+
+  async function loadGoals({ silent = false } = {}) {
+    if (!state.connected || state.goalsLoading) return;
+    state.goalsLoading = true;
+    if (!silent) state.goalsError = '';
+    state.sigs.goals = '';
+    renderGoals();
+    try {
+      const res = await api('/api/goals', { timeout: 12000 });
+      state.goals = arr(res && res.goals).filter((goal) => goal && goal.id);
+      state.goalsHubTime = str(res && res.hubTime);
+      state.goalsSupported = true;
+      state.goalsError = '';
+      state.goalsLoaded = true;
+    } catch (err) {
+      if (err.status === 401) {
+        handleAuthLost(err.message);
+        return;
+      }
+      state.goalsError = err.status === 404
+        ? '当前 Hub 暂不支持长期目标，请更新后端后再试。'
+        : (err.message || '目标载入失败');
+      state.goalsLoaded = true;
+    } finally {
+      state.goalsLoading = false;
+      state.sigs.goals = '';
+      renderGoals();
+    }
+  }
+
+  function upsertGoal(goal) {
+    if (!goal || !goal.id) return;
+    const idx = state.goals.findIndex((item) => item && item.id === goal.id);
+    if (idx >= 0) state.goals[idx] = goal;
+    else state.goals.unshift(goal);
+    state.sigs.goals = '';
+  }
+
+  function removeGoal(goalId) {
+    const before = state.goals.length;
+    state.goals = state.goals.filter((goal) => !goal || goal.id !== goalId);
+    if (state.goals.length !== before) state.sigs.goals = '';
+  }
+
+  function onGoalEvent(name, payload) {
+    if (name === 'goal.deleted') {
+      const goalId = str(payload && payload.goalId);
+      if (!goalId) return;
+      removeGoal(goalId);
+      if (state.drawer.open && state.drawer.kind === 'goal' && state.drawer.id === goalId) hideDrawer();
+      renderGoals();
+      return;
+    }
+    const goal = payload && payload.goal && typeof payload.goal === 'object' ? payload.goal : null;
+    if (!goal || !goal.id) return;
+    const isNew = name === 'goal.created';
+    upsertGoal(goal);
+    if (isNew) toast(`目标已创建：${goal.title || ''}`, 'success');
+    renderGoals();
+    if (state.drawer.open && state.drawer.kind === 'goal' && state.drawer.id === goal.id) {
+      renderGoalDrawer({ preserveScroll: true });
+    }
+  }
+
+  function openGoalRecord(taskId) {
+    const id = str(taskId);
+    if (!id) return;
+    openRecordsDrawer();
+    void openRecordDetail(id);
+  }
+
+  async function goalCheckNow(goalId) {
+    const goal = goalById(goalId);
+    if (!goal) return;
+    if (goalBusy.has(goalId)) return;
+    if (goal.runningTaskId) {
+      toast('已有跟进任务正在执行，请稍候', 'warn');
+      return;
+    }
+    if (goal.status !== 'active' && goal.status !== 'paused') {
+      toast('目标已停止，无法立即跟进', 'warn');
+      return;
+    }
+    goalBusy.add(goalId);
+    state.sigs.goals = '';
+    renderGoals();
+    try {
+      const res = await api(`/api/goals/${encodeURIComponent(goalId)}/check`, { method: 'POST', timeout: 15000 });
+      if (res && res.goal) upsertGoal(res.goal);
+      if (res && res.task) {
+        upsertTask(res.task);
+        renderTasks();
+      }
+      toast('已创建跟进任务，请稍候查看建议', 'success');
+    } catch (err) {
+      if (err.status === 401) {
+        handleAuthLost(err.message);
+        return;
+      }
+      if (err.status === 409) toast('已有跟进任务正在执行，请稍候', 'warn');
+      else toast(err.message || '立即跟进失败', 'error');
+    } finally {
+      goalBusy.delete(goalId);
+      state.sigs.goals = '';
+      renderGoals();
+      if (state.drawer.open && state.drawer.kind === 'goal' && state.drawer.id === goalId) {
+        renderGoalDrawer({ preserveScroll: true });
+      }
+    }
+  }
+
+  async function goalSetStatus(goalId, status) {
+    const goal = goalById(goalId);
+    if (!goal || goalBusy.has(goalId)) return;
+    if (status === 'stopped') {
+      const ok = await confirmDialog({
+        title: '停止目标',
+        message: `停止后将不再自动检查「${goal.title || ''}」。`,
+        okText: '停止',
+      });
+      if (!ok) return;
+    }
+    goalBusy.add(goalId);
+    state.sigs.goals = '';
+    renderGoals();
+    try {
+      const res = await api(`/api/goals/${encodeURIComponent(goalId)}`, {
+        method: 'PATCH',
+        body: { status },
+        timeout: 12000,
+      });
+      if (res && res.goal) upsertGoal(res.goal);
+      toast(status === 'active' ? '目标已恢复' : status === 'paused' ? '目标已暂停' : '目标已停止', 'success');
+    } catch (err) {
+      if (err.status === 401) {
+        handleAuthLost(err.message);
+        return;
+      }
+      toast(err.message || '操作失败', 'error');
+    } finally {
+      goalBusy.delete(goalId);
+      state.sigs.goals = '';
+      renderGoals();
+      if (state.drawer.open && state.drawer.kind === 'goal' && state.drawer.id === goalId) {
+        renderGoalDrawer({ preserveScroll: true });
+      }
+    }
+  }
+
+  async function goalDelete(goalId) {
+    const goal = goalById(goalId);
+    if (!goal || goalBusy.has(goalId)) return;
+    const ok = await confirmDialog({
+      title: '删除目标',
+      message: '删除后无法恢复，已有的检查历史也会一并删除。',
+      okText: '删除',
+    });
+    if (!ok) return;
+    goalBusy.add(goalId);
+    state.sigs.goals = '';
+    renderGoals();
+    try {
+      await api(`/api/goals/${encodeURIComponent(goalId)}`, { method: 'DELETE', timeout: 12000 });
+      removeGoal(goalId);
+      if (state.drawer.open && state.drawer.kind === 'goal' && state.drawer.id === goalId) hideDrawer();
+      toast('目标已删除', 'success');
+    } catch (err) {
+      if (err.status === 401) {
+        handleAuthLost(err.message);
+        return;
+      }
+      if (err.status === 404) removeGoal(goalId);
+      else toast(err.message || '删除失败', 'error');
+    } finally {
+      goalBusy.delete(goalId);
+      state.sigs.goals = '';
+      renderGoals();
+    }
+  }
+
+  function openGoalFormDrawer(goalId) {
+    const goal = goalId ? goalById(goalId) : null;
+    const schedule = goal && goal.schedule && typeof goal.schedule === 'object' ? goal.schedule : {};
+    const scheduleType = schedule.type === 'interval' ? 'interval' : 'daily';
+
+    const form = el('form', { className: 'goal-form', attrs: { novalidate: 'novalidate' } });
+
+    const titleInput = el('input', {
+      type: 'text',
+      attrs: { maxlength: '120', placeholder: '例如：三个月内学会日语 N3', 'aria-label': '目标标题' },
+    });
+    titleInput.value = goal ? str(goal.title) : '';
+
+    const descInput = el('textarea', {
+      attrs: { rows: '4', placeholder: '描述目标背景与衡量标准，越详细越好', 'aria-label': '描述（可选）' },
+    });
+    descInput.value = goal ? str(goal.description) : '';
+
+    const typeSelect = el('select', { attrs: { 'aria-label': '检查计划' } });
+    for (const [value, label] of [['daily', '每天'], ['interval', '每 N 小时']]) {
+      const option = el('option', { value, text: label });
+      if (value === scheduleType) option.selected = true;
+      typeSelect.appendChild(option);
+    }
+    typeSelect.value = scheduleType;
+
+    const timeInput = el('input', { type: 'time', attrs: { 'aria-label': '执行时间' } });
+    timeInput.value = /^\d{2}:\d{2}$/.test(str(schedule.time)) ? str(schedule.time) : '09:00';
+
+    const intervalInput = el('input', {
+      type: 'number',
+      attrs: { min: '1', max: '720', step: '1', inputmode: 'numeric', 'aria-label': '间隔小时数' },
+    });
+    const intervalHours = schedule.type === 'interval' ? Math.max(1, Math.round(num(schedule.minutes, 180) / 60)) : 3;
+    intervalInput.value = String(intervalHours);
+
+    const dailyRow = el('div', { className: 'field-row goal-schedule-row' },
+      el('div', { className: 'field' },
+        el('label', { text: '执行时间' }),
+        timeInput,
+        el('span', { className: 'field-hint', text: '按 Hub 本机时间每天执行' }),
+      ),
+    );
+    const intervalRow = el('div', { className: 'field-row goal-schedule-row' },
+      el('div', { className: 'field' },
+        el('label', { text: '间隔小时数' }),
+        intervalInput,
+        el('span', { className: 'field-hint', text: '最小 1 小时' }),
+      ),
+    );
+    const syncScheduleRows = () => {
+      const interval = typeSelect.value === 'interval';
+      dailyRow.hidden = interval;
+      intervalRow.hidden = !interval;
+    };
+    typeSelect.addEventListener('change', syncScheduleRows);
+    syncScheduleRows();
+
+    form.append(
+      el('div', { className: 'field' }, el('label', { text: '目标标题' }), titleInput),
+      el('div', { className: 'field' }, el('label', { text: '描述（可选）' }), descInput),
+      el('div', { className: 'field' }, el('label', { text: '检查计划' }), typeSelect),
+      dailyRow,
+      intervalRow,
+      el('p', { className: 'goal-form-hint', text: 'Hub 会按计划定时创建任务检查进度并给出建议。' }),
+    );
+
+    const saveBtn = el('button', { type: 'button', className: 'btn btn-primary btn-sm' }, icon('check'), el('span', { text: '保存' }));
+    let saving = false;
+
+    const save = async () => {
+      if (saving) return;
+      const title = titleInput.value.trim();
+      if (!title) {
+        toast('目标标题不能为空', 'warn');
+        titleInput.focus();
+        return;
+      }
+      let scheduleBody;
+      if (typeSelect.value === 'interval') {
+        const hours = Math.max(1, Math.min(720, Math.round(Number(intervalInput.value) || 1)));
+        intervalInput.value = String(hours);
+        scheduleBody = { type: 'interval', minutes: hours * 60 };
+      } else {
+        const time = /^\d{2}:\d{2}$/.test(timeInput.value) ? timeInput.value : '09:00';
+        scheduleBody = { type: 'daily', time };
+      }
+      saving = true;
+      saveBtn.disabled = true;
+      try {
+        const body = { title, description: descInput.value.trim(), schedule: scheduleBody };
+        const res = goal
+          ? await api(`/api/goals/${encodeURIComponent(goal.id)}`, { method: 'PATCH', body, timeout: 15000 })
+          : await api('/api/goals', { method: 'POST', body, timeout: 15000 });
+        if (res && res.goal) upsertGoal(res.goal);
+        state.sigs.goals = '';
+        renderGoals();
+        toast(goal ? '目标已保存' : '目标已创建', 'success');
+        hideDrawer();
+      } catch (err) {
+        if (err.status === 401) {
+          handleAuthLost(err.message);
+          return;
+        }
+        toast(err.message || (goal ? '保存目标失败' : '创建目标失败'), 'error');
+      } finally {
+        saving = false;
+        saveBtn.disabled = false;
+      }
+    };
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      void save();
+    });
+    saveBtn.addEventListener('click', () => void save());
+
+    openDrawer({
+      kind: 'goal-form',
+      id: goal ? goal.id : null,
+      title: goal ? '编辑目标' : '新建目标',
+      subNodes: [el('span', { text: 'Hub 会按计划定时创建任务检查进度并给出建议。' })],
+      body: form,
+      footerNodes: [
+        el('button', { type: 'button', className: 'btn btn-ghost btn-sm', text: '取消', onclick: hideDrawer }),
+        el('span', { className: 'spacer' }),
+        saveBtn,
+      ],
+    });
+    setTimeout(() => titleInput.focus(), 80);
+  }
+
+  function openGoalDrawer(goalId) {
+    const goal = goalById(goalId);
+    if (!goal) {
+      if (state.goalsLoaded) toast('目标不存在或已删除', 'warn');
+      else void loadGoals();
+      return;
+    }
+    openDrawer({
+      kind: 'goal',
+      id: goal.id,
+      title: '目标详情',
+      subNodes: [],
+      body: el('div'),
+      footerNodes: [el('button', { type: 'button', className: 'btn btn-ghost btn-sm', text: '关闭', onclick: hideDrawer })],
+    });
+    renderGoalDrawer();
+  }
+
+  function renderGoalDrawer({ preserveScroll = false } = {}) {
+    if (!state.drawer.open || state.drawer.kind !== 'goal') return;
+    const goal = goalById(state.drawer.id);
+    if (!goal) {
+      hideDrawer();
+      return;
+    }
+    const bodyNode = $('#drawer-body');
+    const scroll = preserveScroll && bodyNode ? bodyNode.scrollTop : 0;
+    const status = goal.status || 'active';
+    const running = Boolean(goal.runningTaskId) || goalBusy.has(goal.id);
+
+    const wrap = el('div');
+
+    const actions = el('div', { className: 'detail-actions' });
+    const addAction = (label, handler, kind = 'ghost') => {
+      const btn = el('button', { type: 'button', className: `btn btn-${kind} btn-sm` });
+      btn.appendChild(document.createTextNode(tx(label)));
+      btn.addEventListener('click', handler);
+      actions.appendChild(btn);
+      return btn;
+    };
+    if (status === 'active' || status === 'paused') {
+      const check = addAction(running ? '跟进中…' : '立即跟进', () => void goalCheckNow(goal.id), 'primary');
+      check.prepend(icon('send'));
+      check.disabled = running;
+    }
+    if (status === 'active') addAction('暂停', () => void goalSetStatus(goal.id, 'paused'));
+    else if (status === 'paused') addAction('恢复', () => void goalSetStatus(goal.id, 'active'));
+    if (status === 'active' || status === 'paused') addAction('停止', () => void goalSetStatus(goal.id, 'stopped'));
+    addAction('编辑', () => openGoalFormDrawer(goal.id));
+    addAction('删除', () => void goalDelete(goal.id), 'danger');
+    wrap.appendChild(actions);
+
+    const info = el('section', { className: 'detail-section' },
+      el('div', { className: 'detail-section-head' }, el('h3', { text: '基础信息' })),
+    );
+    const grid = el('div', { className: 'kv-grid' },
+      kv('状态', GOAL_STATUS[status] ? GOAL_STATUS[status].label : status),
+      kv('计划', goalPlanText(goal.schedule)),
+      kv('下次跟进', goal.nextCheckAt ? fmtDateTime(goal.nextCheckAt) : '—'),
+      kv('上次检查', goal.lastCheckAt ? fmtDateTime(goal.lastCheckAt) : '—'),
+      kv('检查结果', goal.lastCheckStatus ? (GOAL_CHECK_STATUS[goal.lastCheckStatus] || goal.lastCheckStatus) : '—'),
+      kv('创建时间', goal.createdAt ? fmtDateTime(goal.createdAt) : '—'),
+      kv('最近更新', goal.updatedAt ? fmtDateTime(goal.updatedAt) : '—'),
+    );
+    if (goal.status === 'stopped' && goal.stoppedAt) grid.appendChild(kv('停止时间', fmtDateTime(goal.stoppedAt)));
+    grid.appendChild(kv('目标 ID', goal.id, true));
+    info.appendChild(grid);
+    wrap.appendChild(info);
+
+    if (str(goal.description)) {
+      wrap.appendChild(el('section', { className: 'detail-section' },
+        el('div', { className: 'detail-section-head' }, el('h3', { text: '描述' })),
+        goalRawText('p', 'goal-detail-desc', goal.description),
+      ));
+    }
+
+    const suggestion = el('section', { className: 'detail-section' },
+      el('div', { className: 'detail-section-head' },
+        el('h3', { text: '最近建议' }),
+        goalCheckState(goal),
+      ),
+    );
+    if (str(goal.lastSummary)) {
+      const article = el('article', { className: 'record-markdown goal-markdown' });
+      article.innerHTML = renderMarkdown(goal.lastSummary);
+      article.addEventListener('click', (event) => {
+        const link = event.target.closest('[data-record-id]');
+        if (!link) return;
+        event.preventDefault();
+        openGoalRecord(link.dataset.recordId);
+      });
+      suggestion.appendChild(article);
+    } else {
+      suggestion.appendChild(el('p', { className: 'goal-checks-empty', text: '还没有检查记录，点击「立即跟进」查看建议。' }));
+    }
+    wrap.appendChild(suggestion);
+
+    const history = el('section', { className: 'detail-section' },
+      el('div', { className: 'detail-section-head' }, el('h3', { text: '检查历史' })),
+    );
+    const checks = arr(goal.checks).slice().sort((a, b) => (parseIso(b && b.at) || 0) - (parseIso(a && a.at) || 0));
+    if (!checks.length) {
+      history.appendChild(el('p', { className: 'goal-checks-empty', text: '暂无检查记录' }));
+    } else {
+      const listEl = el('div', { className: 'goal-checks' });
+      for (const check of checks) {
+        const checkStatus = str(check.status);
+        const taskId = str(check.taskId);
+        const item = el('button', {
+          type: 'button',
+          className: 'goal-check',
+          attrs: { title: taskId ? '点击查看执行记录' : '' },
+          dataset: { taskId },
+        });
+        const top = el('div', { className: 'goal-check-top' },
+          el('span', { className: 'goal-check-state', dataset: { status: checkStatus } },
+            icon(checkStatus === 'failed' || checkStatus === 'timeout' ? 'alert' : 'check'),
+            el('span', { text: GOAL_CHECK_STATUS[checkStatus] || checkStatus || '—' }),
+          ),
+          el('span', { className: 'goal-check-time', text: fmtDateTime(check.at) }),
+        );
+        if (taskId) top.appendChild(el('span', { className: 'goal-check-task', text: taskId }));
+        item.appendChild(top);
+        if (str(check.summary)) item.appendChild(goalRawText('div', 'goal-check-summary', shorten(check.summary, 160)));
+        if (str(check.error)) item.appendChild(goalRawText('div', 'goal-check-error', shorten(check.error, 120)));
+        if (!taskId) item.disabled = true;
+        item.addEventListener('click', () => {
+          if (taskId) openGoalRecord(taskId);
+        });
+        listEl.appendChild(item);
+      }
+      history.appendChild(listEl);
+    }
+    wrap.appendChild(history);
+
+    updateDrawerContent({
+      title: '目标详情',
+      subNodes: [
+        goalStatusBadge(goal),
+        el('span', { className: 'goal-plan' }, icon('clock'), el('span', { text: goalPlanText(goal.schedule) })),
+        el('span', { className: 'mono', text: goal.id }),
+      ],
+      body: wrap,
+      footerNodes: [el('button', { type: 'button', className: 'btn btn-ghost btn-sm', text: '关闭', onclick: hideDrawer })],
+    });
+    if (preserveScroll && bodyNode) bodyNode.scrollTop = scroll;
+  }
+
+  /* ==================================================================
    * 实时动态
    * ================================================================== */
   function activityEntries() {
@@ -2081,9 +2828,9 @@
     const hint = $('#attach-hint');
     if (hint) {
       const total = state.pendingAttachments.reduce((sum, file) => sum + file.size, 0);
-      hint.textContent = state.pendingAttachments.length
+      hint.textContent = tx(state.pendingAttachments.length
         ? `${state.pendingAttachments.length}/${ATTACHMENT_LIMITS.count} 个 · ${formatBytes(total)}`
-        : '小文件 ≤2MB，最多 3 个';
+        : '小文件 ≤2MB，最多 3 个');
     }
   }
 
@@ -2256,9 +3003,9 @@
       try {
         const info = JSON.parse(appBridge.getNotificationSettings());
         toggle.checked = !!info.enabled;
-        status.textContent = describe(info);
+        status.textContent = tx(describe(info));
       } catch (e) {
-        status.textContent = '无法读取通知设置';
+        status.textContent = tx('无法读取通知设置');
       }
       toggle.addEventListener('change', () => {
         try {
@@ -2277,6 +3024,25 @@
         }
       });
     }
+
+    const languageSection = el('section', { className: 'settings-section' },
+      el('h3', { text: tr('settings.languageSection') }),
+      el('p', { className: 'settings-note', text: tr('settings.languageHint') }),
+      el('div', { className: 'settings-actions' }, buildLanguageSelect()),
+    );
+    wrap.appendChild(languageSection);
+
+    const maintenance = el('section', { className: 'settings-section' },
+      el('h3', { text: '系统维护' }),
+      el('p', { className: 'settings-note', text: '重启会先通知所有在线设备代理自我重启，随后 Hub 自动重启；运行中的任务会自动重新排队（不占用重试次数）。' }),
+      el('div', { className: 'settings-actions' },
+        el('button', { type: 'button', className: 'btn btn-ghost btn-sm', dataset: { action: 'open-records' } }, icon('clock'), tr('settings.openRecords')),
+        el('button', { type: 'button', className: 'btn btn-danger btn-sm', dataset: { action: 'restart-system' } }, icon('power'), '重启整套系统'),
+      ),
+      el('p', { className: 'settings-note', text: tr('settings.recordsHint') }),
+      el('p', { className: 'settings-note', text: '等价接口：POST /api/system/restart（管理员令牌）。' }),
+    );
+    wrap.appendChild(maintenance);
 
     const about = el('section', { className: 'settings-section' },
       el('h3', { text: '关于' }),
@@ -2306,11 +3072,73 @@
         refreshNow(true);
       } else if (action === 'diagnostics') {
         copyText(diagnostics(), '诊断信息已复制');
+      } else if (action === 'open-records') {
+        openRecordsDrawer();
+      } else if (action === 'restart-system') {
+        const ok = await confirmDialog({
+          title: '重启整套系统',
+          message: '将通知所有在线设备代理自我重启，随后 Hub 自动重启；运行中的任务会自动重新排队。确定继续？',
+          okText: '立即重启',
+        });
+        if (!ok) return;
+        btn.disabled = true;
+        try {
+          const res = await api('/api/system/restart', { method: 'POST', body: { reason: 'console' } });
+          const devices = res && Number.isFinite(res.devices) ? res.devices : 0;
+          const delaySec = Math.round(((res && res.delayMs) || 12000) / 1000);
+          toast(`已通知 ${devices} 台设备，Hub 约 ${delaySec} 秒后重启…`, 'success', 6000);
+          setTimeout(() => { try { refreshNow(true); } catch (e) { /* 忽略 */ } }, 3000);
+          setTimeout(() => { try { startSse(); refreshNow(true); } catch (e) { /* 忽略 */ } }, 16000);
+        } catch (err) {
+          if (err.status === 401) handleAuthLost(err.message);
+          else toast(err.message || '重启失败', 'error');
+          btn.disabled = false;
+        }
       } else if (action === 'logout') {
         logout();
       }
     });
+    wrap.addEventListener('change', (event) => {
+      const select = event.target.closest('#system-language');
+      if (!select || !I18N) return;
+      void changeLanguage(select.value);
+    });
     return wrap;
+  }
+
+  function buildLanguageSelect() {
+    const select = el('select', {
+      id: 'system-language',
+      className: 'settings-select',
+      attrs: { 'aria-label': tr('settings.languageLabel') },
+    });
+    const languages = I18N && typeof I18N.getLanguages === 'function'
+      ? I18N.getLanguages()
+      : [{ id: 'zh-CN', label: '简体中文' }, { id: 'en', label: 'English' }];
+    const active = currentLang();
+    for (const language of languages) {
+      const option = el('option', { value: language.id, text: language.label });
+      if (language.id === active) option.selected = true;
+      select.appendChild(option);
+    }
+    return select;
+  }
+
+  async function changeLanguage(language) {
+    if (!I18N) return;
+    const target = I18N.normalizeLang(language);
+    try {
+      const res = await api('/api/settings', { method: 'PATCH', body: { language: target } });
+      if (res && res.settings) state.settings = res.settings;
+      I18N.setLang(target, { persist: true });
+      toast(tr('settings.languageSaved'), 'success');
+      renderAll();
+      if (state.drawer.open && state.drawer.kind === 'records') renderRecordsDrawer();
+    } catch (err) {
+      if (err.status === 401) handleAuthLost(err.message);
+      else toast(err.message || tr('settings.languageFailed'), 'error');
+      refreshSettings();
+    }
   }
 
   function refreshSettings() {
@@ -2358,7 +3186,7 @@
     const sub = $('#drawer-sub');
     sub.replaceChildren();
     for (const node of (subNodes || [])) {
-      if (node) sub.appendChild(node instanceof Node ? node : document.createTextNode(String(node)));
+      if (node) sub.appendChild(node instanceof Node ? node : document.createTextNode(tx(String(node))));
     }
     $('#drawer-body').replaceChildren(body || '');
     const foot = $('#drawer-foot');
@@ -2390,10 +3218,395 @@
     }
   }
 
+  /** 仅替换抽屉内容（不重置 returnFocus，用于抽屉内部翻页/刷新）。 */
+  function updateDrawerContent({ title, subNodes, body, footerNodes }) {
+    setText('#drawer-title', title || tr('common.details'));
+    const sub = $('#drawer-sub');
+    sub.replaceChildren();
+    for (const node of (subNodes || [])) {
+      if (node) sub.appendChild(node instanceof Node ? node : document.createTextNode(tx(String(node))));
+    }
+    $('#drawer-body').replaceChildren(body || '');
+    const foot = $('#drawer-foot');
+    if (footerNodes && footerNodes.length) {
+      foot.replaceChildren(...footerNodes);
+      foot.hidden = false;
+    } else {
+      foot.replaceChildren();
+      foot.hidden = true;
+    }
+  }
+
   function refreshOpenDrawer() {
     if (!state.drawer.open) return;
     if (state.drawer.kind === 'device') refreshDeviceDrawer(state.drawer.id);
     else if (state.drawer.kind === 'task') refreshTaskDrawer(state.drawer.id);
+    else if (state.drawer.kind === 'goal') renderGoalDrawer({ preserveScroll: true });
+  }
+
+  /* ==================================================================
+   * 执行记录（Markdown backtrace）
+   * ================================================================== */
+  function escapeHtml(text) {
+    return String(text == null ? '' : text)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function mdInline(raw) {
+    let text = escapeHtml(raw);
+    text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+    text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, label, href) => {
+      const found = /^(?:.+\/)?(task_[A-Za-z0-9]+)\.md$/.exec(href);
+      if (!found) return match;
+      return `<a href="#" class="record-link" data-record-id="${escapeHtml(found[1])}">${label}</a>`;
+    });
+    return text;
+  }
+
+  /** 极简安全 Markdown 渲染（标题/列表/表格/代码块/引用/粗体/行内代码/记录互链）。 */
+  function renderMarkdown(markdown) {
+    const lines = String(markdown || '').replace(/\r\n/g, '\n').split('\n');
+    const html = [];
+    let paragraph = [];
+    let inCode = false;
+    let codeLines = [];
+    let i = 0;
+    const flushParagraph = () => {
+      if (!paragraph.length) return;
+      html.push(`<p>${mdInline(paragraph.join(' '))}</p>`);
+      paragraph = [];
+    };
+    while (i < lines.length) {
+      const line = lines[i];
+      if (/^(`{3,})/.test(line)) {
+        if (inCode) {
+          html.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+          inCode = false;
+          codeLines = [];
+        } else {
+          flushParagraph();
+          inCode = true;
+          codeLines = [];
+        }
+        i += 1;
+        continue;
+      }
+      if (inCode) {
+        codeLines.push(line);
+        i += 1;
+        continue;
+      }
+      if (!line.trim()) {
+        flushParagraph();
+        i += 1;
+        continue;
+      }
+      const heading = /^(#{1,6})\s+(.*)$/.exec(line);
+      if (heading) {
+        flushParagraph();
+        const level = Math.min(6, heading[1].length);
+        html.push(`<h${level}>${mdInline(heading[2])}</h${level}>`);
+        i += 1;
+        continue;
+      }
+      if (/^---+$/.test(line.trim())) {
+        flushParagraph();
+        html.push('<hr>');
+        i += 1;
+        continue;
+      }
+      if (/^>\s?/.test(line)) {
+        flushParagraph();
+        const quote = [];
+        while (i < lines.length && /^>\s?/.test(lines[i])) {
+          quote.push(lines[i].replace(/^>\s?/, ''));
+          i += 1;
+        }
+        html.push(`<blockquote>${mdInline(quote.join(' '))}</blockquote>`);
+        continue;
+      }
+      if (/^\|/.test(line) && i + 1 < lines.length && /^\|?[\s:|-]*-{2,}/.test(lines[i + 1])) {
+        flushParagraph();
+        const splitRow = (row) => row.replace(/^\|/, '').replace(/\|$/, '').split('|').map((cell) => cell.trim());
+        const head = splitRow(line);
+        i += 2;
+        const rows = [];
+        while (i < lines.length && /^\|/.test(lines[i])) {
+          rows.push(splitRow(lines[i]));
+          i += 1;
+        }
+        html.push(
+          `<div class="record-table"><table><thead><tr>${head.map((cell) => `<th>${mdInline(cell)}</th>`).join('')}</tr></thead><tbody>${rows
+            .map((row) => `<tr>${row.map((cell) => `<td>${mdInline(cell)}</td>`).join('')}</tr>`)
+            .join('')}</tbody></table></div>`,
+        );
+        continue;
+      }
+      if (/^- /.test(line)) {
+        flushParagraph();
+        const items = [];
+        while (i < lines.length && /^- /.test(lines[i])) {
+          items.push(`<li>${mdInline(lines[i].slice(2))}</li>`);
+          i += 1;
+        }
+        html.push(`<ul>${items.join('')}</ul>`);
+        continue;
+      }
+      if (/^\d+\. /.test(line)) {
+        flushParagraph();
+        const items = [];
+        while (i < lines.length && /^\d+\. /.test(lines[i])) {
+          items.push(`<li>${mdInline(lines[i].replace(/^\d+\.\s+/, ''))}</li>`);
+          i += 1;
+        }
+        html.push(`<ol>${items.join('')}</ol>`);
+        continue;
+      }
+      paragraph.push(line);
+      i += 1;
+    }
+    flushParagraph();
+    if (inCode) html.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+    return html.join('\n');
+  }
+
+  function openRecordsDrawer() {
+    state.records.detail = null;
+    openDrawer({
+      kind: 'records',
+      id: null,
+      title: tr('records.title'),
+      subNodes: [el('span', { text: tr('records.subtitle') })],
+      body: el('p', { className: 'record-empty', text: tr('records.loading') }),
+      footerNodes: [el('button', { type: 'button', className: 'btn btn-ghost btn-sm', text: tr('common.close'), onclick: hideDrawer })],
+    });
+    void loadRecords();
+  }
+
+  function renderRecordsDrawer() {
+    if (!state.drawer.open || state.drawer.kind !== 'records') return;
+    if (state.records.detail) {
+      renderRecordDetailView();
+      return;
+    }
+    const wrap = el('div', { className: 'records-wrap' });
+    const toolbar = el('div', { className: 'records-toolbar' });
+    const search = el('input', {
+      type: 'search',
+      className: 'records-search',
+      attrs: { placeholder: tr('records.searchPlaceholder'), 'aria-label': tr('records.searchPlaceholder') },
+    });
+    search.value = state.records.q;
+    let searchTimer = 0;
+    search.addEventListener('input', () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => {
+        state.records.q = search.value.trim();
+        void loadRecords();
+      }, 320);
+    });
+    const statusSelect = el('select', { className: 'records-status', attrs: { 'aria-label': tr('records.filterAll') } });
+    const options = [
+      ['', tr('records.filterAll')],
+      ['queued', tr('status.queued')],
+      ['assigned', tr('status.assigned')],
+      ['running', tr('status.running')],
+      ['waiting', tr('status.waiting')],
+      ['completed', tr('status.completed')],
+      ['failed', tr('status.failed')],
+      ['timeout', tr('status.timeout')],
+      ['cancelled', tr('status.cancelled')],
+    ];
+    for (const [value, label] of options) {
+      const option = el('option', { value, text: label });
+      if (value === state.records.status) option.selected = true;
+      statusSelect.appendChild(option);
+    }
+    statusSelect.addEventListener('change', () => {
+      state.records.status = statusSelect.value;
+      void loadRecords();
+    });
+    const refreshBtn = el('button', { type: 'button', className: 'btn btn-ghost btn-sm' }, icon('refresh'), tr('common.refresh'));
+    refreshBtn.addEventListener('click', () => void loadRecords());
+    const count = el('span', { className: 'records-count', id: 'records-count', text: tr('records.count', { n: state.records.total }) });
+    toolbar.append(search, statusSelect, refreshBtn, count);
+    wrap.appendChild(toolbar);
+    const list = el('div', { className: 'records-list', id: 'records-list' });
+    wrap.appendChild(list);
+    renderRecordsListInto(list);
+    updateDrawerContent({
+      title: tr('records.title'),
+      subNodes: [el('span', { text: tr('records.subtitle') })],
+      body: wrap,
+      footerNodes: [el('button', { type: 'button', className: 'btn btn-ghost btn-sm', text: tr('common.close'), onclick: hideDrawer })],
+    });
+  }
+
+  function renderRecordsListInto(container) {
+    if (!container) return;
+    container.replaceChildren();
+    if (state.records.loading) {
+      container.appendChild(el('p', { className: 'record-empty', text: tr('records.loading') }));
+      return;
+    }
+    if (state.records.error) {
+      container.appendChild(el('p', { className: 'record-empty record-error', text: state.records.error }));
+      return;
+    }
+    if (!state.records.items.length) {
+      container.appendChild(el('p', { className: 'record-empty', text: tr('records.empty') }));
+      return;
+    }
+    for (const item of state.records.items) {
+      const card = el('button', { type: 'button', className: 'record-item', dataset: { taskId: item.taskId } });
+      card.appendChild(
+        el('div', { className: 'record-item-top' },
+          statusBadge(item.status),
+          el('span', { className: 'record-item-id mono', text: item.taskId }),
+          el('span', { className: 'record-item-time', text: fmtDateTime(item.createdAt) }),
+        ),
+      );
+      card.appendChild(el('div', { className: 'record-item-summary', text: shorten(item.summary, 90) }));
+      const meta = [`${tr('records.duration')} ${fmtDuration(item.durationMs)}`];
+      if (item.device) meta.push(item.device);
+      meta.push(item.hasFile ? formatBytes(item.size) : tr('records.noFile'));
+      card.appendChild(el('div', { className: 'record-item-meta', text: meta.join(' · ') }));
+      if (item.error) card.appendChild(el('div', { className: 'record-item-error', text: shorten(item.error, 100) }));
+      card.addEventListener('click', () => void openRecordDetail(item.taskId));
+      container.appendChild(card);
+    }
+  }
+
+  async function loadRecords() {
+    if (!state.connected) return;
+    state.records.loading = true;
+    state.records.error = '';
+    const list = $('#records-list');
+    if (list) renderRecordsListInto(list);
+    else renderRecordsDrawer();
+    try {
+      const params = new URLSearchParams();
+      params.set('limit', '100');
+      if (state.records.q) params.set('q', state.records.q);
+      if (state.records.status) params.set('status', state.records.status);
+      const res = await api(`/api/records?${params.toString()}`, { timeout: 20000 });
+      state.records.items = arr(res && res.records);
+      state.records.total = num(res && res.total, state.records.items.length);
+      state.records.recordDir = str(res && res.recordDir);
+    } catch (err) {
+      if (err.status === 401) {
+        handleAuthLost(err.message);
+        return;
+      }
+      state.records.error = err.message || tr('records.loadFailed');
+    } finally {
+      state.records.loading = false;
+      if (state.drawer.open && state.drawer.kind === 'records' && !state.records.detail) {
+        const box = $('#records-list');
+        if (box) {
+          renderRecordsListInto(box);
+          setText('#records-count', tr('records.count', { n: state.records.total }));
+        } else {
+          renderRecordsDrawer();
+        }
+      }
+    }
+  }
+
+  async function openRecordDetail(taskId) {
+    state.records.detail = { taskId, loading: true, error: '', record: null };
+    renderRecordsDrawer();
+    try {
+      const res = await api(`/api/records/${encodeURIComponent(taskId)}`, { timeout: 20000 });
+      state.records.detail = { taskId, loading: false, error: '', record: res && res.record ? res.record : null };
+      if (!state.records.detail.record) state.records.detail.error = tr('records.missing');
+    } catch (err) {
+      if (err.status === 401) {
+        handleAuthLost(err.message);
+        return;
+      }
+      state.records.detail = { taskId, loading: false, error: err.message || tr('records.missing'), record: null };
+    }
+    if (state.drawer.open && state.drawer.kind === 'records') renderRecordsDrawer();
+  }
+
+  function renderRecordDetailView() {
+    const detail = state.records.detail;
+    if (!detail) return;
+    const backBtn = el('button', { type: 'button', className: 'btn btn-ghost btn-sm' }, tr('records.back'));
+    backBtn.addEventListener('click', () => {
+      state.records.detail = null;
+      renderRecordsDrawer();
+    });
+    if (detail.loading) {
+      updateDrawerContent({
+        title: detail.taskId,
+        subNodes: [el('span', { text: tr('records.loading') })],
+        body: el('p', { className: 'record-empty', text: tr('records.loading') }),
+        footerNodes: [backBtn, el('button', { type: 'button', className: 'btn btn-ghost btn-sm', text: tr('common.close'), onclick: hideDrawer })],
+      });
+      return;
+    }
+    const record = detail.record;
+    if (!record) {
+      updateDrawerContent({
+        title: detail.taskId,
+        subNodes: [el('span', { text: tr('records.error') })],
+        body: el('p', { className: 'record-empty record-error', text: detail.error || tr('records.missing') }),
+        footerNodes: [backBtn, el('button', { type: 'button', className: 'btn btn-ghost btn-sm', text: tr('common.close'), onclick: hideDrawer })],
+      });
+      return;
+    }
+    const meta = el('div', { className: 'record-meta kv-grid' },
+      kv(tr('records.task'), record.taskId, true),
+      kv(tr('records.size'), formatBytes(record.size)),
+      kv(tr('records.updatedAt'), fmtDateTime(record.updatedAt)),
+      kv(tr('records.file'), record.file || '—', true),
+    );
+    const article = el('article', { className: 'record-markdown' });
+    article.innerHTML = renderMarkdown(record.markdown);
+    article.addEventListener('click', (event) => {
+      const link = event.target.closest('[data-record-id]');
+      if (!link) return;
+      event.preventDefault();
+      void openRecordDetail(link.dataset.recordId);
+    });
+    const body = el('div', { className: 'records-wrap' }, meta, article);
+    const copyBtn = el('button', { type: 'button', className: 'btn btn-ghost btn-sm' }, icon('copy'), tr('records.copy'));
+    copyBtn.addEventListener('click', () => copyText(record.markdown, tr('records.copied')));
+    const downloadBtn = el('button', { type: 'button', className: 'btn btn-ghost btn-sm' });
+    downloadBtn.append(icon('send'), document.createTextNode(tr('records.download')));
+    downloadBtn.addEventListener('click', () => {
+      try {
+        const blob = new Blob([record.markdown], { type: 'text/markdown;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const anchor = el('a', { href: url, download: `${record.taskId}.md` });
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1500);
+        toast(tr('records.downloaded'), 'success');
+      } catch (err) {
+        toast(err.message || tr('records.loadFailed'), 'error');
+      }
+    });
+    updateDrawerContent({
+      title: record.taskId,
+      subNodes: [el('span', { text: tr('records.subtitle') })],
+      body,
+      footerNodes: [
+        backBtn,
+        copyBtn,
+        downloadBtn,
+        el('span', { className: 'spacer' }),
+        el('button', { type: 'button', className: 'btn btn-ghost btn-sm', text: tr('common.close'), onclick: hideDrawer }),
+      ],
+    });
   }
 
   /* ==================================================================
@@ -3025,7 +4238,7 @@
     if (banner) banner.hidden = false;
     const textarea = $('#instruction');
     textarea.value = '';
-    textarea.placeholder = '基于上一步结果，输入下一步要做什么，或直接修正要求…';
+    textarea.placeholder = tx('基于上一步结果，输入下一步要做什么，或直接修正要求…');
     setTab('command');
     updateComposerTarget();
     textarea.focus();
@@ -3038,7 +4251,7 @@
     const banner = $('#followup-banner');
     if (banner) banner.hidden = true;
     const textarea = $('#instruction');
-    if (textarea) textarea.placeholder = '例如：把本周的开销记录整理成一份 Word 报告，并附上汇总表格';
+    if (textarea) textarea.placeholder = tx('例如：把本周的开销记录整理成一份 Word 报告，并附上汇总表格');
   }
 
   /* ==================================================================
@@ -3051,6 +4264,10 @@
     try {
       const snapshot = await api('/api/snapshot?limit=50', { timeout: 12000 });
       applySnapshot(snapshot);
+      if (state.goalsSupported) {
+        state.goalsLoaded = false;
+        ensureGoalsLoaded();
+      }
       if (showToast) toast('数据已刷新', 'success');
     } catch (err) {
       if (err.status === 401) handleAuthLost(err.message);
@@ -3247,9 +4464,33 @@
     const toggle = $('#nav-toggle');
     if (!nav || !toggle) return;
     const next = Boolean(open);
+    if (next) updateMobileNavPosition(nav, toggle);
     nav.classList.toggle('is-open', next);
     toggle.setAttribute('aria-expanded', next ? 'true' : 'false');
-    toggle.setAttribute('aria-label', next ? '关闭导航' : '打开导航');
+    toggle.setAttribute('aria-label', next ? tx('关闭导航') : tx('打开导航'));
+    if (next) {
+      window.addEventListener('scroll', onMobileNavViewportChange, { passive: true });
+      window.addEventListener('resize', onMobileNavViewportChange);
+    } else {
+      window.removeEventListener('scroll', onMobileNavViewportChange);
+      window.removeEventListener('resize', onMobileNavViewportChange);
+    }
+  }
+
+  /** 让汉堡菜单锚定在按钮下方：跟随当前视口，而不是固定在页面顶部。 */
+  function updateMobileNavPosition(nav = $('#mobile-nav'), toggle = $('#nav-toggle')) {
+    if (!nav || !toggle) return;
+    const rect = toggle.getBoundingClientRect();
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 600;
+    const top = Math.max(8, Math.min(viewportHeight - 140, rect.bottom + 8));
+    nav.style.top = `${Math.round(top)}px`;
+    nav.style.maxHeight = `${Math.max(160, Math.round(viewportHeight - top - 12))}px`;
+  }
+
+  function onMobileNavViewportChange() {
+    const nav = $('#mobile-nav');
+    if (!nav || !nav.classList.contains('is-open')) return;
+    updateMobileNavPosition(nav, $('#nav-toggle'));
   }
 
   function setTab(tab, { scroll = true } = {}) {
@@ -3283,12 +4524,22 @@
     const idx = raw.indexOf(':');
     const kind = idx >= 0 ? raw.slice(0, idx) : raw;
     const id = idx >= 0 ? raw.slice(idx + 1) : '';
-    if (kind === 'device' && state.devices.has(id)) {
+    if (kind === 'records') {
+      state.autoOpenDone = true;
+      openRecordsDrawer();
+    } else if (kind === 'settings') {
+      state.autoOpenDone = true;
+      openSettingsDrawer();
+    } else if (kind === 'device' && state.devices.has(id)) {
       state.autoOpenDone = true;
       openDeviceDrawer(id);
     } else if (kind === 'task' && state.tasks.some((t) => t.id === id)) {
       state.autoOpenDone = true;
       openTaskDrawer(id);
+    } else if (kind === 'goals') {
+      state.autoOpenDone = true;
+      setTab('goals');
+      if (id && goalById(id)) openGoalDrawer(id);
     }
   }
 
@@ -3442,9 +4693,54 @@
       $(selector).addEventListener('change', updateComposerTarget);
     });
 
-    /* 手机 Tab */
+    /* 长期目标 */
+    const goalNew = $('#goal-new');
+    if (goalNew) goalNew.addEventListener('click', () => openGoalFormDrawer());
+    const goalList = $('#goal-list');
+    if (goalList) {
+      goalList.addEventListener('click', (event) => {
+        const actionBtn = event.target.closest('[data-action]');
+        if (actionBtn) {
+          event.preventDefault();
+          const action = actionBtn.dataset.action;
+          if (action === 'reload-goals') {
+            state.goalsLoaded = false;
+            state.goalsError = '';
+            state.sigs.goals = '';
+            void loadGoals();
+            return;
+          }
+          const card = actionBtn.closest('.goal-card');
+          const goalId = card ? card.dataset.id : '';
+          if (!goalId) return;
+          if (action === 'check') void goalCheckNow(goalId);
+          else if (action === 'pause') void goalSetStatus(goalId, 'paused');
+          else if (action === 'resume') void goalSetStatus(goalId, 'active');
+          else if (action === 'stop') void goalSetStatus(goalId, 'stopped');
+          else if (action === 'delete') void goalDelete(goalId);
+          else if (action === 'details') openGoalDrawer(goalId);
+          return;
+        }
+        const card = event.target.closest('.goal-card');
+        if (card) openGoalDrawer(card.dataset.id);
+      });
+      goalList.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        const card = event.target.closest('.goal-card');
+        if (!card || event.target.closest('[data-action]')) return;
+        event.preventDefault();
+        openGoalDrawer(card.dataset.id);
+      });
+    }
+
+    /* 手机 Tab / 汉堡菜单 */
     $$('.mobile-tab').forEach((btn) => {
       btn.addEventListener('click', () => {
+        if (btn.dataset.action === 'records') {
+          setMobileNav(false);
+          openRecordsDrawer();
+          return;
+        }
         setTab(btn.dataset.tab);
         setMobileNav(false);
         try {
@@ -3514,6 +4810,7 @@
       renderStats();
       renderDevices();
       renderTasks();
+      renderGoals();
       renderComposerOptions();
       renderActivity();
       refreshSettings();
@@ -3540,6 +4837,13 @@
    * 启动
    * ================================================================== */
   async function boot() {
+    if (I18N) {
+      try {
+        I18N.init({ initialLang: I18N.effectiveLang() });
+      } catch (err) {
+        if (window.console && console.warn) console.warn('[super-butler] i18n init failed', err);
+      }
+    }
     bindStaticEvents();
     scheduleRelativeRefresh();
 

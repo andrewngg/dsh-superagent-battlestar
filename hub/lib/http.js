@@ -11,6 +11,7 @@ const { URL } = require('node:url');
 const protocol = require('../../shared/protocol.js');
 const errors = require('./errors');
 const util = require('./util');
+const { listRecords, readRecord } = require('./records');
 const { serveStatic } = require('./static');
 
 const { toHttpError, unauthorized, forbidden, notFound, badRequest } = errors;
@@ -21,6 +22,8 @@ const TASK_ADMIN_RE = /^\/api\/tasks\/([^/]+)(?:\/(cancel|retry|archive|unarchiv
 const TASK_FOLLOW_RE = /^\/api\/tasks\/([^/]+)\/follow-up$/;
 const TASK_ANSWER_RE = /^\/api\/tasks\/([^/]+)\/answer$/;
 const TASK_EXTERNAL_RE = /^\/api\/tasks\/([^/]+)\/external-result$/;
+const GOAL_ADMIN_RE = /^\/api\/goals\/([^/]+)(?:\/(check))?$/;
+const RECORD_RE = /^\/api\/records\/([^/]+)$/;
 const DSH_JOB_RE = /^\/api\/dsh\/job\/([^/]+)$/;
 const DSH_BRIDGE_URL = (process.env.DSH_BRIDGE_URL || 'http://127.0.0.1:50646/super-butler/api/dsh').replace(/\/+$/, '');
 
@@ -231,7 +234,22 @@ async function handleRequest(hub, req, res) {
       protocol: protocol.PROTOCOL_VERSION,
       uptimeSec: hub.uptimeSec,
       hubTime: protocol.nowIso(),
+      features: {
+        progressKeepalive: true,
+        autoRetryOnTimeout: hub.autoRetryOnTimeout !== false,
+        selfRestart: typeof hub.restartHandler === 'function',
+        restartedFromSelf: hub.gracefulRestart === true,
+      },
     });
+  }
+
+  if (pathname === '/api/system/restart') {
+    requireAdmin(hub, req, url);
+    if (method !== 'POST') throw notFound('接口不存在');
+    const body = await readJsonBody(req);
+    const reason = util.str(body && body.reason, 120) || 'console';
+    const result = hub.requestRestart(reason);
+    return sendJson(res, 202, { ok: true, ...result, hubTime: protocol.nowIso() });
   }
 
   if (pathname === '/api/events') {
@@ -261,6 +279,108 @@ async function handleRequest(hub, req, res) {
     if (method !== 'GET') throw notFound('接口不存在');
     const limit = util.clampInt(queryNumber(url, 'limit'), 50, 1, 200);
     return sendJson(res, 200, hub.snapshot(limit));
+  }
+
+  if (pathname === '/api/settings') {
+    requireAdmin(hub, req, url);
+    if (method === 'GET') {
+      return sendJson(res, 200, {
+        settings: hub.getSettings(),
+        supportedLanguages: hub.getSupportedLanguages(),
+        hubTime: protocol.nowIso(),
+      });
+    }
+    if (method === 'PATCH' || method === 'PUT') {
+      const body = await readJsonBody(req);
+      const settings = hub.updateSettings(body);
+      return sendJson(res, 200, { settings, hubTime: protocol.nowIso() });
+    }
+    throw notFound('接口不存在');
+  }
+
+  if (pathname === '/api/goals') {
+    requireAdmin(hub, req, url);
+    if (method === 'GET') {
+      const goals = hub.listGoals({ status: queryString(url, 'status') });
+      return sendJson(res, 200, { goals, hubTime: protocol.nowIso() });
+    }
+    if (method === 'POST') {
+      const body = await readJsonBody(req);
+      const goal = hub.createGoal(body);
+      return sendJson(res, 200, { goal: hub.getGoal(goal.id), hubTime: protocol.nowIso() });
+    }
+    throw notFound('接口不存在');
+  }
+
+  const goalMatch = GOAL_ADMIN_RE.exec(pathname);
+  if (goalMatch) {
+    requireAdmin(hub, req, url);
+    let goalId;
+    try {
+      goalId = decodeURIComponent(goalMatch[1]);
+    } catch {
+      throw badRequest('目标 ID 非法');
+    }
+    const action = goalMatch[2] || null;
+    if (!action && method === 'GET') {
+      return sendJson(res, 200, { goal: hub.getGoal(goalId), hubTime: protocol.nowIso() });
+    }
+    if (!action && (method === 'PATCH' || method === 'PUT')) {
+      const body = await readJsonBody(req);
+      const goal = hub.updateGoal(goalId, body);
+      return sendJson(res, 200, { goal: hub.getGoal(goal.id), hubTime: protocol.nowIso() });
+    }
+    if (!action && method === 'DELETE') {
+      hub.deleteGoal(goalId);
+      return sendJson(res, 200, { ok: true, hubTime: protocol.nowIso() });
+    }
+    if (action === 'check' && method === 'POST') {
+      await readJsonBody(req);
+      const { goal, task } = hub.requestGoalCheck(goalId, { manual: true });
+      return sendJson(res, 200, {
+        goal: hub.getGoal(goal.id),
+        task: hub.taskToJson(task),
+        hubTime: protocol.nowIso(),
+      });
+    }
+    throw notFound('接口不存在');
+  }
+
+  if (pathname === '/api/records') {
+    requireAdmin(hub, req, url);
+    if (method !== 'GET') throw notFound('接口不存在');
+    const result = listRecords(hub, {
+      q: queryString(url, 'q'),
+      status: queryString(url, 'status'),
+      limit: queryNumber(url, 'limit'),
+      offset: queryNumber(url, 'offset'),
+    });
+    return sendJson(res, 200, { ...result, hubTime: protocol.nowIso() });
+  }
+
+  const recordMatch = RECORD_RE.exec(pathname);
+  if (recordMatch) {
+    requireAdmin(hub, req, url);
+    if (method !== 'GET') throw notFound('接口不存在');
+    let taskId;
+    try {
+      taskId = decodeURIComponent(recordMatch[1]);
+    } catch {
+      throw badRequest('任务 ID 非法');
+    }
+    const record = readRecord(hub, taskId);
+    if (!record) throw notFound('执行记录不存在');
+    if (queryString(url, 'format') === 'md') {
+      const body = Buffer.from(record.markdown, 'utf8');
+      res.writeHead(200, {
+        'Content-Type': 'text/markdown; charset=utf-8',
+        'Content-Length': body.length,
+        'Content-Disposition': `attachment; filename="${record.taskId}.md"`,
+        'Cache-Control': 'no-store',
+      });
+      return res.end(body);
+    }
+    return sendJson(res, 200, { record, hubTime: protocol.nowIso() });
   }
 
   if (pathname === '/api/devices') {

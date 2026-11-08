@@ -43,22 +43,26 @@ function extractJson(text) {
   }
 }
 
-function buildPrompt(instruction, requirements, maxSubtasks) {
+function buildPrompt(instruction, requirements, maxSubtasks, parentTimeoutSec) {
   const req = requirements && typeof requirements === 'object' ? requirements : {};
-  return [
+  const lines = [
     '你是 BattleStar 长任务规划器。把用户的一条长任务拆成 2-' + maxSubtasks + ' 个可独立执行的子任务。',
     '要求：',
     '1. 每个子任务必须自包含，能单独交给另一台工作机执行，不要互相等待；',
     '2. 按顺序执行时能完成原任务；子任务之间要说明依赖，但不要合并成一个大任务；',
     '3. 视频/图片生成任务要拆成明确的镜头、素材准备、生成、合成/导出步骤；',
     '4. 每个子任务给出合理的 timeoutSec（30-3600 秒）；',
-    '5. 只输出严格 JSON，不要 Markdown、解释或代码块。',
+    '5. 网页检索/多平台搜索/登录后操作类子任务要留足时间，建议 600-1800 秒，不要低于 300 秒；',
+    '6. 只输出严格 JSON，不要 Markdown、解释或代码块。',
     'JSON 格式：',
     '{"title":"简短标题","subtasks":[{"instruction":"完整可执行的子任务指令","timeoutSec":300}]}',
     '原任务要求（可能为空）：' + JSON.stringify(req),
-    '用户原任务：',
-    String(instruction || ''),
-  ].join('\n');
+  ];
+  if (Number.isFinite(Number(parentTimeoutSec)) && Number(parentTimeoutSec) > 0) {
+    lines.push(`父任务超时预算：${Math.round(Number(parentTimeoutSec))} 秒；子任务 timeoutSec 不要超过该预算。`);
+  }
+  lines.push('用户原任务：', String(instruction || ''));
+  return lines.join('\n');
 }
 
 /**
@@ -75,7 +79,7 @@ async function createPlan(options = {}) {
     model: cfg.model,
     messages: [
       { role: 'system', content: '你是严格输出 JSON 的任务规划器。' },
-      { role: 'user', content: buildPrompt(instruction, options.requirements, cfg.maxSubtasks) },
+      { role: 'user', content: buildPrompt(instruction, options.requirements, cfg.maxSubtasks, options.timeoutSec) },
     ],
     temperature: 0.2,
     max_tokens: 3000,

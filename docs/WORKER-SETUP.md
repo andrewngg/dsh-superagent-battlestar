@@ -242,6 +242,15 @@ Invoke-RestMethod "<HUB_URL>/api/tasks" -Method POST -Headers $headers -ContentT
 - 请用户在母机控制台 / `/api/devices` 确认在线；
 - 不要为了验证去猜测或索要管理员令牌。
 
+### 常见故障：Hermes CLI 退出码 1（无输出）
+
+- 现象：任务 1~2 秒内失败，错误只有「Hermes CLI 退出码 1」，Hermes 日志无新增；`hermes --version` 也立即退出 1。
+- 根因：设备代理被启动在受限沙箱（如 DSH workspace-write）里，子进程无法访问 `%LOCALAPPDATA%\hermes`（state.db/auth/日志），Hermes 启动即退出。
+- 处理：在**普通用户会话**里重启整套服务：双击仓库根目录 `restart-butler.cmd`，或运行
+  `powershell -NoProfile -ExecutionPolicy Bypass -File "<仓库>\worker-workspace\start-workers.ps1" -Restart`。
+  启动器会先做沙箱自检（不通过则拒绝启动并写入 `worker-workspace/logs/launcher.warnings.log`），再拉起重启后的 Hub/代理。
+- 代理启动时若检测到 `HERMES_HOME` 不可写，也会在日志里打印同样的告警，`cli-worker` 的错误信息会附带可读原因。
+
 ---
 
 ## 7. 汇报格式（完成后发给用户）

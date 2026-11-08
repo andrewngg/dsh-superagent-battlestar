@@ -122,6 +122,49 @@ test('重启恢复：令牌/加入码持久化，设备离线，assigned 重排�
   }
 });
 
+test('自重启恢复：graceful 重启把运行中任务自动重新排队（不占用重试次数）', async (t) => {
+  const dataDir = await makeTempDir('butler-persist-graceful-');
+  t.after(async () => {
+    await fs.promises.rm(dataDir, { recursive: true, force: true });
+  });
+
+  const first = await startHubAt(dataDir);
+  const device = await registerDevice(first, makeManifest({ name: '自重启设备' }));
+  const task = await createTask(first, {
+    instruction: '自重启时正在运行的任务',
+    requirements: { deviceId: device.deviceId },
+  });
+  await ackTask(first, device, task.id);
+  assert.equal(first.hub.getTask(task.id).status, 'running');
+  await first.hub.close();
+
+  const second = await startHubAt(dataDir, { gracefulRestart: true });
+  try {
+    const restored = second.hub.getTask(task.id);
+    assert.equal(restored.status, 'queued', '自重启后运行中任务应自动重新排队');
+    assert.equal(restored.attempts, 0, '自重启不计入一次执行尝试');
+    assert.ok(restored.events.some((event) => event.type === 'requeued'));
+
+    // 设备重新上线后自动重派，并只消耗一次尝试
+    const beat = await heartbeat(
+      second,
+      { deviceId: device.deviceId, deviceToken: device.deviceToken },
+      { status: 'idle' },
+    );
+    assert.equal(beat.status, 200);
+    const routed = await waitFor(
+      async () => {
+        const current = await getTask(second, task.id);
+        return current.status === 'assigned' ? current : null;
+      },
+      { label: '自重启后任务自动重派', timeout: 3000 },
+    );
+    assert.equal(routed.attempts, 1);
+  } finally {
+    await second.hub.close();
+  }
+});
+
 test('重启后旧管理员令牌/设备令牌仍有效，设备可恢复注册并上线', async (t) => {
   const dataDir = await makeTempDir('butler-persist-token-');
   t.after(async () => {

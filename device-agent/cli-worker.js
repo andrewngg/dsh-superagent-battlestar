@@ -89,6 +89,34 @@ function defaultOpencodeExe() {
   ]);
 }
 
+/**
+ * 检查 Hermes home 是否可写；返回空字符串表示没问题，否则返回错误码。
+ * 运行在受限沙箱（如 DSH workspace-write）或被 ACL 限制时，Hermes 会瞬间退出码 1 且无任何输出。
+ */
+function hermesHomeProblem(home) {
+  const target = nonEmptyString(home);
+  if (!target) return '';
+  try {
+    fs.accessSync(target, fs.constants.W_OK);
+    return '';
+  } catch (err) {
+    const code = err && err.code ? err.code : String(err && err.message);
+    if (code === 'ENOENT') return ''; // 允许 Hermes 自行创建
+    return code;
+  }
+}
+
+/** Hermes 非零退出码 → 可读错误（无输出时附带最可能的根因，避免只剩“退出码 1”）。 */
+function describeHermesExit(code, text, home) {
+  const output = String(text == null ? '' : text).trim();
+  if (output) return `Hermes CLI 退出码 ${code}：${truncate(output, 300)}`;
+  const problem = hermesHomeProblem(home);
+  const hint = problem
+    ? `Hermes 无法访问 HERMES_HOME（${home}，${problem}）。设备代理可能运行在受限沙箱/权限不足的环境中，请在普通用户会话中启动设备代理`
+    : `Hermes 没有产生任何输出；请确认 HERMES_HOME（${home || '未配置'}）可写、Hermes 网关正常运行`;
+  return `Hermes CLI 退出码 ${code}（无输出）：${hint}`;
+}
+
 function defaultShellExe() {
   const local = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
   return resolveExecutable('', [
@@ -490,7 +518,7 @@ async function runHermes(ctx) {
     if (created) saveSessionId(ctx.threadId, created);
   }
   if (res.code !== 0) {
-    throw new Error(`Hermes CLI 退出码 ${res.code}${text ? `：${truncate(text, 300)}` : ''}`);
+    throw new Error(describeHermesExit(res.code, text, home));
   }
   if (!text) throw new Error('Hermes CLI 未返回任何内容');
   return {
@@ -689,6 +717,8 @@ module.exports = {
   extractOpencodeText,
   stripAnsi,
   hermesProfileHome,
+  hermesHomeProblem,
+  describeHermesExit,
   defaultHermesHome,
   defaultHermesExe,
   defaultOpencodeExe,

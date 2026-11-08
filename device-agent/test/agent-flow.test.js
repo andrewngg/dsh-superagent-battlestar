@@ -54,6 +54,7 @@ function createAgent(hub, stateDir, options = {}) {
     pollWaitMs: 120,
     logger: createSilentLogger(),
     env: {},
+    relaunch: options.relaunch,
     config: {
       executor: { type: 'simulate', simulate },
       ...(options.config || {}),
@@ -113,6 +114,122 @@ test('全链路：注册 → 心跳 → 领命令 → ack → progress → resul
       },
       { timeoutMs: 4000, label: '心跳负载回落' },
     );
+  } finally {
+    await agent.stop({ unregister: true });
+    await hub.close();
+    await fsp.rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test('长任务执行期间持续发送 keepalive，结束后停止', async () => {
+  const hub = new MockHub();
+  await hub.listen();
+  const stateDir = await makeTempDir();
+  const agent = createAgent(hub, stateDir, {
+    simulate: { minDurationMs: 500, maxDurationMs: 600, minSteps: 3, maxSteps: 3 },
+    config: { taskKeepaliveMs: 60 },
+  });
+  try {
+    const device = await agent.start();
+    hub.pushCommand(device.id, makeRunCommand('task_keepalive01', { timeoutSec: 30 }));
+
+    const keepalive = await hub.waitFor(
+      () => hub.records.progresses.find((item) => item.body && item.body.keepalive === true),
+      { timeoutMs: 5000, label: 'keepalive 进度' },
+    );
+    assert.equal(keepalive.taskId, 'task_keepalive01');
+
+    const result = await hub.waitFor(() => hub.findResult('task_keepalive01'), {
+      timeoutMs: 10000,
+      label: '任务结果',
+    });
+    assert.equal(result.body.ok, true);
+
+    // 任务结束后不应再有 keepalive
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const countAfterDone = hub.records.progresses.filter((item) => item.body && item.body.keepalive === true).length;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.equal(
+      hub.records.progresses.filter((item) => item.body && item.body.keepalive === true).length,
+      countAfterDone,
+      '任务结束后应停止 keepalive',
+    );
+  } finally {
+    await agent.stop({ unregister: true });
+    await hub.close();
+    await fsp.rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test('restart_agent 命令：设备满载时也立即重启并优雅退出', async () => {
+  const hub = new MockHub();
+  await hub.listen();
+  const stateDir = await makeTempDir();
+  const relaunched = [];
+  const agent = createAgent(hub, stateDir, {
+    simulate: { minDurationMs: 5000, maxDurationMs: 6000, minSteps: 2, maxSteps: 2 },
+    relaunch: (reason) => {
+      relaunched.push(reason);
+      return { on() {}, unref() {} };
+    },
+  });
+  try {
+    const device = await agent.start();
+    // 先把并发槽位占满，确认重启指令不会被并发上限卡住
+    hub.pushCommand(device.id, makeRunCommand('task_restart_a', { timeoutSec: 60 }));
+    hub.pushCommand(device.id, makeRunCommand('task_restart_b', { timeoutSec: 60 }));
+    await hub.waitFor(
+      () => hub.records.acks.filter((ack) => ack.taskId.startsWith('task_restart_')).length >= 2,
+      { timeoutMs: 8000, label: '任务占满并发' },
+    );
+
+    hub.pushCommand(device.id, {
+      id: 'cmd_restart_agent',
+      type: 'restart_agent',
+      createdAt: new Date().toISOString(),
+      payload: { reason: 'test' },
+    });
+    await hub.waitFor(() => relaunched.length > 0, { timeoutMs: 5000, label: '重启指令触发' });
+    assert.deepEqual(relaunched, ['test']);
+    await agent.waitUntilStopped();
+    assert.equal(agent.stopped, true, '收到重启指令后当前代理应优雅退出');
+  } finally {
+    await agent.stop({ unregister: true });
+    await hub.close();
+    await fsp.rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test('满载时 cancel 指令仍立即生效（不排队等空位）', async () => {
+  const hub = new MockHub();
+  await hub.listen();
+  const stateDir = await makeTempDir();
+  const agent = createAgent(hub, stateDir, {
+    manifest: { ...TEST_MANIFEST, limits: { maxConcurrentTasks: 1 } },
+    simulate: { minDurationMs: 5000, maxDurationMs: 6000, minSteps: 2, maxSteps: 2 },
+  });
+  try {
+    const device = await agent.start();
+    hub.pushCommand(device.id, makeRunCommand('task_cancel_prio_a', { timeoutSec: 60 }));
+    await hub.waitFor(
+      () => hub.records.acks.some((ack) => ack.taskId === 'task_cancel_prio_a'),
+      { timeoutMs: 5000, label: '任务 A ack' },
+    );
+    // 并发已满：B 在队列里排队，此时 A 的取消指令不应被 B 挡住
+    hub.pushCommand(device.id, makeRunCommand('task_cancel_prio_b', { timeoutSec: 60 }));
+    hub.pushCommand(device.id, {
+      id: 'cmd_cancel_prio',
+      type: 'cancel_task',
+      taskId: 'task_cancel_prio_a',
+      createdAt: new Date().toISOString(),
+      payload: { taskId: 'task_cancel_prio_a' },
+    });
+    const result = await hub.waitFor(() => hub.findResult('task_cancel_prio_a'), {
+      timeoutMs: 3000,
+      label: '任务 A 取消结果',
+    });
+    assert.equal(result.body.ok, false);
+    assert.equal(result.body.error, 'cancelled');
   } finally {
     await agent.stop({ unregister: true });
     await hub.close();

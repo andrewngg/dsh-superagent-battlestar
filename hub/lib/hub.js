@@ -12,6 +12,24 @@ const { createHttpServer } = require('./http');
 const { StateStore } = require('./store');
 const { badRequest, notFound, conflict } = require('./errors');
 const { createPlan } = require('./planner');
+const { writeTaskRecord, writeTaskIndex } = require('./task-record');
+const {
+  DEFAULT_SETTINGS,
+  SUPPORTED_LANGUAGES,
+  assertLanguage,
+  mergeSettings,
+  readSettings,
+  writeSettings,
+} = require('./settings');
+const {
+  GOAL_STATUS_SET,
+  MAX_CHECKS,
+  buildGoalCheckInstruction,
+  computeNextCheckAt,
+  goalToJson,
+  normalizeGoalRequest,
+  restoreGoal,
+} = require('./goals');
 const util = require('./util');
 
 const { LIMITS, TASK_STATUS } = protocol;
@@ -69,6 +87,13 @@ class Hub {
       3600 * 1000,
     );
     this.ackTimeoutMs = util.clampInt(options.ackTimeoutMs, LIMITS.ASSIGN_ACK_TIMEOUT_MS, 20, 3600 * 1000);
+    // 任务运行超时后，在 maxAttempts 内自动重新排队（无需人工点「重试」）。
+    this.autoRetryOnTimeout = options.autoRetryOnTimeout !== false;
+    // 系统自重启：先通知设备代理重启，留出心跳/长轮询窗口后再重启 Hub 自身。
+    this.restartDelayMs = util.clampInt(options.restartDelayMs, 12000, 0, 60000);
+    this.restartHandler = typeof options.restartHandler === 'function' ? options.restartHandler : null;
+    this.gracefulRestart = options.gracefulRestart === true;
+    this._restarting = false;
     // 仅测试使用：把所有任务的实际执行超时固定为该毫秒数（协议允许的 timeoutSec 最小 30s）
     this.timeoutOverrideMs =
       Number.isFinite(options.timeoutOverrideMs) && options.timeoutOverrideMs > 0
@@ -89,6 +114,23 @@ class Hub {
     this.taskEventLimit = util.clampInt(options.taskEventLimit, 100, 10, 500);
     this.silent = options.silent === true;
     this.maxCommandsPerDevice = 200;
+    // 任务执行记录（Markdown）：默认写到 <dataDir>/task-records，便于 backtrace；
+    // 真实入口 hub/server.js 会覆盖为仓库根目录的 task-records/（已 gitignore）。
+    this.recordDir = path.resolve(
+      typeof options.recordDir === 'string' && options.recordDir.trim()
+        ? options.recordDir
+        : path.join(this.dataDir, 'task-records'),
+    );
+    this.recordEnabled = options.recordEnabled !== false;
+    this._recordTimers = new Map();
+    this._recordIndexTimer = null;
+    this._recordWarned = false;
+    // 系统设置（目前只有系统默认语言）；持久化到 <dataDir>/settings.json。
+    this.settings = mergeSettings(DEFAULT_SETTINGS, options.settings || {});
+    // 长期目标：按计划自动创建跟进任务，goalTickMs 为调度扫描间隔。
+    this.goalTickMs = util.clampInt(options.goalTickMs, 30000, 1000, 3600 * 1000);
+    this.goals = new Map();
+    this._goalTimer = null;
 
     this.adminToken =
       util.str(options.adminToken, 300) || util.str(process.env.BUTLER_ADMIN_TOKEN, 300) || null;
@@ -138,6 +180,11 @@ class Hub {
           : util.generateToken('join');
     }
 
+    // 长期目标先于任务恢复：任务恢复时 _finishTask 可能回写目标检查结果。
+    for (const raw of util.arr(savedObj.goals)) {
+      const goal = restoreGoal(raw);
+      if (goal) this.goals.set(goal.id, goal);
+    }
     for (const raw of util.arr(savedObj.devices)) {
       const device = this._restoreDevice(raw);
       if (device) this.devices.set(device.id, device);
@@ -148,7 +195,20 @@ class Hub {
     }
     this.events = util.arr(savedObj.events).slice(-this.eventLimit);
 
-    // 重启语义：设备一律离线；assigned 重排（attempts 未超限），running 记 failed
+    // 系统设置：优先读取持久化文件；文件不存在时写入默认值（默认中文）。
+    const storedSettings = readSettings(this.dataDir);
+    this.settings = mergeSettings(this.settings, storedSettings || {});
+    if (!storedSettings) {
+      try {
+        writeSettings(this.dataDir, this.settings);
+      } catch {
+        /* 设置写入失败不阻塞启动 */
+      }
+    }
+
+    // 重启语义：设备一律离线；assigned 重排（attempts 未超限），running 记 failed。
+    // 例外：自重启（gracefulRestart）时运行中的任务自动重新排队，不占用重试次数，
+    // 设备代理也在同一轮重启，避免“改个代码就把正在跑的长任务全丢掉”。
     for (const task of [...this.tasks.values()]) {
       if (task.status === TASK_STATUS.ASSIGNED) {
         if (task.attempts < task.maxAttempts) {
@@ -165,22 +225,57 @@ class Hub {
             eventMessage: 'Hub 重启，任务失败',
           });
         }
-      } else if (task.status === TASK_STATUS.RUNNING) {
-        this._finishTask(task, TASK_STATUS.FAILED, {
-          error: 'hub restarted',
-          eventMessage: 'Hub 重启，运行中的任务失败',
-        });
+      } else if (task.status === TASK_STATUS.RUNNING || task.status === TASK_STATUS.WAITING) {
+        if (this.gracefulRestart && !task.isPlan) {
+          if (task.attempts > 0) task.attempts -= 1; // 自重启不算一次执行尝试
+          task.status = TASK_STATUS.QUEUED;
+          task.assignedDeviceId = null;
+          task.assignedDeviceName = null;
+          task.startedAt = null;
+          task.finishedAt = null;
+          task.output = null;
+          task.error = null;
+          task.updatedAt = protocol.nowIso();
+          task.route = { reason: 'hub self-restart; waiting for redispatch', candidates: [], excluded: [] };
+          this._pushTaskEvent(task, 'requeued', 'Hub 自重启，任务自动重新排队');
+          this.broadcast('task.updated', { task: this.taskToJson(task) });
+        } else if (task.isPlan) {
+          // 规划父任务没有设备指令，保持 running 等待子任务收尾（_reconcileParent 会重算结果）。
+          task.updatedAt = protocol.nowIso();
+        } else {
+          this._finishTask(task, TASK_STATUS.FAILED, {
+            error: 'hub restarted',
+            eventMessage: 'Hub 重启，运行中的任务失败',
+          });
+        }
       }
     }
+
+    // 目标恢复：清理已不存在的运行中检查任务，并补齐下一次跟进时间。
+    this._reconcileGoalsAfterRestore();
 
     this._sweepTimer = setInterval(() => this.sweepOffline(), this.sweepIntervalMs);
     if (this._sweepTimer.unref) this._sweepTimer.unref();
     this._pingTimer = setInterval(() => this._pingClients(), this.pingIntervalMs);
     if (this._pingTimer.unref) this._pingTimer.unref();
+    this._goalTimer = setInterval(() => this.runDueGoalChecks(), this.goalTickMs);
+    if (this._goalTimer.unref) this._goalTimer.unref();
+
+    // 兼容旧数据：历史规划子任务可能只有 60/90/180s 的超时，按新规则抬高（终态任务保持原样）。
+    for (const task of this.tasks.values()) {
+      const floor = this._planSubtaskTimeoutFloor(task);
+      if (!floor || TERMINAL_TASK_STATUSES.has(task.status) || task.timeoutSec >= floor) continue;
+      task.timeoutSec = floor;
+      task.updatedAt = protocol.nowIso();
+      this._pushTaskEvent(task, 'progress', `子任务超时兜底到 ${floor}s`);
+    }
 
     this.reconcilePlans();
     this.schedulePersist();
     this.retryQueuedTasks('startup');
+    // 启动时补写/刷新全部任务的执行记录（历史任务也能 backtrace）。
+    for (const task of this.tasks.values()) this._scheduleTaskRecord(task.id, 30);
+    this._scheduleRecordIndex(120);
     return this;
   }
 
@@ -225,8 +320,10 @@ class Hub {
     this._closed = true;
     if (this._sweepTimer) clearInterval(this._sweepTimer);
     if (this._pingTimer) clearInterval(this._pingTimer);
+    if (this._goalTimer) clearInterval(this._goalTimer);
     this._sweepTimer = null;
     this._pingTimer = null;
+    this._goalTimer = null;
 
     for (const timers of this._timers.values()) {
       if (timers.ack) clearTimeout(timers.ack);
@@ -242,6 +339,9 @@ class Hub {
       }
     }
     this.sseClients.clear();
+
+    // 落盘所有待写的任务执行记录（Markdown），保证正常关闭/自重启前记录不丢。
+    this.flushTaskRecords();
 
     for (const device of this.devices.values()) {
       for (const waiter of device.waiters.splice(0)) {
@@ -312,6 +412,7 @@ class Hub {
         ...this.taskToJson(task),
         attachments: (task.attachments || []).map((file) => ({ ...file })),
       })),
+      goals: [...this.goals.values()].map((goal) => goalToJson(goal)),
       events: this.events.slice(-this.eventLimit),
     };
   }
@@ -393,6 +494,7 @@ class Hub {
       ),
       output: raw.output === undefined ? null : raw.output,
       error: typeof raw.error === 'string' ? raw.error : null,
+      autoRetry: raw.autoRetry !== false,
       progress: util.isPlainObject(raw.progress) ? raw.progress : null,
       route,
       events: util
@@ -405,6 +507,7 @@ class Hub {
       replyToTaskId: util.str(raw.replyToTaskId, 80) || null,
       threadStep: util.clampInt(raw.threadStep, 1, 1, 10000),
       context: util.isPlainObject(raw.context) ? raw.context : null,
+      goalId: util.str(raw.goalId, 80) || null,
       attachments: util.arr(raw.attachments).filter((file) => util.isPlainObject(file) && file.name && file.data),
       isPlan: raw.isPlan === true,
       archived: raw.archived === true,
@@ -453,6 +556,7 @@ class Hub {
       timeoutSec: task.timeoutSec,
       output: task.output,
       error: task.error,
+      autoRetry: task.autoRetry !== false,
       progress: task.progress ? { ...task.progress } : null,
       parentTaskId: task.parentTaskId || null,
       childTaskIds: [...(task.childTaskIds || [])],
@@ -467,6 +571,7 @@ class Hub {
         size: file.size,
       })),
       isPlan: Boolean(task.isPlan),
+      goalId: task.goalId || null,
       archived: Boolean(task.archived),
       archivedAt: task.archivedAt || null,
       route: {
@@ -518,11 +623,273 @@ class Hub {
       .map((task) => this.taskToJson(task));
     return {
       server: { version: this.version, uptimeSec: this.uptimeSec, hubTime: protocol.nowIso() },
+      settings: this.getSettings(),
       stats: this.stats(),
       devices,
       tasks,
+      goals: this.listGoals(),
       events: this.events.slice(-safeLimit).map((event) => ({ ...event })),
     };
+  }
+
+  // ---------------------------------------------------------------- 系统设置
+
+  getSettings() {
+    return { ...this.settings };
+  }
+
+  /**
+   * 更新系统设置（目前只有 language）。
+   * @param {{language?: string}} patch
+   * @returns {{language:string}}
+   */
+  updateSettings(patch = {}) {
+    const input = util.isPlainObject(patch) ? patch : {};
+    const next = { ...this.settings };
+    if (input.language !== undefined) {
+      try {
+        next.language = assertLanguage(input.language);
+      } catch (err) {
+        throw badRequest(err.message);
+      }
+    }
+    const changed = JSON.stringify(next) !== JSON.stringify(this.settings);
+    if (!changed) return this.getSettings();
+    this.settings = next;
+    try {
+      writeSettings(this.dataDir, this.settings);
+    } catch (err) {
+      this.log('warn', `系统设置写入失败：${err && err.message ? err.message : err}`);
+    }
+    this.broadcast('settings.updated', { settings: this.getSettings(), at: protocol.nowIso() });
+    this.log('info', `系统设置更新：language=${this.settings.language}`);
+    this.schedulePersist();
+    return this.getSettings();
+  }
+
+  getSupportedLanguages() {
+    return [...SUPPORTED_LANGUAGES];
+  }
+
+  // ---------------------------------------------------------------- 长期目标
+
+  _requireGoal(goalId) {
+    const id = util.str(goalId, 80);
+    const goal = id ? this.goals.get(id) : null;
+    if (!goal) throw notFound('长期目标不存在');
+    return goal;
+  }
+
+  /** 列出长期目标（active 在前，其余按创建时间倒序）。 */
+  listGoals(filter = {}) {
+    const status = util.isPlainObject(filter) ? util.str(filter.status, 40) : '';
+    const goals = [...this.goals.values()]
+      .filter((goal) => !status || goal.status === status)
+      .sort((a, b) => {
+        const activeRank = (goal) => (goal.status === 'active' ? 0 : 1);
+        const byStatus = activeRank(a) - activeRank(b);
+        if (byStatus) return byStatus;
+        return String(b.createdAt).localeCompare(String(a.createdAt));
+      });
+    return goals.map((goal) => goalToJson(goal));
+  }
+
+  getGoal(goalId) {
+    return goalToJson(this._requireGoal(goalId));
+  }
+
+  createGoal(input) {
+    const normalized = normalizeGoalRequest(input, { partial: false });
+    if (!normalized.ok) throw badRequest(normalized.errors.join('；'));
+    const value = normalized.value;
+    const now = protocol.nowIso();
+    const status = value.status === 'paused' ? 'paused' : 'active';
+    const goal = {
+      id: protocol.randomId('goal'),
+      title: value.title,
+      description: value.description || '',
+      status,
+      schedule: value.schedule,
+      requirements: value.requirements || null,
+      nextCheckAt: status === 'active' ? computeNextCheckAt(value.schedule) : null,
+      lastCheckAt: null,
+      lastCheckStatus: null,
+      lastSummary: '',
+      lastTaskId: null,
+      runningTaskId: null,
+      taskIds: [],
+      checks: [],
+      createdAt: now,
+      updatedAt: now,
+      stoppedAt: null,
+    };
+    this.goals.set(goal.id, goal);
+    this.broadcast('goal.created', { goal: goalToJson(goal), at: now });
+    this.log('info', `长期目标创建：${goal.id}「${util.truncate(goal.title, 40)}」`);
+    this.schedulePersist();
+    return goal;
+  }
+
+  updateGoal(goalId, patch) {
+    const goal = this._requireGoal(goalId);
+    const normalized = normalizeGoalRequest(patch, { partial: true, base: goal });
+    if (!normalized.ok) throw badRequest(normalized.errors.join('；'));
+    const value = normalized.value;
+    const now = protocol.nowIso();
+    const previousStatus = goal.status;
+    if (value.title !== undefined) goal.title = value.title;
+    if (value.description !== undefined) goal.description = value.description;
+    if (value.requirements !== undefined) goal.requirements = value.requirements;
+    let scheduleChanged = false;
+    if (value.schedule !== undefined && JSON.stringify(value.schedule) !== JSON.stringify(goal.schedule)) {
+      goal.schedule = value.schedule;
+      scheduleChanged = true;
+    }
+    if (value.status !== undefined) {
+      goal.status = value.status;
+      if (value.status === 'active') {
+        // 暂停/停止后恢复：从现在开始重新计算，不补跑错过的检查。
+        goal.nextCheckAt = computeNextCheckAt(goal.schedule);
+        goal.stoppedAt = null;
+      } else {
+        goal.nextCheckAt = null;
+        goal.stoppedAt = value.status === 'stopped' || value.status === 'completed' ? now : goal.stoppedAt;
+      }
+    } else if (scheduleChanged && goal.status === 'active') {
+      goal.nextCheckAt = computeNextCheckAt(goal.schedule);
+    }
+    goal.updatedAt = now;
+    this.broadcast('goal.updated', { goal: goalToJson(goal), at: now });
+    if (previousStatus !== goal.status) this.log('info', `长期目标状态：${goal.id} ${previousStatus} → ${goal.status}`);
+    else this.log('info', `长期目标更新：${goal.id}`);
+    this.schedulePersist();
+    return goal;
+  }
+
+  deleteGoal(goalId) {
+    const goal = this._requireGoal(goalId);
+    this.goals.delete(goal.id);
+    const now = protocol.nowIso();
+    this.broadcast('goal.deleted', { goalId: goal.id, at: now });
+    this.log('info', `长期目标删除：${goal.id}`);
+    this.schedulePersist();
+    return goal;
+  }
+
+  /**
+   * 创建一次目标跟进任务（立即跟进或定时触发）。
+   * @param {string} goalId
+   * @param {{manual?: boolean}} [options]
+   * @returns {{goal: object, task: object}}
+   */
+  requestGoalCheck(goalId, options = {}) {
+    const goal = this._requireGoal(goalId);
+    if (goal.status === 'stopped') throw conflict('目标已停止，无法继续跟进');
+    if (goal.status === 'completed') throw conflict('目标已完成，无需继续跟进');
+    if (goal.runningTaskId) {
+      const running = this.tasks.get(goal.runningTaskId);
+      if (running && !TERMINAL_TASK_STATUSES.has(running.status)) {
+        throw conflict('该目标已有跟进任务正在执行，请稍后再试');
+      }
+      goal.runningTaskId = null;
+    }
+    const manual = options.manual !== false;
+    const task = this.createTask({
+      instruction: buildGoalCheckInstruction(goal),
+      requirements: goal.requirements || {},
+      priority: manual ? 7 : 4,
+      timeoutSec: 600,
+      maxAttempts: 2,
+      autoRetry: true,
+      goalId: goal.id,
+      context: {
+        goalId: goal.id,
+        goalCheck: true,
+        goalTitle: goal.title,
+        trigger: manual ? 'manual' : 'schedule',
+      },
+    });
+    const now = protocol.nowIso();
+    goal.runningTaskId = task.id;
+    goal.taskIds.push(task.id);
+    if (goal.taskIds.length > 50) goal.taskIds.splice(0, goal.taskIds.length - 50);
+    goal.updatedAt = now;
+    this.broadcast('goal.updated', { goal: goalToJson(goal), at: now });
+    this.log('info', `长期目标跟进任务：${goal.id} → ${task.id}（${manual ? '手动' : '定时'}）`);
+    this.schedulePersist();
+    return { goal, task };
+  }
+
+  /** 调度器：扫描到点的 active 目标并创建跟进任务；返回本次触发的目标 id。 */
+  runDueGoalChecks(now = Date.now()) {
+    if (this._closed) return [];
+    const timestamp = Number.isFinite(Number(now)) ? Number(now) : Date.now();
+    const triggered = [];
+    for (const goal of [...this.goals.values()]) {
+      if (goal.status !== 'active' || !goal.nextCheckAt) continue;
+      const due = Date.parse(goal.nextCheckAt);
+      if (!Number.isFinite(due) || due > timestamp) continue;
+      if (goal.runningTaskId) {
+        const running = this.tasks.get(goal.runningTaskId);
+        if (running && !TERMINAL_TASK_STATUSES.has(running.status)) continue;
+        goal.runningTaskId = null;
+      }
+      try {
+        this.requestGoalCheck(goal.id, { manual: false });
+        triggered.push(goal.id);
+      } catch (err) {
+        this.log('warn', `长期目标自动跟进失败：${goal.id}：${err && err.message ? err.message : err}`);
+      }
+    }
+    return triggered;
+  }
+
+  _reconcileGoalsAfterRestore() {
+    for (const goal of this.goals.values()) {
+      if (goal.status === 'active') {
+        if (goal.runningTaskId) {
+          const task = this.tasks.get(goal.runningTaskId);
+          if (!task || TERMINAL_TASK_STATUSES.has(task.status)) goal.runningTaskId = null;
+        }
+        if (!goal.nextCheckAt) goal.nextCheckAt = computeNextCheckAt(goal.schedule);
+      } else {
+        goal.nextCheckAt = null;
+      }
+    }
+  }
+
+  /** 目标跟进任务结束时回写检查结果与建议。 */
+  _goalTaskFinished(task) {
+    if (!task || !task.goalId) return;
+    const goal = this.goals.get(task.goalId);
+    if (!goal) return;
+    if (goal.runningTaskId && goal.runningTaskId !== task.id) return;
+    const output = util.isPlainObject(task.output) ? task.output : null;
+    const summary = util.str(
+      (output && (output.text || output.markdown)) || (task.error ? `执行失败：${task.error}` : ''),
+      4000,
+    );
+    const at = task.finishedAt || protocol.nowIso();
+    goal.checks.push({
+      at,
+      taskId: task.id,
+      status: task.status,
+      summary,
+      error: task.error || null,
+    });
+    if (goal.checks.length > MAX_CHECKS) goal.checks.splice(0, goal.checks.length - MAX_CHECKS);
+    goal.runningTaskId = null;
+    goal.lastCheckAt = at;
+    goal.lastCheckStatus = task.status;
+    goal.lastTaskId = task.id;
+    goal.lastSummary = summary;
+    if (goal.status === 'active') {
+      goal.nextCheckAt = computeNextCheckAt(goal.schedule, Date.now());
+    }
+    goal.updatedAt = protocol.nowIso();
+    this.broadcast('goal.updated', { goal: goalToJson(goal), at: goal.updatedAt });
+    this.log('info', `长期目标检查完成：${goal.id}（${task.status}）`);
+    this.schedulePersist();
   }
 
   // ---------------------------------------------------------------- 事件 / 日志
@@ -572,6 +939,82 @@ class Hub {
     if (task.events.length > this.taskEventLimit) {
       task.events.splice(0, task.events.length - this.taskEventLimit);
     }
+    this._scheduleTaskRecord(task.id);
+  }
+
+  // ------------------------------------------------- 任务执行记录（Markdown backtrace）
+
+  /**
+   * 合并短时间内的多次变更，延迟写单个任务的 md（避免进度事件刷盘）。
+   * @param {string} taskId
+   * @param {number} [delayMs]
+   */
+  _scheduleTaskRecord(taskId, delayMs = 400) {
+    if (!this.recordEnabled || !taskId) return;
+    const existing = this._recordTimers.get(taskId);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      this._recordTimers.delete(taskId);
+      this._writeTaskRecord(taskId);
+    }, Math.max(0, delayMs));
+    if (timer.unref) timer.unref();
+    this._recordTimers.set(taskId, timer);
+  }
+
+  _writeTaskRecord(taskId) {
+    if (!this.recordEnabled) return;
+    const task = this.tasks.get(taskId);
+    if (!task) return;
+    try {
+      writeTaskRecord(this.recordDir, task, {
+        allTasks: [...this.tasks.values()],
+        hubEvents: this.events,
+      });
+      this._scheduleRecordIndex();
+    } catch (err) {
+      if (!this._recordWarned) {
+        this._recordWarned = true;
+        this.log('warn', `任务执行记录写入失败（${this.recordDir}）：${err && err.message ? err.message : err}`);
+      }
+    }
+  }
+
+  _scheduleRecordIndex(delayMs = 800) {
+    if (!this.recordEnabled) return;
+    if (this._recordIndexTimer) clearTimeout(this._recordIndexTimer);
+    const timer = setTimeout(() => {
+      this._recordIndexTimer = null;
+      this._writeRecordIndex();
+    }, Math.max(0, delayMs));
+    if (timer.unref) timer.unref();
+    this._recordIndexTimer = timer;
+  }
+
+  _writeRecordIndex() {
+    if (!this.recordEnabled) return;
+    try {
+      writeTaskIndex(this.recordDir, [...this.tasks.values()]);
+    } catch (err) {
+      if (!this._recordWarned) {
+        this._recordWarned = true;
+        this.log('warn', `任务记录索引写入失败（${this.recordDir}）：${err && err.message ? err.message : err}`);
+      }
+    }
+  }
+
+  /** 立即落盘所有待写记录（close / 自重启前调用）。 */
+  flushTaskRecords() {
+    if (!this.recordEnabled) return;
+    for (const [taskId, timer] of this._recordTimers) {
+      clearTimeout(timer);
+      this._recordTimers.delete(taskId);
+      this._writeTaskRecord(taskId);
+    }
+    if (this._recordIndexTimer) {
+      clearTimeout(this._recordIndexTimer);
+      this._recordIndexTimer = null;
+    }
+    this._writeRecordIndex();
   }
 
   attachSse(req, res) {
@@ -939,6 +1382,7 @@ class Hub {
       timeoutSec: value.timeoutSec,
       output: null,
       error: null,
+      autoRetry: input.autoRetry !== false,
       progress: null,
       parentTaskId: input.parentTaskId ? String(input.parentTaskId) : null,
       childTaskIds: [],
@@ -946,6 +1390,7 @@ class Hub {
       replyToTaskId: typeof input.replyToTaskId === 'string' && input.replyToTaskId ? input.replyToTaskId : null,
       threadStep: Number.isFinite(Number(input.threadStep)) ? Math.max(1, Math.trunc(Number(input.threadStep))) : 1,
       context: util.isPlainObject(input.context) ? input.context : null,
+      goalId: typeof input.goalId === 'string' && input.goalId ? input.goalId : null,
       attachments: Array.isArray(input.attachments) ? input.attachments : [],
       isPlan: false,
       archived: false,
@@ -954,9 +1399,13 @@ class Hub {
       events: [{ at: now, type: 'created', message: '任务已创建' }],
       _avoidDeviceIds: [],
     };
+    // 规划子任务兜底：太短的 timeoutSec（如 60/90/180s）会让长任务必然超时。
+    const planFloor = this._planSubtaskTimeoutFloor(task);
+    if (planFloor) task.timeoutSec = Math.max(task.timeoutSec, planFloor);
     this.tasks.set(task.id, task);
     this.broadcast('task.created', { task: this.taskToJson(task) });
     this.log('info', `任务创建：${task.id}「${util.truncate(task.instruction, 40)}」`);
+    this._scheduleTaskRecord(task.id, 0);
     this.routeTask(task);
     this.schedulePersist();
     return task;
@@ -1092,12 +1541,14 @@ class Hub {
     this.tasks.set(parent.id, parent);
     this.broadcast('task.created', { task: this.taskToJson(parent) });
     this.log('info', `Agnes 拆分任务：${parent.id} → ${plan.subtasks.length} 个子任务`);
+    // 子任务超时不超过父任务预算；过短的值由 createTask 里的 _planSubtaskTimeoutFloor 兜底。
+    const planTimeoutSec = Math.max(LIMITS.MIN_TASK_TIMEOUT_SEC, value.timeoutSec);
     for (const subtask of plan.subtasks) {
       const child = this.createTask({
         instruction: subtask.instruction,
         requirements: value.requirements,
         priority: parent.priority,
-        timeoutSec: subtask.timeoutSec,
+        timeoutSec: Math.min(planTimeoutSec, subtask.timeoutSec),
         maxAttempts: parent.maxAttempts,
         parentTaskId: parent.id,
         threadId: parent.threadId,
@@ -1108,6 +1559,7 @@ class Hub {
     }
     parent.updatedAt = protocol.nowIso();
     this.broadcast('task.updated', { task: this.taskToJson(parent) });
+    this._scheduleTaskRecord(parent.id, 0);
     this.schedulePersist();
     return parent;
   }
@@ -1141,6 +1593,7 @@ class Hub {
         at: parent.updatedAt,
       };
       this.broadcast('task.updated', { task: this.taskToJson(parent) });
+      this._scheduleTaskRecord(parent.id);
       this.schedulePersist();
       return;
     }
@@ -1155,6 +1608,7 @@ class Hub {
     this.broadcast(parent.status === TASK_STATUS.COMPLETED ? 'task.completed' : 'task.failed', {
       task: this.taskToJson(parent),
     });
+    this._scheduleTaskRecord(parent.id);
     this.schedulePersist();
   }
 
@@ -1317,10 +1771,7 @@ class Hub {
       if (task.status !== TASK_STATUS.ASSIGNED || task.assignedDeviceId !== device.id) return;
       this._dispatchFailure(task, device, 'ack timeout');
     }, this.ackTimeoutMs);
-    this._setTaskTimer(task.id, 'timeout', () => {
-      if (task.status !== TASK_STATUS.ASSIGNED && task.status !== TASK_STATUS.RUNNING && task.status !== TASK_STATUS.WAITING) return;
-      this._timeoutTask(task);
-    }, this._timeoutMsFor(task));
+    this._refreshTaskTimeout(task);
     this.broadcast('task.updated', { task: this.taskToJson(task) });
     this.log('info', `任务派发：${task.id} → ${device.name}（score ${pickedCandidate.score}）`);
     this.schedulePersist();
@@ -1377,6 +1828,38 @@ class Hub {
 
   _timeoutMsFor(task) {
     return this.timeoutOverrideMs != null ? this.timeoutOverrideMs : Math.max(1000, task.timeoutSec * 1000);
+  }
+
+  /**
+   * 规划子任务的最小超时：300s，但不超过父任务的超时预算；非规划子任务返回 0。
+   * 规划器（Agnes）常把网页检索类子任务给到 60~180s，会导致必然超时。
+   */
+  _planSubtaskTimeoutFloor(task) {
+    if (!task || !task.parentTaskId) return 0;
+    const parent = this.tasks.get(task.parentTaskId);
+    const parentBudget =
+      parent && Number.isFinite(Number(parent.timeoutSec))
+        ? Math.max(LIMITS.MIN_TASK_TIMEOUT_SEC, Number(parent.timeoutSec))
+        : LIMITS.MAX_TASK_TIMEOUT_SEC;
+    return Math.min(300, parentBudget);
+  }
+
+  /**
+   * 重置任务运行计时器（超时窗口从“最后一次设备活动”开始算）。
+   * 设备在执行期间会周期性发 progress keepalive，只要设备还活着就会续期；
+   * 真正卡死/失联的任务仍会在 timeoutSec 的静默窗口后超时，不会被无限续命。
+   */
+  _refreshTaskTimeout(task) {
+    if (!task || !ACTIVE_TASK_STATUSES.has(task.status)) return;
+    this._setTaskTimer(
+      task.id,
+      'timeout',
+      () => {
+        if (!ACTIVE_TASK_STATUSES.has(task.status)) return;
+        this._timeoutTask(task);
+      },
+      this._timeoutMsFor(task),
+    );
   }
 
   _setTaskTimer(taskId, name, fn, ms) {
@@ -1448,8 +1931,41 @@ class Hub {
   }
 
   _timeoutTask(task) {
+    if (!ACTIVE_TASK_STATUSES.has(task.status)) return;
     const device = task.assignedDeviceId ? this.devices.get(task.assignedDeviceId) : null;
     if (device) this._removeTaskCommand(device, task.id);
+
+    // 运行超时先自动重试：如果设备还在但任务卡住了（或旧数据超时过短），
+    // 在 maxAttempts 预算内重新排队，不需要人工点「重试」。终态仍保留 timeout 供排查。
+    const canAutoRetry =
+      this.autoRetryOnTimeout && task.autoRetry !== false && task.attempts < task.maxAttempts;
+    if (canAutoRetry) {
+      const wasActive = task.status === TASK_STATUS.RUNNING || task.status === TASK_STATUS.WAITING;
+      if (wasActive) this._adjustLoad(device ? device.id : null, -1);
+      if (device) this.enqueueCommand(device, this._buildCancelCommand(task, 'timeout'));
+      this._clearTaskTimers(task.id);
+      task.status = TASK_STATUS.QUEUED;
+      task.assignedDeviceId = null;
+      task.assignedDeviceName = null;
+      task.startedAt = null;
+      task.finishedAt = null;
+      task.output = null;
+      task.error = null;
+      task.progress = null;
+      task.updatedAt = protocol.nowIso();
+      task.route = { reason: '任务超时，自动重试', candidates: [], excluded: [] };
+      this._pushTaskEvent(
+        task,
+        'retry',
+        `运行超时（${task.timeoutSec}s），自动重试（${task.attempts}/${task.maxAttempts}）`,
+      );
+      this.broadcast('task.updated', { task: this.taskToJson(task) });
+      this.log('warn', `任务超时自动重试：${task.id}（${task.attempts}/${task.maxAttempts}）`);
+      this.schedulePersist();
+      this.routeTask(task);
+      return;
+    }
+
     this._finishTask(task, TASK_STATUS.TIMEOUT, {
       output: null,
       error: `任务执行超时（${task.timeoutSec}s）`,
@@ -1483,7 +1999,11 @@ class Hub {
       `${TASK_MESSAGES[status] || `状态 ${status}`}：${task.id}`,
     );
     this._updateParentTask(task);
+    // 长期目标的跟进任务结束后，把结果回写到目标（进度/建议/下次跟进）。
+    this._goalTaskFinished(task);
     this.schedulePersist();
+    // 任务结束腾出了设备槽位：立刻消化排队任务，否则因并发已满而重排队的任务可能一直滞留。
+    if (wasActive) this.retryQueuedTasks('device slot free');
     return task;
   }
 
@@ -1496,10 +2016,7 @@ class Hub {
       task.startedAt = task.startedAt || protocol.nowIso();
       task.updatedAt = protocol.nowIso();
       this._adjustLoad(device.id, 1);
-      this._setTaskTimer(task.id, 'timeout', () => {
-        if (task.status !== TASK_STATUS.RUNNING) return;
-        this._timeoutTask(task);
-      }, this._timeoutMsFor(task));
+      this._refreshTaskTimeout(task);
       this._pushTaskEvent(task, 'ack', '设备已确认任务');
       this.broadcast('task.updated', { task: this.taskToJson(task) });
       this.schedulePersist();
@@ -1556,6 +2073,12 @@ class Hub {
     if (task.assignedDeviceId !== device.id) throw conflict('任务未分配给该设备');
     if (!ACTIVE_TASK_STATUSES.has(task.status)) throw conflict(`任务状态 ${task.status} 不接受进度`);
     const input = util.isPlainObject(body) ? body : {};
+    if (input.keepalive === true) {
+      // 设备仍在执行：只续期超时计时器，不写进度/事件，避免刷屏和频繁持久化。
+      task.updatedAt = protocol.nowIso();
+      this._refreshTaskTimeout(task);
+      return task;
+    }
     const message = util.str(input.message, 500);
     const waiting = input.waiting === true;
     if (waiting) task.status = TASK_STATUS.WAITING;
@@ -1645,6 +2168,9 @@ class Hub {
     task.progress = null;
     task.route = { reason: '等待重新路由', candidates: [], excluded: [] };
     task._avoidDeviceIds = [];
+    // 重试旧规划子任务时同样兜底，否则 60/90/180s 的旧值会立刻再次超时。
+    const planFloor = this._planSubtaskTimeoutFloor(task);
+    if (planFloor) task.timeoutSec = Math.max(task.timeoutSec, planFloor);
     task.updatedAt = protocol.nowIso();
     this._pushTaskEvent(task, 'retried', '任务重新提交');
     this.broadcast('task.updated', { task: this.taskToJson(task) });
@@ -1652,6 +2178,51 @@ class Hub {
     this.routeTask(task);
     this.schedulePersist();
     return task;
+  }
+
+  /**
+   * 整套系统自重启（Hub + 在线设备代理）。
+   *
+   * 流程：给在线设备下发 restart_agent → 广播 system.restarting →
+   * 等待 restartDelayMs（覆盖设备心跳周期）后调用 restartHandler 重启 Hub 进程。
+   * 设备在收到 restart_agent 后会自己拉起新进程；Hub 由 server.js 注入的 handler 重启。
+   *
+   * @param {string} [reason] 重启原因，仅用于日志/事件
+   * @returns {{restarting:boolean, alreadyRequested:boolean, devices:number, delayMs:number}}
+   */
+  requestRestart(reason = 'manual') {
+    if (this._restarting) {
+      return { restarting: true, alreadyRequested: true, devices: 0, delayMs: this.restartDelayMs };
+    }
+    if (!this.restartHandler) {
+      throw conflict('当前 Hub 未启用自重启（未配置 restartHandler）');
+    }
+    this._restarting = true;
+    const at = protocol.nowIso();
+    let devices = 0;
+    for (const device of this.devices.values()) {
+      if (!device.online) continue;
+      devices += 1;
+      this.enqueueCommand(device, {
+        id: protocol.randomId('cmd'),
+        type: 'restart_agent',
+        createdAt: at,
+        payload: { reason },
+      });
+    }
+    this.broadcast('system.restarting', { reason, devices, delayMs: this.restartDelayMs, at });
+    this.log('warn', `系统自重启（${reason}）：已通知 ${devices} 台在线设备，${this.restartDelayMs}ms 后重启 Hub`);
+    this.schedulePersist();
+    const timer = setTimeout(() => {
+      Promise.resolve()
+        .then(() => this.restartHandler(reason))
+        .catch((err) => {
+          this._restarting = false;
+          this.log('error', `自重启失败：${err && err.message ? err.message : err}`);
+        });
+    }, this.restartDelayMs);
+    if (timer.unref) timer.unref();
+    return { restarting: true, alreadyRequested: false, devices, delayMs: this.restartDelayMs };
   }
 
   // ---------------------------------------------------------------- 持久化

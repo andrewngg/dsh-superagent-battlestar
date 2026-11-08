@@ -15,6 +15,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { spawn } = require('node:child_process');
 
 const { createHub, startHub, Hub } = require('./lib/hub');
 
@@ -110,12 +111,57 @@ function printStartup(hub, version) {
     `  手机控制台  ${lan}/m?token=${token}`,
     `  本机控制台  http://127.0.0.1:${hub.port}/?token=${token}`,
     `  数据目录    ${hub.dataDir}`,
+    `  任务记录    ${hub.recordDir}（index.md + <日期>/<taskId>.md）`,
+    `  长期目标    ${hub.goals.size} 个（每 ${Math.round(hub.goalTickMs / 1000)}s 扫描，POST /api/goals）`,
+    `  自重启      ${typeof hub.restartHandler === 'function' ? '已启用（POST /api/system/restart）' : '未启用'}`,
   ];
+  if (process.env.BUTLER_RESTART === '1') {
+    lines.push(`  重启来源    ${process.env.BUTLER_RESTART_REASON || 'self-restart'}（已按自重启语义恢复任务）`);
+  }
   if (!fs.existsSync(path.join(hub.webDir, 'index.html'))) {
     lines.push('  提示        hub/web 静态前端尚未就绪，/ 与 /m 暂返回 404（API 不受影响）');
   }
   lines.push('  按 Ctrl+C 停止', '');
   console.log(lines.join('\n'));
+}
+
+/** 自重启时旧进程可能还没释放端口：带重试地监听，避免 successor 刚启动就 EADDRINUSE。 */
+async function startHubWithRetry(options, { attempts = 40, delayMs = 500 } = {}) {
+  let lastError = null;
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      return await startHub(options);
+    } catch (err) {
+      lastError = err;
+      if (!err || err.code !== 'EADDRINUSE') throw err;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw lastError;
+}
+
+/**
+ * 自重启：拉起一个脱离当前进程的新 Hub，然后优雅关闭当前进程。
+ * 新进程带 BUTLER_RESTART=1，Hub 初始化时会把“运行中”的任务自动重新排队。
+ */
+function relaunchHub(hub, reason) {
+  const args = process.argv.slice(1);
+  const env = {
+    ...process.env,
+    BUTLER_RESTART: '1',
+    BUTLER_RESTART_REASON: String(reason || 'manual').slice(0, 120),
+  };
+  console.log(`[hub] 自重启（${reason || 'manual'}）：正在拉起新进程…`);
+  const child = spawn(process.execPath, args, {
+    cwd: process.cwd(),
+    env,
+    detached: true,
+    stdio: ['ignore', 'inherit', 'inherit'],
+    windowsHide: true,
+  });
+  child.on('error', (err) => console.error('[hub] 自重启子进程错误：', err));
+  if (child.unref) child.unref();
+  return hub.close().then(() => process.exit(0));
 }
 
 async function main() {
@@ -143,18 +189,26 @@ async function main() {
   const dataDir = options.dataDir || process.env.BUTLER_DATA_DIR || path.join(__dirname, 'data');
   const webDir = options.webDir || path.join(__dirname, 'web');
 
+  const isSelfRestart = process.env.BUTLER_RESTART === '1';
   let hub;
+  const hubOptions = {
+    port,
+    host,
+    dataDir,
+    webDir,
+    version,
+    adminToken: options.adminToken || process.env.BUTLER_ADMIN_TOKEN,
+    joinCode: options.joinCode || process.env.BUTLER_JOIN_CODE,
+    ttlMs: options.ttlMs || Number(process.env.BUTLER_TTL_MS) || undefined,
+    restartDelayMs: Number(process.env.BUTLER_RESTART_DELAY_MS) || undefined,
+    // 长期目标调度扫描间隔（默认 30s；测试/调试可用 BUTLER_GOAL_TICK_MS 覆盖）。
+    goalTickMs: Number(process.env.BUTLER_GOAL_TICK_MS) || undefined,
+    gracefulRestart: isSelfRestart,
+    restartHandler: (reason) => relaunchHub(hub, reason),
+    recordDir: process.env.BUTLER_RECORD_DIR || path.join(__dirname, '..', 'task-records'),
+  };
   try {
-    hub = await startHub({
-      port,
-      host,
-      dataDir,
-      webDir,
-      version,
-      adminToken: options.adminToken || process.env.BUTLER_ADMIN_TOKEN,
-      joinCode: options.joinCode || process.env.BUTLER_JOIN_CODE,
-      ttlMs: options.ttlMs || Number(process.env.BUTLER_TTL_MS) || undefined,
-    });
+    hub = isSelfRestart ? await startHubWithRetry(hubOptions) : await startHub(hubOptions);
   } catch (err) {
     if (err && err.code === 'EADDRINUSE') {
       console.error(`[hub] 端口 ${port} 已被占用，请换一个端口（--port）或停止占用进程。`);

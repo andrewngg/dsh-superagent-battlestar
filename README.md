@@ -260,18 +260,34 @@ curl -X POST http://<母机IP>:7317/api/tasks \
 
 # 实时事件（SSE）
 curl -N "http://<母机IP>:7317/api/events?token=<adminToken>"
+
+# 整套系统自重启（先通知在线设备代理重启，再重启 Hub；运行中任务自动重新排队）
+curl -X POST -H "X-Butler-Token: <adminToken>" http://<母机IP>:7317/api/system/restart
+
+# 长期目标：每天 09:30 自动检查目标进度并给建议
+curl -X POST http://<母机IP>:7317/api/goals \
+  -H "X-Butler-Token: <adminToken>" -H "Content-Type: application/json" \
+  -d '{"title":"持续跟进求职进展","description":"每周整理投递与面试结果","schedule":{"type":"daily","time":"09:30"}}'
+
+# 立即跟进一次（创建一条关联 goalId 的普通任务）
+curl -X POST -H "X-Butler-Token: <adminToken>" http://<母机IP>:7317/api/goals/<goalId>/check
 ```
+
+控制台也有同款入口：**设置 → 系统维护 → 重启整套系统**。任务运行超时会在 `maxAttempts` 内自动重试，不需要人工点「重试」。
 
 完整端点、数据结构、评分规则见 [docs/PROTOCOL.md](docs/PROTOCOL.md)。
 
 ## 测试与验收
 
 ```bash
-# 单元测试：Hub 34 + 设备代理 51 + 共享协议 8（共 93）
+# 单元测试：Hub 61 + 设备代理 61 + 共享协议 8（共 130）
 node --test hub/test device-agent/test shared/test
 
 # 受限沙箱（Node 测试运行器无法 spawn 子进程）时：
 node --test --test-isolation=none hub/test device-agent/test shared/test
+
+# DSH 插件协议/渲染测试（26）
+node --test dsh-plugin/test
 
 # 端到端冒烟：Hub + 3 台真实代理进程 + 路由 + 离线/恢复
 node scripts/smoke-test.js
@@ -282,10 +298,54 @@ node scripts/demo.js
 
 **实测结果**
 
-- `hub/test` 34/34、`device-agent/test` 51/51（含 CLI worker、ComfyUI、Mika 执行器用例）、`shared/test` 8/8；
+- `hub/test` 61/61、`device-agent/test` 61/61、`shared/test` 8/8；`dsh-plugin/test` 26/26；
+- 关键回归覆盖：进度 keepalive 续期超时、超时自动重试（含关闭开关）、系统自重启（设备通知 + Hub re-exec + 自重启后任务自动重新排队）、并发满载时重启/取消指令优先、规划子任务超时兜底与旧数据迁移、Hermes 退出码 1 的可读诊断与沙箱提示、任务执行记录（Markdown + 索引 + 离线导出）、执行记录 API、系统语言设置持久化、长期目标（计划归一化/CRUD/立即跟进/定时扫描/持久化恢复）；
 - `scripts/smoke-test.js` 全绿：注册 → 按 skills/model 路由 → 杀掉设备后 TTL 离线 → 新任务 queued 且带 `route.excluded` → 新设备上线后自动完成 → SSE 首帧 snapshot；
 - `scripts/demo.js` 3 条示例任务分别路由到 3 台设备并 `completed`；
 - APK 静态校验：`com.superbutler.app` / minSdk 26 / targetSdk 36 / 0.1.0，`apksigner` v1+v2+v3、`zipalign` 通过。
+
+## 长期目标（Goals）
+
+除了「发一条指令→等结果」的一次性任务，控制台还可以建立**长期目标**：Hub 会按计划自动派一条跟进任务，检查目标当前进度、风险和下一步建议，把结论写回目标时间线。
+
+- 进入方式：桌面端顶部「目标」标签 / 手机端汉堡菜单 →「目标」；
+- 新建目标：标题、描述（要跟进什么、期望什么）、计划（**每天 HH:mm** 或 **每 N 分钟/小时**）、可选任务要求（模型/技能，与发指令一致）；
+- 每个目标支持：**立即跟进**（马上创建一条关联任务）、**暂停 / 恢复**、**停止**（终态，不再自动检查）、**删除**、查看历史检查与上次建议；
+- 自动跟进：Hub 每 30s 扫描一次到期目标；同一目标已有跟进任务在跑时跳过，避免重复；Hub 停机期间错过的检查不补跑；
+- 跟进结果来自普通任务的输出（当前进度 / 风险与阻塞 / 下一步建议），可在任务列表、执行记录和 SSE 中照常追溯；
+- 目标与检查记录保存在 `hub/data/state.json`（私密数据，gitignore），API 见 [docs/PROTOCOL.md](docs/PROTOCOL.md#54-手机控制台管理员令牌)。
+
+## 任务执行记录（Backtrace）
+
+Hub 会为每个任务自动落一份 Markdown 记录，默认目录 **`<仓库>/task-records/`**（已加入 `.gitignore`，含任务原文/输出，可能有私人信息，请勿提交）：
+
+```text
+task-records/
+├── index.md                  # 所有任务索引（按创建时间倒序：状态/耗时/设备/错误/记录链接）
+└── 2026-11-08/
+    └── task_bj0wjtmf.md      # 单任务完整记录
+```
+
+单任务记录包含：概要（状态/设备/尝试次数/超时/耗时/错误）、完整指令、结果输出（文本/结构化数据/产物）、**事件时间线（含距上一事件的时间差，卡点一眼可见）**、关键耗时分解、路由决策、父子任务链接、相关 Hub 日志。
+
+- 自动：任务创建/派发/进度/重试/超时/结束都会刷新记录；Hub 关闭或自重启前强制落盘；
+- 手动补导（Hub 未运行也可以）：`node scripts/export-task-records.js`（`--dir` 指定输出目录、`--task` 只导一个任务）；
+- 目录可用 `BUTLER_RECORD_DIR` 覆盖；Hub 启动横幅会打印当前记录目录。
+
+### 控制台查看执行记录
+
+- 手机端：**汉堡菜单（左上角三条线）→ 执行记录**；桌面端：设置 → 系统维护 → 浏览执行记录；
+- 汉堡菜单用 fixed 定位跟随当前视口，并锚定在按钮下方（不会固定在页面顶部）；
+- 支持搜索（任务 ID / 指令 / 设备 / 错误）、按状态筛选、点击查看；
+- 记录以 Markdown 渲染（标题/表格/代码块/时间线），可**复制**或**下载 .md**，父子任务可直接互跳；
+- 深链：`/?open=records` 直接打开执行记录；`/?open=settings` 直接打开设置。
+
+### 多语言（简体中文 / English）
+
+- 设置 → **系统默认语言**：`简体中文`（默认）/ `English`，保存到 Hub（`hub/data/settings.json`），并记住本机选择；
+- 新客户端首次打开会跟随系统默认语言；切语言即时生效，无需刷新；
+- 界面文案/按钮/状态标签会切换；**任务指令、输出、事件等原始数据保持原样**（便于追溯原始记录）；
+- 英文模式下界面文案在渲染时同步翻译（不会先闪中文再变英文）。
 
 ## 安全
 
@@ -305,6 +365,7 @@ node scripts/demo.js
 - ComfyUI 生成的图片保存在工作机本地，暂不回传 Web 控制台（任务结果含路径）。
 - APK 是 WebView 壳：自签名 HTTPS 会被拒绝（家庭内网建议 http）；无服务端推送/离线缓存/自适应图标；任务通知依赖页面保持运行，App 被系统彻底杀死后不再更新。
 - 手机端 UI 截图未生成（浏览器沙箱限制）；功能已通过真实 Hub 的 DOM 级验证。
+- **设备代理必须运行在普通用户会话**：如果它在受限沙箱（例如 DSH 的 workspace-write 文件沙箱）里被拉起，Hermes CLI 无法访问 `%LOCALAPPDATA%\hermes`，任务会以「Hermes CLI 退出码 1（无输出）」在 1~2 秒内失败。此时用本机的 `worker-workspace\restart-butler.cmd`（等价于在普通 PowerShell 里运行 `worker-workspace\start-workers.ps1 -Restart`）一键重启；启动器会做沙箱自检，告警写入 `worker-workspace\logs\launcher.warnings.log`。
 
 ## Roadmap
 

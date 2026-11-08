@@ -16,6 +16,7 @@ const {
   getTask,
   snapshot,
   waitFor,
+  sleep,
   adminHeaders,
   deviceHeaders,
 } = require('./_helpers.js');
@@ -192,40 +193,56 @@ test('maxAttempts=1 时 ack 超时直接失败', async (t) => {
   assert.match(failed.error, /ack timeout/);
 });
 
-test('运行时超时 → timeout；设备收到 cancel_task；可 retry 后完成', async (t) => {
+test('运行时超时 → 自动重试；重试用尽后 timeout、设备收到 cancel_task；手动 retry 仍可完成', async (t) => {
   const env = await startTestHub(t, { timeoutOverrideMs: 150 });
   const device = await registerDevice(env, makeManifest());
 
   const task = await createTask(env, { instruction: '执行很慢', requirements: { deviceId: device.deviceId } });
   await ackTask(env, device, task.id);
 
+  // 第一次超时：maxAttempts 内自动重排，不需要人工点「重试」
+  const autoRetried = await waitFor(
+    async () => {
+      const current = await getTask(env, task.id);
+      return current.status === 'assigned' && current.attempts === 2 ? current : null;
+    },
+    { label: '超时后自动重试', timeout: 5000 },
+  );
+  assert.ok(
+    autoRetried.events.some((event) => event.type === 'retry' && /自动重试/.test(event.message)),
+    '超时应产生自动重试事件',
+  );
+  assert.equal(autoRetried.error, null);
+
+  // 自动重试前会向设备下发 cancel_task，避免旧执行器继续占用设备
+  const commands = await request(
+    env.base,
+    'GET',
+    `/api/devices/${device.deviceId}/commands?waitMs=100&limit=10`,
+    { headers: deviceHeaders(device) },
+  );
+  assert.ok(
+    commands.json.commands.some((cmd) => cmd.type === 'cancel_task' && cmd.taskId === task.id),
+    '超时任务应先下发 cancel_task 命令',
+  );
+
+  // 第二次超时且没有设备 ack → 尝试次数用尽，进入终态 timeout
   const timedOut = await waitFor(
     async () => {
       const current = await getTask(env, task.id);
       return current.status === 'timeout' ? current : null;
     },
-    { label: '任务运行超时', timeout: 5000 },
+    { label: '重试用尽后超时', timeout: 5000 },
   );
   assert.match(timedOut.error, /超时/);
   assert.ok(timedOut.finishedAt);
+  assert.equal(timedOut.attempts, 2);
 
   const snap = await snapshot(env);
   assert.equal(snap.devices[0].load.running, 0);
   assert.equal(snap.stats.tasksFailed, 1);
 
-  // 超时后 Hub 会向设备下发 cancel_task
-  const commands = await request(
-    env.base,
-    'GET',
-    `/api/devices/${device.deviceId}/commands?waitMs=100&limit=5`,
-    { headers: deviceHeaders(device) },
-  );
-  assert.ok(
-    commands.json.commands.some((cmd) => cmd.type === 'cancel_task' && cmd.taskId === task.id),
-    '超时任务应下发 cancel_task 命令',
-  );
-
-  // retry：timeout 可重试，重新路由并完成
+  // 人工 retry 仍然可用：重新路由后完成
   const retried = await request(env.base, 'POST', `/api/tasks/${task.id}/retry`, {
     headers: adminHeaders(env),
     body: {},
@@ -241,6 +258,76 @@ test('运行时超时 → timeout；设备收到 cancel_task；可 retry 后完�
   const completed = await getTask(env, task.id);
   assert.equal(completed.status, 'completed');
   assert.equal(completed.output.text, '补跑成功');
+});
+
+test('autoRetry:false 的任务超时后直接 timeout，不做自动重试', async (t) => {
+  const env = await startTestHub(t, { timeoutOverrideMs: 120 });
+  const device = await registerDevice(env, makeManifest());
+  const task = await createTask(env, {
+    instruction: '不要自动重试',
+    autoRetry: false,
+    requirements: { deviceId: device.deviceId },
+  });
+  await ackTask(env, device, task.id);
+  const timedOut = await waitFor(
+    async () => {
+      const current = await getTask(env, task.id);
+      return current.status === 'timeout' ? current : null;
+    },
+    { label: '关闭自动重试后直接超时', timeout: 5000 },
+  );
+  assert.equal(timedOut.attempts, 1);
+  assert.ok(!timedOut.events.some((event) => event.type === 'retry'));
+});
+
+test('系统自重启：通知在线设备并调用 restartHandler，重复请求幂等', async (t) => {
+  const calls = [];
+  const env = await startTestHub(t, {
+    restartHandler: (reason) => {
+      calls.push(reason);
+    },
+    restartDelayMs: 20,
+  });
+  const device = await registerDevice(env, makeManifest());
+
+  const res = await request(env.base, 'POST', '/api/system/restart', {
+    headers: adminHeaders(env),
+    body: { reason: 'test' },
+  });
+  assert.equal(res.status, 202);
+  assert.equal(res.json.restarting, true);
+  assert.equal(res.json.devices, 1);
+
+  // 在线设备应收到 restart_agent 指令（设备代理会自己拉起新进程）
+  const commands = await request(
+    env.base,
+    'GET',
+    `/api/devices/${device.deviceId}/commands?waitMs=100&limit=5`,
+    { headers: deviceHeaders(device) },
+  );
+  assert.ok(
+    commands.json.commands.some((cmd) => cmd.type === 'restart_agent'),
+    '自重启应下发 restart_agent 命令',
+  );
+
+  const again = await request(env.base, 'POST', '/api/system/restart', {
+    headers: adminHeaders(env),
+    body: {},
+  });
+  assert.equal(again.status, 202);
+  assert.equal(again.json.alreadyRequested, true);
+
+  await waitFor(() => calls.length > 0, { label: 'restartHandler 被调用', timeout: 3000 });
+  assert.equal(calls[0], 'test');
+});
+
+test('/api/health 暴露自重启与自动重试能力', async (t) => {
+  const env = await startTestHub(t, { restartHandler: () => {} });
+  const res = await request(env.base, 'GET', '/api/health');
+  assert.equal(res.status, 200);
+  assert.equal(res.json.features.selfRestart, true);
+  assert.equal(res.json.features.progressKeepalive, true);
+  assert.equal(res.json.features.autoRetryOnTimeout, true);
 });
 
 test('assigned 阶段也会按时超时（未 ack → timeout）', async (t) => {
@@ -260,6 +347,8 @@ test('assigned 阶段也会按时超时（未 ack → timeout）', async (t) => 
     { label: 'assigned 阶段超时', timeout: 5000 },
   );
   assert.match(timedOut.error, /超时/);
+  assert.equal(timedOut.attempts, 2);
+  assert.ok(timedOut.events.some((event) => event.type === 'retry'), 'assigned 阶段超时也应自动重试一次');
 });
 
 test('取消：queued / running 均可取消，running 取消会下发 cancel_task；终态不可取消', async (t) => {
@@ -469,4 +558,52 @@ test('任务参数校验、列表过滤与 404', async (t) => {
   });
   assert.equal(notFoundTask.status, 404);
   assert.equal(notFoundTask.json.error.code, 'not_found');
+});
+
+test('运行中 keepalive 会续期超时；停止心跳后按静默窗口超时', async (t) => {
+  const env = await startTestHub(t, { timeoutOverrideMs: 200 });
+  const device = await registerDevice(env, makeManifest());
+  const task = await createTask(env, { instruction: '网页检索类长任务', requirements: { deviceId: device.deviceId } });
+  await ackTask(env, device, task.id);
+
+  // 每 80ms 一次 keepalive，持续约 700ms（远超 200ms 超时窗口）仍应保持 running
+  for (let i = 0; i < 7; i += 1) {
+    await sleep(80);
+    const res = await progressTask(env, device, task.id, { keepalive: true });
+    assert.equal(res.status, 200);
+    const current = await getTask(env, task.id);
+    assert.equal(current.status, 'running', 'keepalive 期间不应超时');
+  }
+
+  // 停止 keepalive → 静默窗口耗尽后超时
+  const timedOut = await waitFor(
+    async () => {
+      const current = await getTask(env, task.id);
+      return current.status === 'timeout' ? current : null;
+    },
+    { label: 'keepalive 停止后超时', timeout: 5000 },
+  );
+  assert.match(timedOut.error, /超时/);
+});
+
+test('设备腾出并发槽位后，排队任务自动重新派发', async (t) => {
+  const env = await startTestHub(t);
+  const device = await registerDevice(env, makeManifest({ limits: { maxConcurrentTasks: 1 } }));
+
+  const first = await createTask(env, { instruction: '占满唯一并发槽位', requirements: { deviceId: device.deviceId } });
+  assert.equal(first.status, 'assigned');
+  await ackTask(env, device, first.id);
+
+  const second = await createTask(env, { instruction: '排队等待并发槽位', requirements: { deviceId: device.deviceId } });
+  assert.equal(second.status, 'queued');
+
+  await resultTask(env, device, first.id, { ok: true, output: { text: 'done' } });
+  const assigned = await waitFor(
+    async () => {
+      const current = await getTask(env, second.id);
+      return current.status === 'assigned' ? current : null;
+    },
+    { label: '槽位释放后自动派发排队任务', timeout: 3000 },
+  );
+  assert.equal(assigned.assignedDeviceId, device.deviceId);
 });

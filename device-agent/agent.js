@@ -20,6 +20,7 @@
 const os = require('node:os');
 const fs = require('node:fs');
 const path = require('node:path');
+const { spawn } = require('node:child_process');
 
 const { discover, loadConfig, AGENT_VERSION } = require('./lib/discovery');
 const { createExecutor, makeProgressThrottle } = require('./lib/executors');
@@ -138,6 +139,14 @@ class Agent {
       DEFAULTS.pollWaitMs,
     );
     this.stopTimeoutMs = clampInt(options.stopTimeoutMs, 0, 60000, DEFAULTS.stopTimeoutMs);
+    // 执行期间向 Hub 发送 keepalive 的间隔：让 Hub 按“最后一次设备活动”而不是固定墙钟算超时，
+    // 网页检索这类耗时可能超过 timeoutSec 的任务，只要设备还在跑就不会被误判超时。
+    this.taskKeepaliveMs = clampInt(
+      options.taskKeepaliveMs !== undefined ? options.taskKeepaliveMs : this.config.taskKeepaliveMs,
+      50,
+      60000,
+      15000,
+    );
 
     const explicitName = options.name || this.config.name;
     this.stateName = explicitName || os.hostname();
@@ -165,6 +174,7 @@ class Agent {
 
     this.stopped = false;
     this.connecting = null;
+    this._restartRequested = false;
     this.failures = 0;
     this.heartbeatLoopPromise = null;
     this.pollLoopPromise = null;
@@ -256,6 +266,7 @@ class Agent {
       stateDir: this.stateDir,
       log: this.log,
     });
+    this._checkExecutorEnvironment();
 
     this.log.info(
       `能力清单：${manifest.name}（${manifest.kind}/${manifest.platform}）｜` +
@@ -264,6 +275,31 @@ class Agent {
         `并发 ${this.maxConcurrent}｜执行器 ${this.executor.type}`,
     );
     return this.manifest;
+  }
+
+  /**
+   * 启动时检查执行器所需环境，把“沙箱/权限导致 CLI 立刻退出”的问题提前暴露到日志里，
+   * 避免任务只留下一条难以排查的「Hermes CLI 退出码 1」。
+   */
+  _checkExecutorEnvironment() {
+    const executorCfg = this.config && this.config.executor;
+    if (!executorCfg || executorCfg.type !== 'cli') return;
+    const cli = isPlainObject(executorCfg.cli) ? executorCfg.cli : {};
+    const hermes = isPlainObject(cli.hermes) ? cli.hermes : {};
+    const home =
+      nonEmptyString(hermes.home) ? hermes.home : nonEmptyString(this.env.HERMES_HOME) ? this.env.HERMES_HOME : '';
+    if (!home) return;
+    try {
+      fs.accessSync(home, fs.constants.W_OK);
+    } catch (err) {
+      const code = err && err.code ? err.code : String(err && err.message);
+      if (code === 'ENOENT') return;
+      this.log.warn(
+        `执行器环境异常：Hermes home 不可写（${home}，${code}）。` +
+          'CLI 任务会立刻失败（日志里表现为「Hermes CLI 退出码 1」且无输出）；' +
+          '设备代理可能运行在受限沙箱中，请在普通用户会话重新启动设备代理。',
+      );
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -567,17 +603,76 @@ class Agent {
 
   _pump() {
     if (this.stopped) return;
-    while (this.queue.length > 0 && this.running.size < this.maxConcurrent) {
-      const command = this.queue.shift();
-      const promise = this._runCommand(command)
-        .catch((err) => {
-          this.log.error(`命令处理异常：${err && err.message ? err.message : err}`);
-        })
-        .finally(() => {
-          this.executions.delete(promise);
-        });
-      this.executions.add(promise);
+    // 重启指令优先处理，不受并发槽位限制（设备满载时也能及时响应系统自重启）。
+    const restartIndex = this.queue.findIndex(
+      (cmd) => cmd && (cmd.type === 'restart_agent' || cmd.type === 'restart'),
+    );
+    if (restartIndex >= 0) {
+      const [command] = this.queue.splice(restartIndex, 1);
+      const payload = isPlainObject(command.payload) ? command.payload : {};
+      this._relaunchSelf(payload.reason || 'hub-request');
+      if (this.stopped) return;
     }
+    // 取消 / 回答指令也不受并发槽位限制：设备满载时中止要立刻生效，否则会一直等到有空位。
+    for (let i = this.queue.length - 1; i >= 0; i -= 1) {
+      const command = this.queue[i];
+      if (
+        command &&
+        (command.type === 'cancel_task' || command.type === 'cancel' || command.type === 'answer_task')
+      ) {
+        this.queue.splice(i, 1);
+        this._launchCommand(command);
+      }
+    }
+    while (this.queue.length > 0 && this.running.size < this.maxConcurrent) {
+      this._launchCommand(this.queue.shift());
+    }
+  }
+
+  _launchCommand(command) {
+    const promise = this._runCommand(command)
+      .catch((err) => {
+        this.log.error(`命令处理异常：${err && err.message ? err.message : err}`);
+      })
+      .finally(() => {
+        this.executions.delete(promise);
+      });
+    this.executions.add(promise);
+    return promise;
+  }
+
+  /**
+   * 系统自重启：拉起一个脱离当前进程的新代理，然后优雅退出当前进程。
+   * 用于 Hub 下发 restart_agent 后让整套设备代理也加载新代码。
+   * @param {string} [reason]
+   */
+  _relaunchSelf(reason = 'restart') {
+    if (this._restartRequested) return;
+    this._restartRequested = true;
+    this.log.info(`收到系统重启指令（${reason}），正在重启设备代理…`);
+    try {
+      const relaunch = typeof this.options.relaunch === 'function' ? this.options.relaunch : null;
+      if (relaunch) {
+        relaunch(reason);
+      } else {
+        const child = spawn(process.execPath, process.argv.slice(1), {
+          cwd: process.cwd(),
+          env: { ...process.env, BUTLER_AUTO_RESTARTED: '1' },
+          detached: true,
+          stdio: ['ignore', 'inherit', 'inherit'],
+          windowsHide: true,
+        });
+        child.on('error', (err) => this.log.warn(`重启子进程启动失败：${err && err.message ? err.message : err}`));
+        if (child.unref) child.unref();
+      }
+    } catch (err) {
+      this._restartRequested = false;
+      this.log.error(`重启失败，继续使用当前进程：${err && err.message ? err.message : err}`);
+      return;
+    }
+    this.stop({ unregister: false, reason: 'restart' }).catch((err) => {
+      this.log.error(`重启退出失败：${err && err.message ? err.message : err}`);
+    });
   }
 
   _materializeAttachments(task) {
@@ -660,6 +755,10 @@ class Agent {
 
     if (type === 'cancel_task' || type === 'cancel') {
       this._cancelTask(taskId, 'cancelled');
+      return;
+    }
+    if (type === 'restart_agent' || type === 'restart') {
+      this._relaunchSelf((isPlainObject(command.payload) && command.payload.reason) || 'hub-request');
       return;
     }
     if (type === 'answer_task') {
@@ -764,9 +863,18 @@ class Agent {
     }, this._taskTimeoutMs(task));
     if (record.timeoutTimer.unref) record.timeoutTimer.unref();
 
+    let keepaliveTimer = null;
     try {
       const acked = await this._ackTask(taskId);
       if (!acked) return;
+      keepaliveTimer = setInterval(() => {
+        if (record.finished) return;
+        // 同时续期本机看门狗与 Hub 侧计时器，避免任务被执行到一半被固定超时中止。
+        if (record.timeoutTimer) record.timeoutTimer.refresh();
+        if (!this.client) return;
+        this.client.progress(taskId, { keepalive: true }).catch(() => {});
+      }, this.taskKeepaliveMs);
+      if (keepaliveTimer.unref) keepaliveTimer.unref();
       await progress('已接收任务，开始执行…', 2);
       const outcome = await this.executor.run({
         task,
@@ -813,6 +921,7 @@ class Agent {
         await this._reportResult(record, { ok: false, error: message, durationMs });
       }
     } finally {
+      if (keepaliveTimer) clearInterval(keepaliveTimer);
       if (record.timeoutTimer) clearTimeout(record.timeoutTimer);
       this.running.delete(taskId);
       this._pump();
