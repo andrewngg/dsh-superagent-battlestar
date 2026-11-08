@@ -36,6 +36,13 @@ test('重启恢复：令牌/加入码持久化，设备离线，assigned 重排�
     makeManifest({ name: '持久设备', limits: { maxConcurrentTasks: 3 } }),
   );
 
+  const nicknamed = await request(first.base, 'PATCH', `/api/devices/${device.deviceId}`, {
+    headers: adminHeaders(first),
+    body: { nickname: '持久昵称' },
+  });
+  assert.equal(nicknamed.status, 200);
+  assert.equal(nicknamed.json.device.nickname, '持久昵称');
+
   const assignedTask = await createTask(first, {
     instruction: '未确认任务',
     requirements: { skills: ['office-docx'] },
@@ -63,6 +70,7 @@ test('重启恢复：令牌/加入码持久化，设备离线，assigned 重排�
   assert.equal(state.adminToken, 'adm_fixed_token');
   assert.equal(state.joinCode, 'join_fixed_code');
   assert.equal(state.devices.length, 1);
+  assert.equal(state.devices[0].nickname, '持久昵称');
   assert.equal(state.tasks.length, 3);
   assert.ok(state.events.length > 0);
   assert.ok(state.tasks.every((task) => typeof task.id === 'string' && task.id));
@@ -81,6 +89,7 @@ test('重启恢复：令牌/加入码持久化，设备离线，assigned 重排�
     assert.equal(restoredDevice.status, 'offline');
     assert.equal(restoredDevice.load.running, 0);
     assert.equal(restoredDevice.disabled, false);
+    assert.equal(restoredDevice.nickname, '持久昵称');
 
     const byId = new Map(snap.tasks.map((task) => [task.id, task]));
     const restoredAssigned = byId.get(assignedTask.id);

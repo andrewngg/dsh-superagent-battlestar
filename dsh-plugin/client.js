@@ -18,10 +18,44 @@ window.__ModuleLoader__.load({
       panel: 'BattleStar', title: 'BattleStar', subtitle: '多设备 AI 管家 · 控制台与密钥',
       edit: '编辑', rename: '重命名', saveName: '保存', cancelEdit: '取消',
       hubNickname: '母机昵称', connection: '连接', outbound: '主动连接', endpoint: '端点',
-      deviceRenamed: '设备名称已更新', hubNicknameSaved: '母机昵称已更新', nameRequired: '名称不能为空',
+      deviceRenamed: '设备昵称已更新', deviceNicknameCleared: '设备昵称已清除', hubNicknameSaved: '母机昵称已更新', nameRequired: '名称不能为空',
+      machineName: '机器名', nicknamePlaceholder: '例如：书房工作站（写代码）', nicknameClearHint: '留空保存即清除昵称，回退显示机器名',
       removeDevice: '移除', removeDeviceConfirm: '确定从 Hub 移除此设备吗？在线设备下次心跳可能重新注册。', deviceRemoved: '设备已移除',
       disableDevice: '禁用', enableDevice: '启用', disabled: '已禁用', deviceDisabled: '设备已禁用，不再接收任务', deviceEnabled: '设备已启用',
-      console: '控制台', settings: '设置', refresh: '刷新', start: '启动 Hub', stop: '停止 Hub',
+      dashboard: '仪表盘', console: '控制台', settings: '设置', refresh: '刷新', start: '启动 Hub', stop: '停止 Hub',
+      restartHub: '重启 Hub', hubRestarting: 'Hub 正在重启，约 15 秒后自动刷新…', restartHubFailed: '重启 Hub 失败',
+      restartNeedsRestart: '插件 Host 还没加载「重启 Hub」路由：请完全退出并重新打开 DeepSeek Harness 后重试。',
+      restartHubHint: '让 Hub 重新加载代码（约 15 秒，会先通知在线设备）',
+      restartExternalHint: '这个 Hub 是外部进程：在这里让它原地重启即可加载新代码',
+      stopExternalHint: 'Hub 由外部终端启动，插件不能停止它；请用「重启 Hub」或到对应终端停止',
+      openConsole: '在浏览器打开控制台', openConsoleHint: '任务下发、设备管理与任务详情请在浏览器控制台里操作',
+      recentTasks: '最近任务',
+      guide: '教程',
+      guideIntro: '母机 Hub 负责调度，工作机负责执行。PC 和手机都能接入成工作机；手机还可以当控制端查看进度、发指令。',
+      guideHint: '命令里的 Hub 地址与加入码已按当前 Hub 自动填好，可直接复制；配置文件名可按需修改。',
+      addPc: '添加 PC 工作机',
+      pcStep1: '先在工作机安装 Node.js 18 或更高版本，确认 node -v 能输出版本号。',
+      pcStep2: '把本仓库克隆到工作机（或直接复制整个目录）。',
+      pcStep3: '复制一份执行器配置，按本机情况修改 name 与 executor 里的路径（Windows 用 copy，macOS/Linux 用 cp）。',
+      pcStep4: '在工作机上启动设备代理；--name 改成这台机器的用途，--config 换成上一步的配置。',
+      pcStep5: '回到仪表盘，设备卡片出现这台机器并显示绿点即接入成功；用途昵称可在浏览器控制台的设备详情里改。',
+      pcStep6: '可选：把启动命令保存成 .cmd/.sh 放进开机启动项或计划任务；--state-dir 会记住设备令牌，重启不会重复占用名额。',
+      addPhoneWorker: '添加手机工作机（Mika）',
+      phoneStep1: '手机安装 Mika（Android 11+），在 Settings › Model 配置模型，并按提示完成无障碍 / 无线调试。',
+      phoneStep2: '在 Mika 的 Settings › Connect a computer 选择连接方式：USB（开启 USB 调试）或 Wi-Fi（记下地址与 token 文件）。',
+      phoneStep3: '在桥电脑安装 Mika CLI 与 platform-tools，用 mika doctor 确认能连上手机。',
+      phoneStep4: '复制手机执行器配置，按实际填写 device（USB SERIAL）或 url + tokenFile（Wi-Fi）。',
+      phoneStep5: '在桥电脑启动代理（手机本身不用装 Node，由桥电脑代注册）；上线后能力里应出现 phone-control / app-automation / apk-search 等 skills。',
+      phoneStep6: '手机同一时间只做一件事；支付、验证码与手机接管需要你在手机上处理。',
+      phoneControl: '手机当控制端（查看进度 / 发指令）',
+      ctrlStep1: '手机浏览器打开手机控制台，可添加到主屏幕。',
+      ctrlStep2: '或安装 APK（Android 8+），首次打开会自动扫描同一 Wi-Fi 下的 Hub，只需填管理员令牌。',
+      ctrlStep3: '控制端只负责查看设备、发指令、看进度，本身不执行 AI 任务。',
+      guideTrouble: '接不上？先查这三项',
+      troubleOffline: '设备一直离线：确认工作机能访问 Hub 地址、7317/TCP 没被防火墙拦住、PC 与手机在同一 Wi-Fi。',
+      troubleJoinCode: '提示加入码无效：重载 Hub 后加入码会刷新，从「设置」页或 Hub 启动日志复制新的加入码。',
+      troubleRouting: '任务没有派到设备：到浏览器控制台的设备详情看 skills / models / 并发负载，或在任务里指定目标设备。',
+      guideDocs: '更多细节：docs/WORKER-SETUP.md（让工作机上的 AI 自动配置）、docs/MIKA-PHONE.md（手机工作机）、docs/APK.md（APK 构建与安装）。',
       running: '运行中', stopped: '未运行', owned: '插件托管', external: '外部进程',
       devices: '设备', tasks: '任务', online: '在线', offline: '离线',
       runningTasks: '运行中', completed: '已完成', failed: '失败/超时', queued: '排队',
@@ -37,6 +71,8 @@ window.__ModuleLoader__.load({
       followUp: '继续', followUpPrompt: '输入下一步或修正要求（会带上一步上下文）：', followUpCreated: '已创建下一步任务', thread: '任务线程', steps: '步',
       answer: '回答 Mika', answerPrompt: 'Mika 需要你的回答：', answerSent: '回答已发送，Mika 继续执行', waitingAnswer: '等待回答',
       hubSettings: 'Hub 设置', projectRoot: '项目目录', hubPort: 'Hub 端口', autoStart: 'DSH 启动时自动启动 Hub',
+      devWorkspacePath: '开发指令工作区',
+      devWorkspaceHint: '留空自动选择包含项目目录的 DSH 工作区；APK 开发指令创建的会话会归到这里',
       defaultModel: '默认模型', githubUser: 'GitHub 用户名', keys: '私人账号与密钥',
       keysHint: '密钥保存在 Harness credentials 服务，不写入项目文件；留空表示不修改。',
       githubToken: 'GitHub Token', deepseekApiKey: 'DeepSeek API Key', agnesApiKey: 'Agnes AI API Key',
@@ -50,6 +86,14 @@ window.__ModuleLoader__.load({
       load: '负载', models: '模型', profiles: 'Profiles', gateways: 'Gateways', skillsChips: 'Skills',
       lastSeen: '最后心跳', justNow: '刚刚', minutesAgo: '分钟前', hoursAgo: '小时前',
       hubLog: 'Hub 日志', adminTokenHidden: '管理令牌由插件代理，不在页面暴露',
+      devTools: '开发工具', gitPush: 'Git Push',
+      gitPushHint: '点击后会在母机仓库执行 git push，只推送已经提交的提交，不会暂存或修改任何文件。',
+      gitPushing: '正在推送…', gitPushOk: '推送完成', gitPushFailed: '推送失败',
+      gitPushNeedsRestart: '插件 Host 还没加载 Git Push 路由：请重启一次 DeepSeek Harness 后重试。',
+      gitRepo: '仓库', gitBranch: '分支', gitRemote: '远端', gitUpstream: '上游',
+      gitNoUpstream: '未设置（首次推送会自动设置）', gitRepoUnknown: '正在读取仓库信息…',
+      credentialsFallback: 'Harness credentials 服务当前不可用，密钥会改为保存在插件本地文件（仅本机可读），保存和测试仍然可用；重启 DeepSeek Harness 后如果服务恢复，插件会优先使用 Harness 凭据。',
+      credentialsLocalBadge: '本机文件',
       emptySecrets: '尚未配置任何私人密钥',
       taskId: '任务 ID', copyId: '复制 ID', copiedId: '任务 ID 已复制', copyInstruction: '复制指令',
       copiedInstruction: '指令已复制', copyFailed: '复制失败，请手动选择文本',
@@ -73,10 +117,44 @@ window.__ModuleLoader__.load({
       panel: 'BattleStar', title: 'BattleStar', subtitle: 'Multi-device AI butler · console and keys',
       edit: 'Edit', rename: 'Rename', saveName: 'Save', cancelEdit: 'Cancel',
       hubNickname: 'Hub nickname', connection: 'Connection', outbound: 'outbound', endpoint: 'endpoint',
-      deviceRenamed: 'Device renamed', hubNicknameSaved: 'Hub nickname saved', nameRequired: 'Name is required',
+      deviceRenamed: 'Device nickname saved', deviceNicknameCleared: 'Device nickname cleared', hubNicknameSaved: 'Hub nickname saved', nameRequired: 'Name is required',
+      machineName: 'Machine name', nicknamePlaceholder: 'e.g. Study workstation (coding)', nicknameClearHint: 'Save an empty value to clear it and fall back to the machine name',
       removeDevice: 'Remove', removeDeviceConfirm: 'Remove this device from the hub? An online device may re-register on its next heartbeat.', deviceRemoved: 'Device removed',
       disableDevice: 'Disable', enableDevice: 'Enable', disabled: 'Disabled', deviceDisabled: 'Device disabled; it will no longer receive tasks', deviceEnabled: 'Device enabled',
-      console: 'Console', settings: 'Settings', refresh: 'Refresh', start: 'Start hub', stop: 'Stop hub',
+      dashboard: 'Dashboard', console: 'Console', settings: 'Settings', refresh: 'Refresh', start: 'Start hub', stop: 'Stop hub',
+      restartHub: 'Restart hub', hubRestarting: 'Hub is restarting, the panel refreshes in about 15 seconds…', restartHubFailed: 'Failed to restart hub',
+      restartNeedsRestart: 'The plugin Host has not loaded the Restart hub route yet. Quit and reopen DeepSeek Harness, then try again.',
+      restartHubHint: 'Reload the Hub code (about 15 seconds; online devices are notified first)',
+      restartExternalHint: 'This hub is an external process: restart it here to load the new code',
+      stopExternalHint: 'This hub was started from a terminal, so the plugin cannot stop it; use Restart hub or stop it there',
+      openConsole: 'Open console in browser', openConsoleHint: 'Send tasks, manage devices and open task details in the browser console',
+      recentTasks: 'Recent tasks',
+      guide: 'Guide',
+      guideIntro: 'The hub schedules work and worker machines execute it. PCs and phones can both join as workers; a phone can also act as a control client to watch progress and send instructions.',
+      guideHint: 'The hub address and join code are filled in from the running hub, so the commands can be copied as-is; rename the config files if you like.',
+      addPc: 'Add a PC worker',
+      pcStep1: 'Install Node.js 18 or newer on the worker and confirm node -v prints a version.',
+      pcStep2: 'Clone this repository on the worker machine (or copy the whole folder).',
+      pcStep3: 'Copy a worker executor config and adjust name and the executor paths (copy on Windows, cp on macOS/Linux).',
+      pcStep4: 'Start the device agent on the worker; change --name to this machine\u2019s purpose and point --config at the config from the previous step.',
+      pcStep5: 'Back on the dashboard the device card appears with a green dot once connected; set its usage nickname from the device details in the browser console.',
+      pcStep6: 'Optional: save the start command as a .cmd/.sh file in startup or a scheduled task; --state-dir remembers the device token so restarts do not claim a new slot.',
+      addPhoneWorker: 'Add a phone worker (Mika)',
+      phoneStep1: 'Install Mika on the phone (Android 11+), configure a model in Settings \u203a Model, and finish the accessibility / wireless debugging setup it asks for.',
+      phoneStep2: 'In Mika\u2019s Settings \u203a Connect a computer choose USB (enable USB debugging) or Wi-Fi (note the address and token file).',
+      phoneStep3: 'Install the Mika CLI and platform-tools on the bridge PC, then confirm the connection with mika doctor.',
+      phoneStep4: 'Copy the phone executor config and fill in device (USB serial) or url + tokenFile (Wi-Fi).',
+      phoneStep5: 'Start the agent on the bridge PC (the phone does not need Node; the bridge registers for it); skills such as phone-control, app-automation and apk-search should appear once online.',
+      phoneStep6: 'The phone handles one task at a time; payments, verification codes and phone takeover must be handled on the phone.',
+      phoneControl: 'Use a phone as a control client (watch progress / send instructions)',
+      ctrlStep1: 'Open the mobile console in the phone browser and add it to the home screen if you like.',
+      ctrlStep2: 'Or install the APK (Android 8+); on first launch it scans the same Wi-Fi for a hub, then only asks for the admin token.',
+      ctrlStep3: 'The control client only views devices, sends instructions and watches progress; it does not execute AI tasks itself.',
+      guideTrouble: 'Not connecting? Check these three things',
+      troubleOffline: 'Device stays offline: make sure the worker can reach the hub address, port 7317/TCP is not blocked by a firewall, and PC and phone are on the same Wi-Fi.',
+      troubleJoinCode: 'Invalid join code: it changes when the hub restarts; copy the new one from the Settings tab or the hub startup log.',
+      troubleRouting: 'Tasks never reach the device: check skills / models / concurrency in the browser console device details, or target the device explicitly when creating the task.',
+      guideDocs: 'More: docs/WORKER-SETUP.md (let an AI on the worker configure itself), docs/MIKA-PHONE.md (phone worker), docs/APK.md (APK build and install).',
       running: 'Running', stopped: 'Stopped', owned: 'plugin-managed', external: 'external process',
       devices: 'Devices', tasks: 'Tasks', online: 'online', offline: 'offline',
       runningTasks: 'Running', completed: 'Completed', failed: 'Failed/timeout', queued: 'Queued',
@@ -92,6 +170,8 @@ window.__ModuleLoader__.load({
       followUp: 'Continue', followUpPrompt: 'Enter the next step or correction (previous context will be included):', followUpCreated: 'Follow-up task created', thread: 'Task thread', steps: 'steps',
       answer: 'Answer Mika', answerPrompt: 'Mika needs your answer:', answerSent: 'Answer sent; Mika continues', waitingAnswer: 'Waiting for answer',
       hubSettings: 'Hub settings', projectRoot: 'Project root', hubPort: 'Hub port', autoStart: 'Start hub with DSH',
+      devWorkspacePath: 'Developer-mode workspace',
+      devWorkspaceHint: 'Leave blank to auto-pick the DSH workspace containing the project root; APK developer instructions will be grouped there',
       defaultModel: 'Default model', githubUser: 'GitHub username', keys: 'Private accounts and keys',
       keysHint: 'Keys are stored in the Harness credential service, not project files. Leave blank to keep.',
       githubToken: 'GitHub token', deepseekApiKey: 'DeepSeek API key', agnesApiKey: 'Agnes AI API key',
@@ -105,6 +185,14 @@ window.__ModuleLoader__.load({
       load: 'Load', models: 'Models', profiles: 'Profiles', gateways: 'Gateways', skillsChips: 'Skills',
       lastSeen: 'Last seen', justNow: 'just now', minutesAgo: 'm ago', hoursAgo: 'h ago',
       hubLog: 'Hub log', adminTokenHidden: 'Admin token stays in the plugin proxy',
+      devTools: 'Dev tools', gitPush: 'Git Push',
+      gitPushHint: 'Runs git push in the hub repository; it only pushes existing commits and never stages or edits files.',
+      gitPushing: 'Pushing…', gitPushOk: 'Push complete', gitPushFailed: 'Push failed',
+      gitPushNeedsRestart: 'The plugin Host has not loaded the Git Push route yet. Restart DeepSeek Harness once and try again.',
+      gitRepo: 'Repository', gitBranch: 'Branch', gitRemote: 'Remote', gitUpstream: 'Upstream',
+      gitNoUpstream: 'not set (the first push sets it)', gitRepoUnknown: 'Reading repository info…',
+      credentialsFallback: 'The Harness credentials service is unavailable right now, so keys are stored in the plugin local file instead (readable only on this machine); saving and testing still work. After restarting DeepSeek Harness, the plugin will use the Harness credential service again once it recovers.',
+      credentialsLocalBadge: 'local file',
       emptySecrets: 'No private keys configured yet',
       taskId: 'Task ID', copyId: 'Copy ID', copiedId: 'Task ID copied', copyInstruction: 'Copy instruction',
       copiedInstruction: 'Instruction copied', copyFailed: 'Copy failed; select the text manually',
@@ -170,6 +258,13 @@ window.__ModuleLoader__.load({
       background: COLORS.layer2, border: `1px solid ${COLORS.border}`,
     })
     const muted = { color: COLORS.sub, fontSize: 12 }
+    // 命令/日志输出统一用等宽块显示。
+    const preStyle = {
+      margin: '8px 0 0', padding: '10px 12px', borderRadius: 8, background: COLORS.layer2,
+      border: `1px solid ${COLORS.border}`, color: COLORS.text, overflow: 'auto',
+      whiteSpace: 'pre-wrap', wordBreak: 'break-all', lineHeight: 1.55, fontSize: 12,
+      maxHeight: 240, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+    }
 
     async function call(path, options) {
       const res = await fetch(`${API}${path}`, {
@@ -189,6 +284,11 @@ window.__ModuleLoader__.load({
       return data
     }
 
+    // 插件 Host 代码没有热更新：新路由要重启 DSH 才会注册，之前会以 404「未知路由」返回。
+    function isRouteMissingError(err) {
+      return /未知路由|not_found|unknown route|HTTP 404|404/i.test(String((err && err.message) || err || ''))
+    }
+
     function timeAgo(iso, t) {
       if (!iso) return ''
       const ms = Date.now() - Date.parse(iso)
@@ -203,57 +303,6 @@ window.__ModuleLoader__.load({
       if (status === 'running' || status === 'assigned' || status === 'waiting') return 'warn'
       return 'idle'
     }
-
-    // 与 Hub 的任务状态机保持一致：进行中 / 可重试（终态里允许重新排队的部分）。
-    const ACTIVE_TASK_STATUS = ['queued', 'assigned', 'running', 'waiting']
-    const RETRYABLE_TASK_STATUS = ['failed', 'timeout', 'cancelled']
-    const isActiveTask = (status) => ACTIVE_TASK_STATUS.includes(status)
-    const isRetryableTask = (status) => RETRYABLE_TASK_STATUS.includes(status)
-
-    const mono = { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', fontSize: 11 }
-    const miniBtn = (danger, disabled) => ({
-      ...btn(false, disabled), padding: '2px 8px', fontSize: 11, color: danger ? COLORS.err : COLORS.text,
-    })
-
-    function fmtDateTime(iso) {
-      if (!iso) return '-'
-      try {
-        const date = new Date(iso)
-        return Number.isFinite(date.getTime()) ? date.toLocaleString() : '-'
-      } catch {
-        return '-'
-      }
-    }
-
-    // Electron 里 window.prompt 不可用，统一用面板内弹窗代替浏览器 prompt。
-    async function copyToClipboard(text) {
-      const value = String(text == null ? '' : text)
-      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-        await navigator.clipboard.writeText(value)
-        return
-      }
-      const area = document.createElement('textarea')
-      area.value = value
-      area.setAttribute('readonly', '')
-      area.style.position = 'fixed'
-      area.style.opacity = '0'
-      document.body.appendChild(area)
-      area.select()
-      const ok = document.execCommand && document.execCommand('copy')
-      document.body.removeChild(area)
-      if (!ok) throw new Error('copy failed')
-    }
-
-    // Host 插件里还没有 /status 路由时给出明确提示，而不是原始 404。
-    // 旧 Host 的未知路由提示固定为「未知路由：METHOD /path」；Hub 自身的 404（任务不存在）不在此列。
-    function isMissingRouteError(err) {
-      const message = err && err.message ? String(err.message) : ''
-      return /未知路由/.test(message)
-    }
-
-    // 手动改状态只对非拆分的普通任务开放：Agnes 拆分任务的状态由子任务汇总。
-    const TERMINAL_TASK_STATUS = ['completed', 'failed', 'timeout', 'cancelled']
-    const isTerminalTask = (status) => TERMINAL_TASK_STATUS.includes(status)
 
     function ButlerIcon({ size }) {
       return h('svg', {
@@ -280,311 +329,92 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function DeviceCard({ device, t, hubOrigin, onRename, onRemove, onToggle }) {
+    // 只读设备卡：面板只展示概况，改名/禁用/删除等操作统一去浏览器控制台。
+    function DeviceCard({ device, t }) {
       const caps = device.capabilities || {}
-      const models = (caps.models || []).slice(0, 4)
-      const skills = (caps.skills || []).slice(0, 6)
-      const [editing, setEditing] = useState(false)
-      const [name, setName] = useState(device.name || '')
-      useEffect(() => { setName(device.name || '') }, [device.name])
-      const saveName = async () => {
-        const next = String(name || '').trim()
-        if (!next) return
-        await onRename(device.id, next)
-        setEditing(false)
-      }
-      const connection = device.endpoint
-        ? `${t('endpoint')}: ${device.endpoint}`
-        : `${t('outbound')} → ${hubOrigin || '-'}`
-      return h('div', { style: { ...card, minWidth: 240, flex: '1 1 300px' } },
-        h('div', { style: { ...row, justifyContent: 'space-between' } },
-          h('div', { style: { ...row, flex: 1, minWidth: 0 } },
-            h('span', {
-              style: { width: 9, height: 9, borderRadius: 999, background: device.online ? COLORS.ok : COLORS.idle, display: 'inline-block', flex: 'none' },
-            }),
-            editing
-              ? h('input', {
-                  value: name, autoFocus: true,
-                  onChange: (e) => setName(e.target.value),
-                  onKeyDown: (e) => { if (e.key === 'Enter') void saveName(); if (e.key === 'Escape') setEditing(false) },
-                  style: { ...inputStyle, padding: '4px 8px', fontSize: 13 },
-                })
-              : h('strong', { style: { fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, device.name),
-          ),
-          h('div', { style: { ...row, gap: 6 } },
-            editing
-              ? h('button', { style: { ...btn(true), padding: '3px 8px', fontSize: 12 }, onClick: () => void saveName() }, t('saveName'))
-              : h('button', { style: { ...btn(false), padding: '3px 8px', fontSize: 12 }, onClick: () => setEditing(true) }, t('edit')),
-            editing
-              ? h('button', { style: { ...btn(false), padding: '3px 8px', fontSize: 12 }, onClick: () => setEditing(false) }, t('cancelEdit'))
-              : device.disabled
-                ? h(Badge, { tone: 'idle' }, t('disabled'))
-                : h(Badge, { tone: device.online ? 'ok' : 'idle' }, device.online ? t('online') : t('offline')),
-            h('button', {
-              style: { ...btn(false), padding: '3px 8px', fontSize: 12 },
-              onClick: () => onToggle(device),
-            }, device.disabled ? t('enableDevice') : t('disableDevice')),
-            h('button', {
-              style: { ...btn(false), padding: '3px 8px', fontSize: 12, color: COLORS.err },
-              onClick: () => onRemove(device),
-            }, t('removeDevice')),
-          ),
+      const load = device.load || {}
+      const displayName = device.nickname || device.name || device.id || '-'
+      const offline = !device.online || device.disabled
+      const stateLabel = device.disabled ? t('disabled') : device.online ? t('online') : t('offline')
+      const tone = device.disabled ? 'idle' : device.online ? 'ok' : 'err'
+      return h('div', { style: { ...card, padding: 12, minWidth: 220, flex: '1 1 260px' } },
+        h('div', { style: { ...row, gap: 8 } },
+          h('span', {
+            'aria-hidden': true,
+            style: { width: 9, height: 9, borderRadius: 999, flex: 'none', background: offline ? COLORS.idle : COLORS.ok },
+          }),
+          h('strong', {
+            style: { fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+            title: device.name ? `${t('machineName')}: ${device.name}` : undefined,
+          }, displayName),
+          h('span', { style: { marginLeft: 'auto', flex: 'none' } }, h(Badge, { tone }, stateLabel)),
         ),
-        h('div', { style: { ...muted, marginTop: 6, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, connection),
-        h('div', { style: { ...muted, marginTop: 4 } },
-          `${device.platform || '-'} · ${device.kind || '-'} · ${device.status || '-'} · ${t('load')} ${device.load && device.load.running != null ? `${device.load.running}/${device.load.max}` : '-'}`,
+        device.nickname && device.name && device.nickname !== device.name
+          ? h('div', { style: { ...muted, marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, `${t('machineName')}: ${device.name}`)
+          : null,
+        h('div', { style: { ...muted, marginTop: 6 } },
+          `${device.platform || '-'} · ${device.kind || '-'} · ${t('load')} ${load.running != null ? `${load.running}/${load.max}` : '-'}`,
         ),
         h('div', { style: { ...muted, marginTop: 2 } }, `${t('lastSeen')} ${timeAgo(device.lastSeenAt, t)}`),
-        h('div', { style: { ...wrap, marginTop: 10 } },
-          ...models.map((m) => h('span', { key: `m-${m.id}`, style: chip() }, m.id)),
-          caps.models && caps.models.length > models.length ? h('span', { style: chip() }, `+${caps.models.length - models.length}`) : null,
-        ),
-        h('div', { style: { ...wrap, marginTop: 6 } },
-          ...skills.map((s) => h('span', { key: `s-${s.id}`, style: chip() }, s.id)),
-          caps.skills && caps.skills.length > skills.length ? h('span', { style: chip() }, `+${caps.skills.length - skills.length}`) : null,
-        ),
-      )
-    }
-
-    function TaskDetail({ task, t, busy, onAction, onCopy, hostFeatures }) {
-      const active = isActiveTask(task.status)
-      const retryable = isRetryableTask(task.status)
-      // 旧版 Host 的 /status 没有「先取消再结束」逻辑，避免设备与 Hub 状态分叉，先禁用强制结束。
-      const canForceFinish = (hostFeatures || []).includes('task-status-cancel-first')
-      const rows = [
-        [t('statusLabel'), task.status],
-        [t('deviceLabel'), task.assignedDeviceName || '-'],
-        [t('priorityLabel'), task.priority == null ? '-' : String(task.priority)],
-        [t('timeoutLabel'), task.timeoutSec == null ? '-' : `${task.timeoutSec}s`],
-        [t('attemptsLabel'), `${task.attempts == null ? 0 : task.attempts}/${task.maxAttempts == null ? 1 : task.maxAttempts}`],
-        [t('createdLabel'), fmtDateTime(task.createdAt)],
-        [t('startedLabel'), fmtDateTime(task.startedAt)],
-        [t('finishedLabel'), fmtDateTime(task.finishedAt)],
-        [t('threadStepLabel'), String(task.threadStep || 1)],
-      ]
-      const events = (task.events || []).slice(-12)
-      const routeReason = task.route && task.route.reason ? String(task.route.reason) : ''
-      return h('div', {
-        style: {
-          marginTop: 10, padding: 10, borderRadius: 8, background: COLORS.layer2,
-          border: `1px solid ${COLORS.border}`, display: 'flex', flexDirection: 'column', gap: 10,
-        },
-      },
-        h('div', { style: { ...row, gap: 8, flexWrap: 'wrap' } },
-          h('span', { style: { ...muted, fontSize: 12 } }, `${t('taskId')}:`),
-          h('code', { style: { ...mono, userSelect: 'all', wordBreak: 'break-all' } }, task.id),
-          h('button', { style: miniBtn(), onClick: () => onCopy(task.id, t('copiedId')) }, t('copyId')),
-          h('button', { style: miniBtn(), onClick: () => onCopy(task.instruction || '', t('copiedInstruction')) }, t('copyInstruction')),
-        ),
-        h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 8 } },
-          ...rows.map(([label, value]) => h('div', { key: label, style: { minWidth: 0 } },
-            h('div', { style: { ...muted, fontSize: 11 } }, label),
-            h('div', { style: { fontSize: 12, marginTop: 2, wordBreak: 'break-word' } }, value),
-          )),
-        ),
-        h('div', { style: { ...muted, fontSize: 12, lineHeight: 1.5 } }, `${t('routeReason')}: ${routeReason || t('noRoute')}`),
-        h('div', { style: { borderTop: `1px solid ${COLORS.border}`, paddingTop: 8 } },
-          h('div', { style: { ...row, gap: 8, flexWrap: 'wrap', marginBottom: 6 } },
-            h('span', { style: { fontSize: 12, fontWeight: 600 } }, t('manualStatus')),
-            !task.isPlan && task.status !== 'completed'
-              ? h('button', {
-                  style: miniBtn(false, busy || !canForceFinish),
-                  disabled: busy || !canForceFinish,
-                  title: canForceFinish ? '' : t('statusRouteNeedsRestart'),
-                  onClick: () => onAction(task, 'mark-completed'),
-                }, t('markCompleted'))
-              : null,
-            !task.isPlan && task.status !== 'failed'
-              ? h('button', {
-                  style: miniBtn(false, busy || !canForceFinish),
-                  disabled: busy || !canForceFinish,
-                  title: canForceFinish ? '' : t('statusRouteNeedsRestart'),
-                  onClick: () => onAction(task, 'mark-failed'),
-                }, t('markFailed'))
-              : null,
-            !task.isPlan && retryable
-              ? h('button', { style: miniBtn(false, busy), disabled: busy, onClick: () => onAction(task, 'retry') }, t('requeue'))
-              : null,
-            active
-              ? h('button', { style: miniBtn(true, busy), disabled: busy, onClick: () => onAction(task, 'cancel') }, t('cancel'))
-              : null,
-          ),
-          h('div', { style: { ...muted, fontSize: 11, lineHeight: 1.5 } }, task.isPlan ? t('planStatusHint') : t('statusChangeHint')),
-          !task.isPlan && !canForceFinish
-            ? h('div', { style: { ...muted, color: COLORS.warn, fontSize: 11, lineHeight: 1.5 } }, t('statusRouteNeedsRestart'))
-            : null,
-        ),
-        events.length
-          ? h('div', { style: { borderTop: `1px solid ${COLORS.border}`, paddingTop: 8 } },
-              h('div', { style: { ...muted, fontSize: 12, fontWeight: 600, marginBottom: 4 } }, `${t('events')} (${events.length})`),
-              ...events.map((event, index) => h('div', {
-                key: `${event.at || ''}-${index}`,
-                style: { display: 'flex', gap: 8, padding: '3px 0', fontSize: 12, alignItems: 'baseline' },
-              },
-                h('span', { style: { ...muted, fontSize: 11, flex: 'none', minWidth: 116 } }, fmtDateTime(event.at)),
-                h('span', { style: { flex: 'none', color: COLORS.sub, fontSize: 11 } }, String(event.type || '')),
-                h('span', { style: { flex: 1, minWidth: 0, wordBreak: 'break-word', lineHeight: 1.5 } }, String(event.message || '')),
-              )),
+        caps.models && caps.models.length
+          ? h('div', { style: { ...wrap, marginTop: 8 } },
+              ...caps.models.slice(0, 3).map((m) => h('span', { key: `m-${m.id}`, style: chip() }, m.id)),
+              caps.models.length > 3 ? h('span', { style: chip() }, `+${caps.models.length - 3}`) : null,
             )
           : null,
       )
     }
 
-    function TaskRow({ task, t, tasks, expanded, busy, onAction, onToggle, onCopy, hostFeatures }) {
-      const data = task.output && task.output.data ? task.output.data : null
-      const active = isActiveTask(task.status)
-      const retryable = isRetryableTask(task.status)
-      const childTasks = (task.childTaskIds || [])
-        .map((id) => (tasks || []).find((item) => item.id === id))
-        .filter(Boolean)
-      const finishedChildren = childTasks.filter((child) => ['completed', 'failed', 'timeout', 'cancelled'].includes(child.status))
-      const threadTasks = (tasks || [])
-        .filter((item) => item.replyToTaskId && item.id !== task.id && (item.threadId || item.id) === (task.threadId || task.id))
-        .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
-      return h('div', { style: { ...card, padding: 12, opacity: task.archived ? 0.65 : 1 } },
-        h('div', { style: { ...row, justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 } },
-          h('div', { style: { flex: 1, minWidth: 0 } },
-            h('div', {
-              role: 'button',
-              tabIndex: 0,
-              'aria-expanded': expanded ? 'true' : 'false',
-              title: expanded ? t('hideDetail') : t('showDetail'),
-              onClick: onToggle,
-              onKeyDown: (e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault()
-                  onToggle()
-                }
-              },
-              style: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, cursor: 'pointer' },
-            },
-              h(Badge, { tone: statusTone(task.status) }, task.status === 'waiting' ? t('waitingAnswer') : task.status),
-              task.archived ? h(Badge, { tone: 'idle' }, t('archived')) : null,
-              h('strong', { style: { fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, task.instruction),
-              h('span', { style: { ...muted, flex: 'none' } }, expanded ? '▾' : '▸'),
-            ),
-            h('div', { style: { ...muted, marginTop: 4, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
-              h('code', { style: { ...mono, userSelect: 'all' } }, task.id),
-              h('button', { style: miniBtn(), onClick: () => onCopy(task.id, t('copiedId')) }, t('copy')),
-              h('span', null, `${task.assignedDeviceName || '-'} · ${fmtDateTime(task.createdAt)}${data && data.backend ? ` · ${data.backend}` : ''}${task.isPlan ? ` · ${t('plan')}` : ''}`),
-            ),
-          ),
-          h('div', { style: { ...row, gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end', flex: 'none' } },
-            h('button', { style: { ...btn(false, busy), padding: '3px 8px', fontSize: 12 }, disabled: busy, onClick: () => onAction(task, 'follow-up') }, t('followUp')),
-            task.status === 'waiting'
-              ? h('button', { style: { ...btn(true, busy), padding: '3px 8px', fontSize: 12 }, disabled: busy, onClick: () => onAction(task, 'answer') }, t('answer'))
-              : null,
-            active
-              ? h('button', { style: { ...btn(false, busy), padding: '3px 8px', fontSize: 12 }, disabled: busy, onClick: () => onAction(task, 'cancel') }, t('cancel'))
-              : null,
-            !task.isPlan && retryable
-              ? h('button', { style: { ...btn(false, busy), padding: '3px 8px', fontSize: 12 }, disabled: busy, onClick: () => onAction(task, 'retry') }, t('retry'))
-              : null,
-            h('button', {
-              style: { ...btn(false, busy), padding: '3px 8px', fontSize: 12 },
-              disabled: busy,
-              onClick: () => onAction(task, task.archived ? 'unarchive' : 'archive'),
-            }, task.archived ? t('unarchive') : t('archive')),
-            h('button', {
-              style: { ...btn(false, busy), padding: '3px 8px', fontSize: 12, color: COLORS.err },
-              disabled: busy,
-              onClick: () => onAction(task, 'delete'),
-            }, t('delete')),
-            h('button', { style: { ...btn(false, busy), padding: '3px 8px', fontSize: 12 }, disabled: busy, onClick: onToggle }, expanded ? t('hideDetail') : t('detail')),
-          ),
-        ),
-        expanded ? h(TaskDetail, { task, t, busy, onAction, onCopy, hostFeatures }) : null,
-        childTasks.length
-          ? h('div', { style: { marginTop: 8, padding: 8, borderRadius: 8, background: COLORS.layer2, border: `1px solid ${COLORS.border}` } },
-              h('div', { style: { ...muted, marginBottom: 5 } }, `${t('subtasks')} ${finishedChildren.length}/${childTasks.length}`),
-              ...childTasks.map((child) => h('div', {
-                key: child.id,
-                style: { ...row, gap: 8, padding: '5px 0', borderTop: `1px solid ${COLORS.border}` },
-              },
-                h(Badge, { tone: statusTone(child.status) }, child.status),
-                h('span', { style: { fontSize: 12, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, child.instruction),
-                h('span', { style: { ...muted, fontSize: 11 } }, child.assignedDeviceName || ''),
-              )),
-            )
-          : null,
-        threadTasks.length
-          ? h('div', { style: { marginTop: 8, padding: 8, borderRadius: 8, background: 'rgba(124,140,255,0.06)', border: '1px dashed rgba(148,163,255,0.25)' } },
-              h('div', { style: { ...muted, marginBottom: 5 } }, `${t('thread')} · ${threadTasks.length + 1} ${t('steps')}`),
-              ...threadTasks.map((child) => h('div', {
-                key: child.id,
-                style: { ...row, gap: 8, padding: '5px 0', borderTop: `1px solid ${COLORS.border}` },
-              },
-                h(Badge, { tone: statusTone(child.status) }, child.status),
-                h('span', { style: { fontSize: 12, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, child.instruction),
-                h('span', { style: { ...muted, fontSize: 11 } }, child.assignedDeviceName || ''),
-              )),
-            )
-          : null,
-        task.output && task.output.text
-          ? h('div', {
-              style: {
-                marginTop: 8, padding: 10, borderRadius: 8, background: COLORS.layer2,
-                border: `1px solid ${COLORS.border}`, whiteSpace: 'pre-wrap', fontSize: 12,
-                maxHeight: 180, overflow: 'auto', lineHeight: 1.5,
-              },
-            }, task.output.text)
-          : null,
-        task.status === 'waiting' && task.progress && task.progress.question
-          ? h('div', {
-              style: {
-                marginTop: 8, padding: 9, borderRadius: 8, background: 'rgba(255,191,90,0.08)',
-                border: '1px solid rgba(255,191,90,0.28)', color: '#ffe2ad', whiteSpace: 'pre-wrap',
-                fontSize: 12, lineHeight: 1.5,
-              },
-            }, `${t('answerPrompt')}\n${task.progress.question}`)
-          : null,
-        task.error ? h('div', { style: { ...muted, color: COLORS.err, marginTop: 6 } }, `${t('error')}: ${task.error}`) : null,
+    // 最近任务只读行：只给状态和标题，任务详情与操作去浏览器控制台。
+    function RecentTaskRow({ task, t }) {
+      const tone = statusTone(task.status)
+      const color = tone === 'ok' ? COLORS.ok : tone === 'err' ? COLORS.err : tone === 'warn' ? COLORS.warn : COLORS.sub
+      const raw = String(task.instruction || task.id || '').replace(/\s+/g, ' ').trim()
+      const title = raw.length > 90 ? `${raw.slice(0, 90)}…` : raw
+      return h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 10, padding: '7px 0', borderBottom: `1px solid ${COLORS.border}` } },
+        h('span', { style: { flex: 'none', fontSize: 12, fontWeight: 600, minWidth: 54, color } }, t(task.status) || task.status),
+        h('span', {
+          style: { flex: 1, minWidth: 0, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+          title: raw,
+        }, title),
+        h('span', { style: { ...muted, flex: 'none' } },
+          `${task.assignedDeviceName || task.assignedDeviceId || '-'} · ${timeAgo(task.updatedAt || task.createdAt, t)}`),
       )
     }
 
-    function ConsoleTab({ status, snapshot, t, onRefresh, onHub, onTaskAction, onSend, onRenameDevice, onRemoveDevice, onToggleDevice, onToggleTask, onCopyText, expandedTasks, hubOrigin, busy, message, messageTone, hostFeatures }) {
+    // 仪表盘：只读概况 + 「在浏览器打开完整控制台」入口。
+    function ConsoleTab({ status, snapshot, t, busy, message, messageTone, hubOrigin, onRefresh, onHub, onGuide }) {
+      const hub = (status && status.hub) || {}
       const devices = (snapshot && snapshot.devices) || []
+      const stats = (snapshot && snapshot.stats) || {}
       const allTasks = (snapshot && snapshot.tasks) || []
       const tasks = allTasks.filter((task) => !task.parentTaskId && !task.replyToTaskId)
-      const stats = (snapshot && snapshot.stats) || {}
-      const [instruction, setInstruction] = useState('')
-      const [profile, setProfile] = useState('')
-      const [model, setModel] = useState('')
-      const [skills, setSkills] = useState('')
-      const [deviceId, setDeviceId] = useState('')
-      const profiles = useMemo(() => {
-        const set = new Set(['hermes', 'opencode', 'cli-shell'])
-        for (const d of devices) for (const p of (d.capabilities && d.capabilities.profiles) || []) set.add(p.id)
-        return Array.from(set)
-      }, [devices])
-      const models = useMemo(() => {
-        const set = new Set()
-        for (const d of devices) for (const m of (d.capabilities && d.capabilities.models) || []) if (m.available !== false) set.add(m.id)
-        return Array.from(set)
-      }, [devices])
-      const submit = async () => {
-        if (!instruction.trim()) return
-        const requirements = {}
-        if (profile) requirements.profile = profile
-        if (model) requirements.model = model
-        if (deviceId) requirements.deviceId = deviceId
-        const skillList = skills.split(/[,，\s]+/).map((x) => x.trim()).filter(Boolean)
-        if (skillList.length) requirements.skills = skillList
-        await onSend({ instruction: instruction.trim(), requirements, priority: 5, timeoutSec: 600 })
-        setInstruction('')
-      }
-      const hub = status && status.hub ? status.hub : {}
+      const recentTasks = tasks.slice(0, 6)
+      const origin = hub.origin || hubOrigin || ''
       return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 16 } },
         h('div', { style: { ...card, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 } },
-          h('div', { style: { ...row } },
+          h('div', { style: { ...row, gap: 10, flexWrap: 'wrap' } },
             h(Badge, { tone: hub.running ? 'ok' : 'err' }, hub.running ? t('running') : t('stopped')),
-            h('span', { style: muted }, `${hub.origin || ''}${hub.owned ? ` · ${t('owned')}` : hub.running ? ` · ${t('external')}` : ''}`),
-            hub.joinCode ? h('span', { style: { ...muted, marginLeft: 8 } }, `${t('joinCode')}: ${hub.joinCode}`) : null,
+            h('span', { style: muted }, `${origin}${hub.owned ? ` · ${t('owned')}` : hub.running ? ` · ${t('external')}` : ''}`),
           ),
-          h('div', { style: { ...row, gap: 8 } },
+          h('div', { style: { ...row, gap: 8, flexWrap: 'wrap' } },
+            h('a', {
+              href: `${ROOT}/api/dsh/open`,
+              target: '_blank',
+              rel: 'noopener noreferrer',
+              title: t('openConsoleHint'),
+              style: { ...btn(true), textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 6 },
+            }, t('openConsole')),
+            h('button', { style: btn(false), onClick: onGuide, title: t('guide') }, t('guide')),
             h('button', { style: btn(false, busy), onClick: onRefresh }, t('refresh')),
+            h('button', {
+              style: btn(false, busy),
+              onClick: () => onHub('restart'),
+              disabled: busy,
+              title: hub.owned ? t('restartHubHint') : t('restartExternalHint'),
+            }, t('restartHub')),
             hub.running
-              ? h('button', { style: btn(false, busy || !hub.owned), onClick: () => onHub('stop'), disabled: busy || !hub.owned }, t('stop'))
+              ? h('button', { style: btn(false, busy || !hub.owned), onClick: () => onHub('stop'), disabled: busy || !hub.owned, title: hub.owned ? '' : t('stopExternalHint') }, t('stop'))
               : h('button', { style: btn(true, busy), onClick: () => onHub('start'), disabled: busy }, t('start')),
           ),
         ),
@@ -604,51 +434,19 @@ window.__ModuleLoader__.load({
         h('section', null,
           h('h3', { style: { fontSize: 14, margin: '0 0 10px' } }, `${t('devices')} (${devices.length})`),
           devices.length
-            ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 12 } }, ...devices.map((d) => h(DeviceCard, { key: d.id, device: d, t, hubOrigin, onRename: onRenameDevice, onRemove: onRemoveDevice, onToggle: onToggleDevice })))
+            ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 12 } },
+                ...devices.map((d) => h(DeviceCard, { key: d.id, device: d, t })))
             : h('div', { style: { ...card, ...muted } }, t('noDevices')),
         ),
         h('section', { style: card },
-          h('h3', { style: { fontSize: 14, margin: '0 0 10px' } }, t('command')),
-          h('textarea', {
-            value: instruction, onChange: (e) => setInstruction(e.target.value), rows: 3,
-            placeholder: t('instructionPlaceholder'),
-            style: { ...inputStyle, resize: 'vertical', minHeight: 70 },
-          }),
-          h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10, marginTop: 10 } },
-            h(Field, { label: t('profile') }, h('select', { value: profile, onChange: (e) => setProfile(e.target.value), style: inputStyle },
-              h('option', { value: '' }, t('profileAuto')),
-              ...profiles.map((p) => h('option', { key: p, value: p }, p)),
-            )),
-            h(Field, { label: t('model') }, h('select', { value: model, onChange: (e) => setModel(e.target.value), style: inputStyle },
-              h('option', { value: '' }, '-'),
-              ...models.map((m) => h('option', { key: m, value: m }, m)),
-            )),
-            h(Field, { label: t('device') }, h('select', { value: deviceId, onChange: (e) => setDeviceId(e.target.value), style: inputStyle },
-              h('option', { value: '' }, t('profileAuto')),
-              ...devices.filter((d) => d.online).map((d) => h('option', { key: d.id, value: d.id }, d.name)),
-            )),
-            h(Field, { label: t('skills') }, h('input', { value: skills, onChange: (e) => setSkills(e.target.value), style: inputStyle, placeholder: 'office-docx, cli-exec' })),
+          h('div', { style: { ...row, justifyContent: 'space-between', gap: 10, flexWrap: 'wrap', marginBottom: 6 } },
+            h('h3', { style: { fontSize: 14, margin: 0 } }, `${t('recentTasks')} (${tasks.length})`),
+            h('span', { style: muted }, t('openConsoleHint')),
           ),
-          h('div', { style: { ...row, justifyContent: 'flex-end', marginTop: 6 } },
-            h('button', { style: btn(true, busy || !instruction.trim()), disabled: busy || !instruction.trim(), onClick: submit }, busy ? t('sending') : t('send')),
-          ),
-        ),
-        h('section', null,
-          h('h3', { style: { fontSize: 14, margin: '0 0 10px' } }, `${t('tasks')} (${tasks.length})`),
-          tasks.length
-            ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 10 } }, ...tasks.map((task) => h(TaskRow, {
-                key: task.id,
-                task,
-                t,
-                tasks: allTasks,
-                expanded: Boolean(expandedTasks && expandedTasks[task.id]),
-                busy,
-                onAction: onTaskAction,
-                onToggle: () => onToggleTask(task.id),
-                onCopy: onCopyText,
-                hostFeatures,
-              })))
-            : h('div', { style: { ...card, ...muted } }, t('noTasks')),
+          recentTasks.length
+            ? h('div', { style: { display: 'flex', flexDirection: 'column' } },
+                ...recentTasks.map((task) => h(RecentTaskRow, { key: task.id, task, t })))
+            : h('div', { style: muted }, t('noTasks')),
         ),
       )
     }
@@ -660,24 +458,125 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function SettingsTab({ settings, secrets, status, t, onSave, busy, message }) {
+    // 命令块：等宽展示 + 一键复制；剪贴板不可用时保持可选中的纯文本。
+    function CodeBlock({ text, t }) {
+      const [copied, setCopied] = useState(false)
+      const copy = () => {
+        const write = typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText
+        if (!write) return
+        void navigator.clipboard.writeText(String(text)).then(() => {
+          setCopied(true)
+          setTimeout(() => setCopied(false), 1500)
+        }).catch(() => {})
+      }
+      return h('div', { style: { position: 'relative', marginTop: 6 } },
+        h('pre', { style: { ...preStyle, margin: 0 } }, text),
+        h('button', {
+          onClick: copy,
+          title: t('copy'),
+          style: {
+            position: 'absolute', top: 6, right: 6, padding: '2px 8px', fontSize: 11,
+            borderRadius: 6, border: `1px solid ${COLORS.border}`, background: COLORS.layer,
+            color: COLORS.sub, cursor: 'pointer',
+          },
+        }, copied ? t('copied') : t('copy')),
+      )
+    }
+
+    // 教程里的编号步骤：标题是一句可读的说明，children 放命令块或补充说明。
+    function Step({ index, text, children }) {
+      return h('div', { style: { marginTop: 12 } },
+        h('div', { style: { fontSize: 13, fontWeight: 600, lineHeight: 1.6 } }, `${index}. ${text}`),
+        children ? h('div', null, children) : null,
+      )
+    }
+
+    // 教程：把 PC / 手机接成工作机的分步指南，命令里的 Hub 地址与加入码按当前状态自动填。
+    function GuideTab({ t, hubOrigin, joinCode }) {
+      const hub = hubOrigin || 'http://<母机IP>:7317'
+      const code = joinCode || '<加入码>'
+      const sectionCard = { ...card }
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 16 } },
+        h('section', { style: sectionCard },
+          h('h3', { style: { fontSize: 14, margin: '0 0 8px' } }, t('guide')),
+          h('p', { style: { ...muted, margin: 0, lineHeight: 1.7 } }, t('guideIntro')),
+          h('div', { style: { ...muted, marginTop: 6, lineHeight: 1.6 } }, t('guideHint')),
+        ),
+        h('section', { style: sectionCard },
+          h('h3', { style: { fontSize: 14, margin: 0 } }, t('addPc')),
+          h(Step, { index: 1, text: t('pcStep1') }),
+          h(Step, { index: 2, text: t('pcStep2') },
+            h(CodeBlock, { t, text: 'git clone https://github.com/andrewngg/dsh-superagent-battlestar.git super-butler' })),
+          h(Step, { index: 3, text: t('pcStep3') },
+            h(CodeBlock, { t, text: 'copy device-agent\\configs\\cli-machine.example.json device-agent\\configs\\cli-machine.json' })),
+          h(Step, { index: 4, text: t('pcStep4') },
+            h(CodeBlock, { t, text: `node device-agent/agent.js --hub ${hub} --join-code ${code} --name "书房工作站" --config device-agent/configs/cli-machine.json --state-dir device-agent/.state/study-pc` })),
+          h(Step, { index: 5, text: t('pcStep5') }),
+          h(Step, { index: 6, text: t('pcStep6') }),
+        ),
+        h('section', { style: sectionCard },
+          h('h3', { style: { fontSize: 14, margin: 0 } }, t('addPhoneWorker')),
+          h(Step, { index: 1, text: t('phoneStep1') }),
+          h(Step, { index: 2, text: t('phoneStep2') }),
+          h(Step, { index: 3, text: t('phoneStep3') },
+            h(CodeBlock, { t, text: "pipx install 'git+https://github.com/wangzan101/Mika.git@<tag>#subdirectory=tools/mika'\nmika doctor --json" })),
+          h(Step, { index: 4, text: t('phoneStep4') },
+            h(CodeBlock, { t, text: 'copy device-agent\\configs\\phone-mika.example.json device-agent\\configs\\phone-mika.json' })),
+          h(Step, { index: 5, text: t('phoneStep5') },
+            h(CodeBlock, { t, text: `node device-agent/agent.js --hub ${hub} --join-code ${code} --name "手机工作机 Mika" --config device-agent/configs/phone-mika.json --state-dir device-agent/.state/phone-mika` })),
+          h(Step, { index: 6, text: t('phoneStep6') }),
+        ),
+        h('section', { style: sectionCard },
+          h('h3', { style: { fontSize: 14, margin: 0 } }, t('phoneControl')),
+          h(Step, { index: 1, text: t('ctrlStep1') },
+            h(CodeBlock, { t, text: `${hub}/m?token=<管理员令牌>` })),
+          h(Step, { index: 2, text: t('ctrlStep2') },
+            h(CodeBlock, { t, text: 'dist/BattleStar-0.1.2.apk' })),
+          h(Step, { index: 3, text: t('ctrlStep3') }),
+        ),
+        h('section', { style: sectionCard },
+          h('h3', { style: { fontSize: 14, margin: 0 } }, t('guideTrouble')),
+          h('ul', { style: { margin: '8px 0 0', paddingLeft: 18, lineHeight: 1.7, color: COLORS.sub, fontSize: 12.5 } },
+            h('li', null, t('troubleOffline')),
+            h('li', null, t('troubleJoinCode')),
+            h('li', null, t('troubleRouting')),
+          ),
+          h('div', { style: { ...muted, marginTop: 10, lineHeight: 1.6 } }, t('guideDocs')),
+        ),
+      )
+    }
+
+    function SettingsTab({ settings, secrets, status, credentials, t, onSave, busy, message }) {
       const s = settings || {}
       const hub = status && status.hub ? status.hub : {}
       const [form, setForm] = useState({
         projectRoot: s.projectRoot || '', hubPort: s.hubPort || 7317, autoStart: s.autoStart !== false,
+        devWorkspacePath: s.devWorkspacePath || '',
         githubUser: s.githubUser || '', defaultModel: s.defaultModel || 'deepseek-chat',
         hubNickname: s.hubNickname || '',
       })
       const [keys, setKeys] = useState({ githubToken: '', deepseekApiKey: '', agnesApiKey: '', doubaoApiKey: '', opencodeApiKey: '' })
       const [tests, setTests] = useState({})
       const [localMsg, setLocalMsg] = useState('')
+      const [gitInfo, setGitInfo] = useState(null)
+      const [gitBusy, setGitBusy] = useState(false)
+      const [gitResult, setGitResult] = useState(null)
+      const [gitError, setGitError] = useState('')
+      useEffect(() => {
+        let alive = true
+        call('/dsh/git-push')
+          .then((info) => { if (alive) setGitInfo(info) })
+          .catch((err) => { if (alive && isRouteMissingError(err)) setGitError(t('gitPushNeedsRestart')) })
+        return () => { alive = false }
+      }, [])
       useEffect(() => {
         setForm({
           projectRoot: s.projectRoot || '', hubPort: s.hubPort || 7317, autoStart: s.autoStart !== false,
+          devWorkspacePath: s.devWorkspacePath || '',
           githubUser: s.githubUser || '', defaultModel: s.defaultModel || 'deepseek-chat',
           hubNickname: s.hubNickname || '',
         })
-      }, [s.projectRoot, s.hubPort, s.autoStart, s.githubUser, s.defaultModel, s.hubNickname])
+      }, [s.projectRoot, s.hubPort, s.autoStart, s.devWorkspacePath, s.githubUser, s.defaultModel, s.hubNickname])
       const set = (k, v) => setForm((prev) => ({ ...prev, [k]: v }))
       const save = async () => {
         const payload = { settings: { ...form, hubPort: Number(form.hubPort) || 7317 }, secrets: {} }
@@ -703,12 +602,28 @@ window.__ModuleLoader__.load({
         ['githubToken', 'githubToken'], ['deepseekApiKey', 'deepseekApiKey'],
         ['agnesApiKey', 'agnesApiKey'], ['doubaoApiKey', 'doubaoApiKey'], ['opencodeApiKey', 'opencodeApiKey'],
       ]
+      const runGitPush = async () => {
+        setGitBusy(true)
+        setGitResult(null)
+        setGitError('')
+        try {
+          const result = await call('/dsh/git-push', { method: 'POST', body: '{}' })
+          setGitResult(result)
+          if (result && result.repo) setGitInfo(result)
+        } catch (err) {
+          setGitError(isRouteMissingError(err) ? t('gitPushNeedsRestart') : (err.message || String(err)))
+        } finally {
+          setGitBusy(false)
+        }
+      }
       const secretMap = Object.fromEntries((secrets || []).map((x) => [x.key, x]))
       return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 16 } },
         h('section', { style: card },
           h('h3', { style: { fontSize: 14, margin: '0 0 12px' } }, t('hubSettings')),
+          h('div', { style: { ...muted, marginBottom: 8 } }, t('devWorkspaceHint')),
           h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 12 } },
             h(Field, { label: t('projectRoot') }, h('input', { value: form.projectRoot, onChange: (e) => set('projectRoot', e.target.value), style: inputStyle })),
+            h(Field, { label: t('devWorkspacePath') }, h('input', { value: form.devWorkspacePath, onChange: (e) => set('devWorkspacePath', e.target.value), style: inputStyle, placeholder: 'C:\\Users\\<you>\\Documents\\super ai' })),
             h(Field, { label: t('hubNickname') }, h('input', { value: form.hubNickname, onChange: (e) => set('hubNickname', e.target.value), style: inputStyle, placeholder: 'BattleStar母机' })),
             h(Field, { label: t('hubPort') }, h('input', { value: form.hubPort, onChange: (e) => set('hubPort', e.target.value), style: inputStyle, inputMode: 'numeric' })),
             h(Field, { label: t('githubUser') }, h('input', { value: form.githubUser, onChange: (e) => set('githubUser', e.target.value), style: inputStyle, placeholder: 'octocat' })),
@@ -723,6 +638,9 @@ window.__ModuleLoader__.load({
         h('section', { style: card },
           h('h3', { style: { fontSize: 14, margin: '0 0 6px' } }, t('keys')),
           h('div', { style: { ...muted, marginBottom: 12 } }, t('keysHint')),
+          credentials && credentials.available === false
+            ? h('div', { style: { ...muted, marginBottom: 12, lineHeight: 1.6, color: COLORS.warn } }, t('credentialsFallback'))
+            : null,
           ...keyFields.map(([key, labelKey]) => {
             const info = secretMap[key] || {}
             const tested = tests[key]
@@ -731,6 +649,7 @@ window.__ModuleLoader__.load({
                 h('span', { style: { fontSize: 13, fontWeight: 500 } }, t(labelKey)),
                 h('span', { style: { ...row, gap: 6 } },
                   h(Badge, { tone: info.configured ? 'ok' : 'idle' }, info.configured ? t('configured') : t('notConfigured')),
+                  info.source === 'plugin-local' ? h('span', { style: { ...muted, fontSize: 11 } }, t('credentialsLocalBadge')) : null,
                   info.configured
                     ? h('button', {
                         style: { ...btn(false), padding: '2px 8px', fontSize: 12 },
@@ -756,67 +675,30 @@ window.__ModuleLoader__.load({
             )
           }),
         ),
+        h('section', { style: card },
+          h('h3', { style: { fontSize: 14, margin: '0 0 8px' } }, t('devTools')),
+          h('div', { style: { ...muted, marginBottom: 8, lineHeight: 1.6 } }, t('gitPushHint')),
+          h('div', { style: { ...muted, marginBottom: 10, lineHeight: 1.6 } },
+            gitInfo
+              ? `${t('gitRepo')}: ${gitInfo.repo || '—'}${gitInfo.branch ? ` · ${t('gitBranch')}: ${gitInfo.branch}` : ''}${gitInfo.remote ? ` · ${t('gitRemote')}: ${gitInfo.remote}` : ''}${gitInfo.remote ? ` · ${t('gitUpstream')}: ${gitInfo.upstream || t('gitNoUpstream')}` : ''}`
+              : t('gitRepoUnknown')),
+          h('button', {
+            style: btn(true, gitBusy), disabled: gitBusy, onClick: () => void runGitPush(),
+          }, gitBusy ? t('gitPushing') : t('gitPush')),
+          gitResult
+            ? h('div', { style: { marginTop: 10 } },
+                h('div', { style: { ...muted, fontWeight: 600, color: gitResult.ok ? COLORS.ok : COLORS.err } },
+                  `${gitResult.ok ? t('gitPushOk') : t('gitPushFailed')}${gitResult.message ? ` · ${gitResult.message}` : ''}${gitResult.branch ? ` · ${gitResult.branch}` : ''}`),
+                gitResult.output ? h('pre', { style: preStyle }, gitResult.output) : null,
+              )
+            : null,
+          gitError ? h('div', { style: { marginTop: 10, color: COLORS.err } }, gitError) : null,
+        ),
         h('div', { style: { ...row, justifyContent: 'flex-end' } },
           h('button', { style: btn(true, busy), disabled: busy, onClick: save }, busy ? t('saving') : t('save')),
         ),
         (message || localMsg) ? h('div', { style: { ...muted, textAlign: 'right' } }, message || localMsg) : null,
         h('div', { style: { ...muted } }, t('adminTokenHidden')),
-      )
-    }
-
-    // 面板内弹窗：Electron 不支持 window.prompt，继续/回答/手动改状态都走这里。
-    function Dialog({ modal, busy, t, onChange, onCancel, onConfirm }) {
-      if (!modal) return null
-      const dangerStyle = modal.danger
-        ? { borderColor: COLORS.err, background: COLORS.err, color: '#ffffff' }
-        : {}
-      return h('div', {
-        style: {
-          position: 'fixed', inset: 0, zIndex: 1000, padding: 20,
-          background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center',
-        },
-        onMouseDown: (event) => { if (event.target === event.currentTarget) onCancel() },
-      },
-        h('div', {
-          role: 'dialog', 'aria-modal': 'true', 'aria-label': modal.title,
-          style: {
-            width: '100%', maxWidth: 480, background: COLORS.layer, color: COLORS.text,
-            border: `1px solid ${COLORS.border}`, borderRadius: 12, padding: 18,
-            boxShadow: '0 18px 48px rgba(0,0,0,0.35)', boxSizing: 'border-box',
-          },
-        },
-          h('div', { style: { ...row, justifyContent: 'space-between', gap: 10 } },
-            h('h3', { style: { margin: 0, fontSize: 15 } }, modal.title),
-            h('button', {
-              style: { ...btn(false), padding: '2px 8px', fontSize: 12 },
-              'aria-label': t('close'),
-              onClick: onCancel,
-            }, '×'),
-          ),
-          modal.message ? h('div', { style: { ...muted, marginTop: 8, lineHeight: 1.6, whiteSpace: 'pre-wrap' } }, modal.message) : null,
-          modal.input
-            ? (modal.input.multiline
-                ? h('textarea', {
-                    autoFocus: true, rows: modal.input.rows || 3, value: modal.value || '',
-                    placeholder: modal.input.placeholder || '', onChange: (event) => onChange(event.target.value),
-                    style: { ...inputStyle, marginTop: 10, resize: 'vertical', minHeight: 72 },
-                  })
-                : h('input', {
-                    autoFocus: true, value: modal.value || '', placeholder: modal.input.placeholder || '',
-                    onChange: (event) => onChange(event.target.value),
-                    style: { ...inputStyle, marginTop: 10 },
-                  }))
-            : null,
-          modal.error ? h('div', { style: { ...muted, color: COLORS.err, marginTop: 8 } }, modal.error) : null,
-          h('div', { style: { ...row, justifyContent: 'flex-end', gap: 8, marginTop: 14 } },
-            h('button', { style: btn(false, busy), disabled: busy, onClick: onCancel }, t('dialogCancel')),
-            h('button', {
-              style: { ...btn(true, busy), ...dangerStyle },
-              disabled: busy,
-              onClick: () => void onConfirm(),
-            }, modal.confirmLabel || t('dialogOk')),
-          ),
-        ),
       )
     }
 
@@ -830,37 +712,18 @@ window.__ModuleLoader__.load({
       const [message, setMessage] = useState('')
       const [messageTone, setMessageTone] = useState('')
       const [error, setError] = useState('')
-      const [editingHub, setEditingHub] = useState(false)
-      const [hubName, setHubName] = useState('')
-      const [expandedTasks, setExpandedTasks] = useState({})
-      const [modal, setModal] = useState(null)
-      const [hostFeatures, setHostFeatures] = useState([])
       const hubDisplayName = (settingsData && settingsData.settings && settingsData.settings.hubNickname) || t('title')
-
-      useEffect(() => { setHubName(hubDisplayName) }, [hubDisplayName])
-
-      useEffect(() => {
-        if (!modal) return undefined
-        const onKeyDown = (event) => { if (event.key === 'Escape') setModal(null) }
-        window.addEventListener('keydown', onKeyDown)
-        return () => window.removeEventListener('keydown', onKeyDown)
-      }, [modal])
 
       const load = useCallback(async () => {
         try {
-          const [statusRes, snapshotRes, settingsRes, rootRes] = await Promise.all([
+          const [statusRes, snapshotRes, settingsRes] = await Promise.all([
             call('/status'),
             call('/snapshot?limit=80').catch(() => null),
             call('/settings').catch(() => null),
-            // 根路由列出 Host 能力，用来判断 /status 是否已带「先取消再结束」逻辑。
-            fetch(`${ROOT}/`, { headers: { Accept: 'application/json' } })
-              .then((res) => (res.ok ? res.json() : null))
-              .catch(() => null),
           ])
           setStatus(statusRes)
           if (snapshotRes) setSnapshot(snapshotRes)
           if (settingsRes) setSettingsData(settingsRes)
-          setHostFeatures(rootRes && Array.isArray(rootRes.features) ? rootRes.features : [])
           setError('')
         } catch (err) {
           setError(err.message || t('apiUnavailable'))
@@ -893,156 +756,28 @@ window.__ModuleLoader__.load({
       }
 
       const onHub = (action) => withBusy(async () => {
-        await call(`/hub/${action}`, { method: 'POST', body: '{}' })
+        let res
+        try {
+          res = await call(`/hub/${action}`, { method: 'POST', body: '{}' })
+        } catch (err) {
+          // 旧 Host 没有「重启 Hub」路由时，直接告诉用户需要重启 DSH，而不是抛出「未知路由」。
+          if (action === 'restart' && isRouteMissingError(err)) throw new Error(t('restartNeedsRestart'))
+          throw err
+        }
+        if (action === 'restart') {
+          if (res && res.ok === false) {
+            notify(res.reason || t('restartHubFailed'), 'error')
+            return
+          }
+          notify(t('hubRestarting'))
+          await new Promise((resolve) => setTimeout(resolve, 3000))
+          await load()
+          return
+        }
         await load()
         notify(action === 'start' ? t('running') : t('stopped'))
       })
-      const onSend = (task) => withBusy(async () => {
-        const res = await call('/tasks', { method: 'POST', body: JSON.stringify(task) })
-        await load()
-        const info = res && res.task && res.task.route ? res.task.route.reason : ''
-        notify(`${t('sent')}${info ? ` · ${info}` : ''}`)
-      })
-      const taskApi = (id, suffix) => `/tasks/${encodeURIComponent(id)}${suffix || ''}`
-      const postTaskAction = (id, suffix, body) => call(taskApi(id, suffix), {
-        method: 'POST',
-        body: JSON.stringify(body || {}),
-      })
-      const toggleTask = (id) => setExpandedTasks((prev) => ({ ...prev, [id]: !prev[id] }))
-      const onCopyText = async (text, okMessage) => {
-        try {
-          await copyToClipboard(text)
-          notify(okMessage || t('copied'))
-        } catch {
-          notify(t('copyFailed'), 'error')
-        }
-      }
-      const openDialog = (options) => setModal({ value: '', ...options })
-      const confirmModal = async () => {
-        const current = modal
-        if (!current) return
-        const value = String(current.value || '').trim()
-        if (current.input && current.input.required && !value) {
-          setModal((prev) => (prev ? { ...prev, error: t('inputRequired') } : prev))
-          return
-        }
-        setModal(null)
-        if (typeof current.onConfirm === 'function') await current.onConfirm(value)
-      }
-      const onTaskAction = (task, action) => {
-        if (!task) return
-        const id = task.id
-        const active = isActiveTask(task.status)
-        if (action === 'cancel') {
-          openDialog({
-            title: t('cancelTaskTitle'), message: t('cancelConfirm'), confirmLabel: t('cancel'), danger: true,
-            onConfirm: () => withBusy(async () => { await postTaskAction(id, '/cancel'); await load() }),
-          })
-          return
-        }
-        if (action === 'delete') {
-          openDialog({
-            title: t('delete'), message: t('deleteConfirm'), confirmLabel: t('delete'), danger: true,
-            onConfirm: () => withBusy(async () => { await call(taskApi(id), { method: 'DELETE' }); await load() }),
-          })
-          return
-        }
-        if (action === 'archive' || action === 'unarchive') {
-          openDialog({
-            title: action === 'archive' ? t('archive') : t('unarchive'),
-            message: `${t('taskId')}: ${task.id}`,
-            confirmLabel: action === 'archive' ? t('archive') : t('unarchive'),
-            onConfirm: () => withBusy(async () => { await postTaskAction(id, `/${action}`); await load() }),
-          })
-          return
-        }
-        if (action === 'retry') {
-          if (task.isPlan) {
-            openDialog({ title: t('requeue'), message: t('planStatusHint'), confirmLabel: t('close'), onConfirm: () => {} })
-            return
-          }
-          withBusy(async () => { await postTaskAction(id, '/retry'); await load() })
-          return
-        }
-        if (action === 'follow-up') {
-          if (active) {
-            openDialog({
-              title: t('followUp'), message: t('activeFollowUpHint'), confirmLabel: t('cancelTaskTitle'), danger: true,
-              onConfirm: () => withBusy(async () => { await postTaskAction(id, '/cancel'); await load() }),
-            })
-            return
-          }
-          openDialog({
-            title: t('followUp'), message: t('followUpHint'),
-            input: { multiline: true, rows: 4, placeholder: t('followUpPrompt'), required: true },
-            confirmLabel: t('followUp'),
-            onConfirm: (value) => withBusy(async () => {
-              await postTaskAction(id, '/follow-up', { instruction: value })
-              await load()
-              notify(t('followUpCreated'))
-            }),
-          })
-          return
-        }
-        if (action === 'answer') {
-          openDialog({
-            title: t('answer'), message: t('answerPrompt'),
-            input: { multiline: true, rows: 3, placeholder: t('answerPrompt'), required: true },
-            confirmLabel: t('answer'),
-            onConfirm: (value) => withBusy(async () => {
-              await postTaskAction(id, '/answer', { text: value })
-              await load()
-              notify(t('answerSent'))
-            }),
-          })
-          return
-        }
-        if (action === 'mark-completed' || action === 'mark-failed') {
-          if (task.isPlan) {
-            openDialog({ title: t('manualStatus'), message: t('planStatusHint'), confirmLabel: t('close'), onConfirm: () => {} })
-            return
-          }
-          const targetStatus = action === 'mark-completed' ? 'completed' : 'failed'
-          const terminal = isTerminalTask(task.status)
-          openDialog({
-            title: action === 'mark-completed' ? t('markCompleted') : t('markFailed'),
-            message: terminal ? `${t('statusChangeHint')}\n${t('overwriteHint')}` : t('statusChangeHint'),
-            input: { multiline: true, rows: 3, placeholder: t('statusNotePlaceholder') },
-            confirmLabel: t('applyStatus'),
-            onConfirm: (value) => withBusy(async () => {
-              try {
-                await postTaskAction(id, '/status', { status: targetStatus, note: value })
-              } catch (err) {
-                if (isMissingRouteError(err)) throw new Error(t('statusRouteNeedsRestart'))
-                throw err
-              }
-              await load()
-              notify(t('statusUpdated'))
-            }),
-          })
-        }
-      }
-      const onRenameDevice = (id, name) => withBusy(async () => {
-        const next = String(name || '').trim()
-        if (!next) throw new Error(t('nameRequired'))
-        await call(`/devices/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ name: next }) })
-        await load()
-        notify(t('deviceRenamed'))
-      })
-      const onRemoveDevice = (device) => withBusy(async () => {
-        if (!window.confirm(t('removeDeviceConfirm'))) return
-        await call(`/devices/${encodeURIComponent(device.id)}`, { method: 'DELETE' })
-        await load()
-        notify(t('deviceRemoved'))
-      })
-      const onToggleDevice = (device) => withBusy(async () => {
-        const res = await call(`/devices/${encodeURIComponent(device.id)}`, {
-          method: 'PATCH',
-          body: JSON.stringify({ disabled: !device.disabled }),
-        })
-        await load()
-        notify(res && res.device && res.device.disabled ? t('deviceDisabled') : t('deviceEnabled'))
-      })
+
       const onSave = async (payload) => {
         setBusy(true)
         notify('')
@@ -1058,12 +793,6 @@ window.__ModuleLoader__.load({
           setBusy(false)
         }
       }
-      const saveHubName = async () => {
-        const next = String(hubName || '').trim()
-        if (!next) return
-        const res = await onSave({ settings: { hubNickname: next } })
-        if (res) { setEditingHub(false); notify(t('hubNicknameSaved')) }
-      }
 
       const header = h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' } },
         h('div', { style: { ...row, gap: 12 } },
@@ -1071,36 +800,22 @@ window.__ModuleLoader__.load({
             h(ButlerIcon, { size: 24 }),
           ),
           h('div', null,
-            h('div', { style: { ...row, gap: 8 } },
-              editingHub
-                ? h('input', {
-                    value: hubName, autoFocus: true,
-                    onChange: (e) => setHubName(e.target.value),
-                    onKeyDown: (e) => { if (e.key === 'Enter') void saveHubName(); if (e.key === 'Escape') setEditingHub(false) },
-                    style: { ...inputStyle, width: 220, padding: '4px 8px', fontSize: 18 },
-                  })
-                : h('h1', { style: { fontSize: 20, margin: 0 } }, hubDisplayName),
-              editingHub
-                ? h('button', { style: { ...btn(true), padding: '3px 8px', fontSize: 12 }, onClick: () => void saveHubName() }, t('saveName'))
-                : h('button', { style: { ...btn(false), padding: '3px 8px', fontSize: 12 }, onClick: () => setEditingHub(true) }, t('edit')),
-              editingHub ? h('button', { style: { ...btn(false), padding: '3px 8px', fontSize: 12 }, onClick: () => setEditingHub(false) }, t('cancelEdit')) : null,
-            ),
+            h('h1', { style: { fontSize: 20, margin: 0 } }, hubDisplayName),
             h('div', { style: { ...muted } }, t('subtitle')),
           ),
         ),
         h('div', { style: { ...row, gap: 8 } },
-          h('button', { style: btn(false), onClick: () => void load() }, t('refresh')),
           h(Badge, { tone: status && status.hub && status.hub.running ? 'ok' : 'err' },
             status && status.hub && status.hub.running ? t('running') : t('stopped')),
         ),
       )
 
       const tabs = h('div', { style: { display: 'flex', gap: 6, marginTop: 16, borderBottom: `1px solid ${COLORS.border}`, paddingBottom: 8 } },
-        ['console', 'settings'].map((key) => h('button', {
+        ['console', 'guide', 'settings'].map((key) => h('button', {
           key, onClick: () => setTab(key), style: {
             ...btn(tab === key), fontWeight: 600,
           },
-        }, t(key))),
+        }, key === 'console' ? t('dashboard') : key === 'guide' ? t('guide') : t('settings'))),
       )
 
       return h('div', { style: { height: '100%', overflow: 'auto', boxSizing: 'border-box', padding: '22px 26px', background: COLORS.bg, color: COLORS.text, font: 'inherit' } },
@@ -1112,24 +827,22 @@ window.__ModuleLoader__.load({
             tab === 'console'
               ? h(ConsoleTab, {
                   status, snapshot, t, busy, message, messageTone,
-                  onRefresh: () => void load(), onHub, onTaskAction, onSend,
-                  onRenameDevice, onRemoveDevice, onToggleDevice,
-                  onToggleTask: toggleTask, onCopyText, expandedTasks, hostFeatures,
                   hubOrigin: status && status.hub ? status.hub.origin : '',
+                  onRefresh: () => void load(), onHub, onGuide: () => setTab('guide'),
                 })
-              : h(SettingsTab, {
-                  settings: settingsData && settingsData.settings, secrets: settingsData && settingsData.secrets, status, t, busy, message, onSave,
-                }),
+              : tab === 'guide'
+                ? h(GuideTab, {
+                    t,
+                    hubOrigin: status && status.hub ? status.hub.origin : '',
+                    joinCode: status && status.hub ? status.hub.joinCode : '',
+                  })
+                : h(SettingsTab, {
+                    settings: settingsData && settingsData.settings, secrets: settingsData && settingsData.secrets,
+                    credentials: settingsData && settingsData.credentials,
+                    status, t, busy, message, onSave,
+                  }),
           ),
         ),
-        h(Dialog, {
-          modal,
-          busy,
-          t,
-          onChange: (value) => setModal((prev) => (prev ? { ...prev, value } : prev)),
-          onCancel: () => setModal(null),
-          onConfirm: () => void confirmModal(),
-        }),
       )
     }
 

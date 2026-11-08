@@ -201,6 +201,26 @@ function buildTaskRecordMarkdown(task, options = {}) {
     lines.push('');
   }
 
+  if (task.routingAdvice && typeof task.routingAdvice === 'object') {
+    lines.push('## 路由提示');
+    lines.push('');
+    if (task.routingAdvice.preflight) {
+      const pre = task.routingAdvice.preflight;
+      lines.push(`- 本地文件预检：${cell(pre.reason || '命中本机文件', 400)}`);
+      if (pre.deviceId) lines.push(`- 预检建议设备：${cell(pre.deviceName || pre.deviceId, 120)}（\`${pre.deviceId}\`）`);
+      const matches = Array.isArray(pre.matches) ? pre.matches : [];
+      for (const match of matches) {
+        lines.push(`  - \`${match.ref || '—'}\` → \`${match.path || '—'}\``);
+      }
+    }
+    if (task.routingAdvice.planner) {
+      const planner = task.routingAdvice.planner;
+      const target = planner.deviceName ? `（${planner.deviceName}，\`${planner.deviceId}\`）` : planner.deviceId ? `（\`${planner.deviceId}\`）` : '';
+      lines.push(`- Agnes 指派：${cell(planner.reason || '按子任务内容指派设备', 300)}${target}`);
+    }
+    lines.push('');
+  }
+
   lines.push('## 结果输出');
   lines.push('');
   if (output && (output.text || output.markdown || output.data || (output.artifacts && output.artifacts.length))) {

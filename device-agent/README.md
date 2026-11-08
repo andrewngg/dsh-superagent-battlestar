@@ -65,10 +65,11 @@ SIGINT（Ctrl+C）会优雅注销设备后退出；发送两次强制退出（�
 
 - `simulate`（默认）：按指令关键词生成 3-6 条中文进度与结构化结果（text/markdown/artifacts/data），默认总耗时 2-6s，可被 `executor.simulate` 配置缩短；
 - `cli`：调用本机 CLI Agent（`device-agent/cli-worker.js`）：
-  - `hermes`：`hermes --cli --yolo -z "<instruction>"`，可执行本机工具命令；
+  - `hermes`：默认 `hermes chat -q "<instruction>" --format stream-json --yolo`，逐行解析事件流，把工具调用/子任务实时转成任务进度（任务卡片显示「正在执行：…」「子任务：…」「执行步骤：…」）；旧版 Hermes 不认识该参数时自动回退一次性 `hermes --cli --yolo -z "<instruction>"`；
+  - 实时步骤关闭：executor 配置 `cli.streamProgress: false`（或 worker 参数 `--no-stream-progress` / 环境变量 `BUTLER_CLI_STREAM_PROGRESS=0`）；
   - `opencode`：`opencode run "<instruction>" -m deepseek/deepseek-flash --format json`，失败可回退 Hermes；
   - `shell`：`pwsh -NoProfile -NonInteractive -Command "<instruction>"`（需 `allowShell: true`）；
-  - 由 `requirements.profile`（`hermes` / `hermes-<profile>` / `opencode` / `cli-shell`）或指令前缀（`!` / `/run`）选择后端；输出写入任务 `output.data.backend`；
+  - 由 `requirements.profile`（`hermes` / `hermes-<profile>` / `opencode` / `cli-shell`）或指令前缀（`!` / `/run`）选择后端；输出写入任务 `output.data.backend`；实时步骤写入临时进度文件（worker `--progress-file`），executor 每 500ms 轮询后上报 Hub，**不使用子进程 pipe**（Windows 沙箱安全）；
 - `dsh-cli`：命令模板（默认 `dsh run --print {instruction}`），`{instruction}`、`{taskId}`、`{deviceName}`、`{model}`、`{outputFile}` 占位符；输出重定向到临时文件后截断（**不使用 pipe**，Windows 沙箱安全）；超时/取消会 kill 子进程树；
 - `shell`：同命令模板机制（默认 `echo {instruction}`）；
 - `http`：`POST` 设备本地/内网 endpoint（拒绝指向 Hub 自身），响应 `{ok?, output?, error?}`；

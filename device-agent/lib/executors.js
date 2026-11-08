@@ -27,6 +27,9 @@ const path = require('node:path');
 const { requestJson, joinUrl, normalizeBaseUrl } = require('./http');
 
 const PROGRESS_MIN_INTERVAL_MS = 800;
+/** 与 device-agent/cli-worker.js 的 PROGRESS_PREFIX 保持一致。 */
+const CLI_PROGRESS_PREFIX = '@@BUTLER_PROGRESS@@ ';
+const CLI_PROGRESS_POLL_MS = 500;
 const DEFAULT_SIMULATE = Object.freeze({
   minDurationMs: 2000,
   maxDurationMs: 6000,
@@ -75,6 +78,95 @@ function truncate(text, maxChars) {
   const value = String(text == null ? '' : text);
   if (value.length <= maxChars) return value;
   return `${value.slice(0, maxChars)}\n…（输出已截断，共 ${value.length} 字符）`;
+}
+
+// ---------------------------------------------------------------------------
+// 本机 CLI 的实时执行步骤：cli-worker 把 `@@BUTLER_PROGRESS@@ {json}` 行写进进度文件，
+// 执行器边跑边轮询并转成 Hub 进度（不依赖子进程管道，Windows 沙箱同样可用）。
+// ---------------------------------------------------------------------------
+
+function parseWorkerProgressLine(line) {
+  if (typeof line !== 'string') return null;
+  const text = line.trim();
+  if (!text.startsWith(CLI_PROGRESS_PREFIX)) return null;
+  try {
+    const data = JSON.parse(text.slice(CLI_PROGRESS_PREFIX.length));
+    if (!data || typeof data.message !== 'string' || !data.message.trim()) return null;
+    return {
+      message: truncate(data.message.trim(), 200),
+      percent: Number.isFinite(data.percent) ? Math.max(0, Math.min(100, Math.round(data.percent))) : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 轮询 cli-worker 写入的进度文件，按行回调。
+ * @param {string} file
+ * @param {(message:string, percent?:number)=>any} onProgress
+ * @returns {{file:string, start:()=>void, stop:()=>Promise<void>}}
+ */
+function createProgressFileTailer(file, onProgress, intervalMs = CLI_PROGRESS_POLL_MS) {
+  let offset = 0;
+  let remainder = '';
+  let timer = null;
+  let queue = Promise.resolve();
+  const drain = () => {
+    const run = async () => {
+      let text;
+      try {
+        text = await fsp.readFile(file, 'utf8');
+      } catch {
+        return;
+      }
+      if (text.length <= offset) return;
+      const chunk = text.slice(offset);
+      offset = text.length;
+      remainder += chunk;
+      const lines = remainder.split('\n');
+      remainder = lines.pop() || '';
+      for (const line of lines) {
+        const payload = parseWorkerProgressLine(line);
+        if (!payload) continue;
+        try {
+          await onProgress(payload.message, payload.percent);
+        } catch {
+          /* 进度上报失败不影响任务 */
+        }
+      }
+    };
+    queue = queue.then(run, run);
+    return queue;
+  };
+  return {
+    file,
+    start() {
+      if (timer) return;
+      timer = setInterval(() => {
+        drain();
+      }, intervalMs);
+      if (timer.unref) timer.unref();
+    },
+    async stop() {
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+      await drain();
+      if (remainder.trim()) {
+        const payload = parseWorkerProgressLine(remainder);
+        if (payload) {
+          try {
+            await onProgress(payload.message, payload.percent);
+          } catch {
+            /* ignore */
+          }
+        }
+        remainder = '';
+      }
+    },
+  };
 }
 
 function makeAbortError(signal) {
@@ -638,6 +730,7 @@ function createCliExecutor(options = {}) {
   const opencode = isPlainObject(cfg.opencode) ? cfg.opencode : {};
   const extraEnv = isPlainObject(cfg.env) ? cfg.env : {};
   const label = '本机 CLI';
+  const streamProgress = cfg.streamProgress !== false;
 
   return {
     async run(ctx = {}) {
@@ -671,6 +764,7 @@ function createCliExecutor(options = {}) {
       if (isPlainObject(cfg.modelProviders) && Object.keys(cfg.modelProviders).length) {
         args.push('--model-providers', JSON.stringify(cfg.modelProviders));
       }
+      if (!streamProgress) args.push('--no-stream-progress');
 
       const env = { ...process.env, ...options.env, ...extraEnv };
       if (nonEmptyString(hermes.home)) env.BUTLER_CLI_HERMES_HOME = hermes.home;
@@ -684,6 +778,11 @@ function createCliExecutor(options = {}) {
       const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'butler-cli-exec-'));
       const outFile = path.join(dir, 'worker.stdout.log');
       const errFile = path.join(dir, 'worker.stderr.log');
+      const progressFile = path.join(dir, 'worker.progress.log');
+      if (streamProgress) {
+        args.push('--progress-file', progressFile);
+        env.BUTLER_CLI_PROGRESS_FILE = progressFile;
+      }
       const outFd = fs.openSync(outFile, 'a');
       const errFd = fs.openSync(errFile, 'a');
       const closeFds = () => {
@@ -711,6 +810,11 @@ function createCliExecutor(options = {}) {
         await removeDirSafe(dir);
         return { output: { text: '' }, error: `启动${label}失败：${err.message}` };
       }
+
+      const tailer = streamProgress
+        ? createProgressFileTailer(progressFile, (message, percent) => progress(message, percent))
+        : null;
+      if (tailer) tailer.start();
 
       try {
         let outcome;
@@ -774,6 +878,7 @@ function createCliExecutor(options = {}) {
           durationMs,
         };
       } finally {
+        if (tailer) await tailer.stop();
         closeFds();
         await removeDirSafe(dir);
       }
@@ -1572,6 +1677,7 @@ function createExecutor(options = {}) {
 
 module.exports = {
   PROGRESS_MIN_INTERVAL_MS,
+  CLI_PROGRESS_PREFIX,
   DEFAULT_SIMULATE,
   SIMULATE_FLAVORS,
   ExecutorTimeoutError,
@@ -1580,6 +1686,8 @@ module.exports = {
   createComfyuiExecutor,
   createMikaExecutor,
   makeProgressThrottle,
+  parseWorkerProgressLine,
+  createProgressFileTailer,
   assertEndpointAllowed,
   killProcessTree,
   quoteForShell,

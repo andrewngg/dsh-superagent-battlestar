@@ -68,6 +68,8 @@ async function startHubAt(dataDir, overrides = {}) {
     host: '127.0.0.1',
     silent: true,
     persistDebounceMs: 5,
+    // 测试默认关闭每晚总结，避免按真实时间到点后自动创建任务干扰其它用例。
+    nightlyReview: false,
     ...overrides,
   });
   return {

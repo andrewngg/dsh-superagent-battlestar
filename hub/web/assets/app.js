@@ -69,7 +69,7 @@
     requeued: '重新排队',
     device: '设备',
   };
-  const TABS = new Set(['status', 'tasks', 'command', 'goals', 'developer', 'settings']);
+  const TABS = new Set(['status', 'tasks', 'command', 'goals', 'reminders', 'developer', 'settings']);
 
   /* 多语言：ButlerI18n 由 assets/i18n.js 提供（默认中文时不做任何处理） */
   const I18N = window.ButlerI18n || null;
@@ -240,6 +240,15 @@
   /* ==================================================================
    * 状态
    * ================================================================== */
+  /**
+   * 设备昵称的“未提交草稿”：抽屉会被快照轮询/设备事件反复重建，
+   * 没有它的话输入内容会被服务端数据覆盖（表现为输入框不断闪空）。
+   * 声明放在模块顶部，避免早期异步回调里访问到 TDZ。
+   */
+  let deviceNicknameDraft = null;
+  /** 上一次渲染设备抽屉时设备数据的指纹：没变化就不重建，避免无谓闪动。 */
+  let deviceDrawerSig = '';
+
   const state = {
     baseUrl: '',
     token: '',
@@ -258,13 +267,26 @@
     goalsError: '',
     goalsSupported: false,
     goalsHubTime: '',
-    taskFilter: 'all',
+    reminders: [],
+    remindersLoaded: false,
+    remindersLoading: false,
+    remindersError: '',
+    remindersSupported: false,
+    remindersHubTime: '',
+    remindersBridge: { available: false, ok: false, scheduled: 0, permissionGranted: null, exact: null, error: '' },
+    nightlyReview: null,
+    nightlyReviewLoaded: false,
+    nightlyReviewBusy: false,
+    taskFilter: 'active', // 默认筛选「进行中」
+    tasksCollapsed: true,
     selectedSkills: new Set(),
     pendingAttachments: [],
     followUpTaskId: null,
     routeTask: null,
     expandedEvents: new Set(),
     expandedOutput: new Set(),
+    rawOutputs: new Set(),
+    rawInstructions: new Set(),
     tab: 'status',
     autoOpenDone: false,
     sendBusy: false,
@@ -273,11 +295,14 @@
     poll: { timer: 0, inFlight: false },
     snapshotTimer: 0,
     relTimer: 0,
-    sigs: { stats: '', devices: '', tasks: '', composer: '', activity: '', settings: '', goals: '' },
+    sigs: { stats: '', devices: '', tasks: '', composer: '', activity: '', settings: '', goals: '', reminders: '' },
     records: { items: [], total: 0, recordDir: '', q: '', status: '', loading: false, error: '', detail: null },
   };
   const taskNotifyState = new Map();
   const goalBusy = new Set();
+  const reminderBusy = new Set();
+  /** 上次同步给 APK 的提醒指纹：内容没变就不重复调用桥，避免反复重排闹钟。 */
+  let reminderSyncSig = '';
   const devState = { busy: false, jobId: '', timer: 0, pollFailures: 0, messages: [] };
 
   /* ==================================================================
@@ -559,6 +584,16 @@
     state.goalsSupported = false;
     goalBusy.clear();
     state.sigs.goals = '';
+    state.reminders = [];
+    state.remindersLoaded = false;
+    state.remindersLoading = false;
+    state.remindersError = '';
+    state.remindersSupported = false;
+    state.remindersHubTime = '';
+    state.remindersBridge = { available: false, ok: false, scheduled: 0, permissionGranted: null, exact: null, error: '' };
+    reminderBusy.clear();
+    reminderSyncSig = '';
+    state.sigs.reminders = '';
     hideDrawer();
     showConnectView(message || '管理员令牌已失效，请重新连接');
     $('#admin-token').focus();
@@ -592,6 +627,16 @@
     state.goalsSupported = false;
     goalBusy.clear();
     state.sigs.goals = '';
+    state.reminders = [];
+    state.remindersLoaded = false;
+    state.remindersLoading = false;
+    state.remindersError = '';
+    state.remindersSupported = false;
+    state.remindersHubTime = '';
+    state.remindersBridge = { available: false, ok: false, scheduled: 0, permissionGranted: null, exact: null, error: '' };
+    reminderBusy.clear();
+    reminderSyncSig = '';
+    state.sigs.reminders = '';
     state.autoOpenDone = false;
     hideDrawer();
     scrubUrlToken();
@@ -656,7 +701,8 @@
     const named = [
       'device.updated', 'device.online', 'device.offline',
       'task.created', 'task.updated', 'task.completed', 'task.failed',
-      'goal.created', 'goal.updated', 'goal.deleted',
+      'goal.created', 'goal.updated', 'goal.deleted', 'goal.approval',
+      'nightly.review.updated',
       'log', 'ping',
     ];
     for (const name of named) {
@@ -762,9 +808,18 @@
     if (name === 'device.online' || name === 'device.offline') return onDevicePresence(name, payload);
     if (name.startsWith('task.')) return onTaskEvent(name, payload.task);
     if (name.startsWith('goal.')) return onGoalEvent(name, payload);
+    if (name.startsWith('reminder.')) return onReminderEvent(name, payload);
+    if (name === 'nightly.review.updated') return onNightlyReviewUpdated(payload.review);
     if (name === 'settings.updated') return onSettingsUpdated(payload);
     if (name === 'log') return onLogEvent(payload);
     if (name === 'ping') return;
+  }
+
+  function onNightlyReviewUpdated(review) {
+    if (!review || typeof review !== 'object') return;
+    state.nightlyReview = review;
+    state.nightlyReviewLoaded = true;
+    renderNightlyReview();
   }
 
   function onSettingsUpdated(payload) {
@@ -799,6 +854,18 @@
       state.goalsError = '';
       state.sigs.goals = '';
     }
+    if (Array.isArray(data.reminders)) {
+      state.reminders = data.reminders.filter((item) => item && item.id);
+      sortReminders();
+      state.remindersLoaded = true;
+      state.remindersSupported = true;
+      state.remindersError = '';
+      state.sigs.reminders = '';
+    }
+    if (data.nightlyReview && typeof data.nightlyReview === 'object') {
+      state.nightlyReview = data.nightlyReview;
+      state.nightlyReviewLoaded = true;
+    }
     if (!state.health || !state.health.version) {
       state.health = {
         ...(state.health || {}),
@@ -811,6 +878,8 @@
     if (state.drawer.open) refreshOpenDrawer();
     syncTaskNotifications();
     ensureGoalsLoaded();
+    ensureRemindersLoaded();
+    if (state.remindersLoaded) syncRemindersToApk();
   }
 
   /** 把任务进度/完成事件桥接给 Android APK（浏览器中不存在 ButlerBridge，自动忽略）。 */
@@ -927,7 +996,7 @@
       else if (device.status === 'offline') device.status = 'idle';
       if (was !== online) {
         bumpStat('devicesOnline', online ? 1 : -1);
-        toast(`${device.name || deviceId} ${online ? '已上线' : '已离线'}`, online ? 'success' : 'warn');
+        toast(`${deviceDisplayName(device) || deviceId} ${online ? '已上线' : '已离线'}`, online ? 'success' : 'warn');
       }
       renderAll();
       if (state.drawer.open && state.drawer.kind === 'device' && state.drawer.id === deviceId) refreshOpenDrawer();
@@ -992,9 +1061,14 @@
     if (device.disabled) return 'disabled';
     return DEVICE_STATUS[device.status] ? device.status : 'idle';
   }
+  function deviceDisplayName(device) {
+    if (!device) return '';
+    return device.nickname || device.name || device.id || '未知设备';
+  }
   function deviceName(id) {
     const device = state.devices.get(id);
-    return (device && device.name) || id || '未知设备';
+    if (device) return deviceDisplayName(device);
+    return id || '未知设备';
   }
   function taskProgressOf(task) {
     if (Number.isFinite(task.progress)) return { percent: Math.max(0, Math.min(100, task.progress)) };
@@ -1084,6 +1158,108 @@
     if (last < source.length) parent.appendChild(document.createTextNode(source.slice(last)));
   }
 
+  /* ---------- Markdown 表格（GFM）：解析 + 渲染 ---------- */
+
+  /** 拆分表格行：支持 `\|` 转义与首尾竖线。 */
+  function splitTableRow(row) {
+    const cells = [];
+    let cur = '';
+    for (let index = 0; index < row.length; index += 1) {
+      const ch = row[index];
+      if (ch === '\\' && row[index + 1] === '|') {
+        cur += '|';
+        index += 1;
+      } else if (ch === '|') {
+        cells.push(cur);
+        cur = '';
+      } else {
+        cur += ch;
+      }
+    }
+    cells.push(cur);
+    if (cells.length && !cells[0].trim()) cells.shift();
+    if (cells.length && !cells[cells.length - 1].trim()) cells.pop();
+    return cells.map((cell) => cell.trim());
+  }
+
+  /** 解析分隔行 `---` / `:--` / `--:` / `:-:`，返回对齐方式数组；非分隔行返回 null。 */
+  function tableAligns(row) {
+    const cells = splitTableRow(row);
+    if (!cells.length) return null;
+    const aligns = [];
+    for (const cell of cells) {
+      const found = /^(:?)-{1,}(:?)$/.exec(cell);
+      if (!found) return null;
+      if (found[1] && found[2]) aligns.push('center');
+      else if (found[2]) aligns.push('right');
+      else aligns.push('left');
+    }
+    return aligns;
+  }
+
+  function tableAlignClass(align) {
+    return align === 'center' ? 'ta-center' : align === 'right' ? 'ta-right' : 'ta-left';
+  }
+
+  /** 尝试从 lines[start] 解析一个 Markdown 表格；失败返回 null。 */
+  function parseTableAt(lines, start) {
+    const first = lines[start];
+    if (!first || !/^\s*\|/.test(first)) return null;
+    const head = splitTableRow(first);
+    if (!head.length) return null;
+    if (start + 1 >= lines.length) return null;
+    const aligns = tableAligns(lines[start + 1]);
+    if (!aligns || aligns.length !== head.length) return null;
+    let index = start + 2;
+    const rows = [];
+    while (index < lines.length && /^\s*\|/.test(lines[index])) {
+      const cells = splitTableRow(lines[index]);
+      if (!cells.length) break;
+      rows.push(cells);
+      index += 1;
+    }
+    return { head, aligns, rows, next: index };
+  }
+
+  function buildTableNode(table) {
+    const wrap = el('div', { className: 'md-table-wrap' });
+    const node = el('table', { className: 'md-table' });
+    const thead = el('thead');
+    const headRow = el('tr');
+    table.head.forEach((cell, index) => {
+      const th = el('th', { className: tableAlignClass(table.aligns[index]), attrs: { scope: 'col' } });
+      appendInline(th, cell);
+      headRow.appendChild(th);
+    });
+    thead.appendChild(headRow);
+    const tbody = el('tbody');
+    for (const row of table.rows) {
+      const tr = el('tr');
+      table.head.forEach((label, index) => {
+        const td = el('td', { className: tableAlignClass(table.aligns[index]), dataset: { label: label || '' } });
+        appendInline(td, row[index] || '');
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    }
+    node.appendChild(thead);
+    node.appendChild(tbody);
+    wrap.appendChild(node);
+    return wrap;
+  }
+
+  /** 输出是否像“结构化 Markdown”（决定任务卡片/详情默认用渲染视图还是原文）。 */
+  function looksLikeMarkdown(text) {
+    const source = String(text || '');
+    if (!source.trim()) return false;
+    return /(^|\n)\s{0,3}#{1,6}\s+\S/.test(source)
+      || /(^|\n)\s{0,3}(?:```|~~~)/.test(source)
+      || /(^|\n)[ \t]*\|.*\|[ \t]*(?:\n|$)/.test(source)
+      || /(^|\n)\s{0,3}[-*+]\s+\S/.test(source)
+      || /(^|\n)\s{0,3}\d+[.)]\s+\S/.test(source)
+      || /(^|\n)\s{0,3}>\s?/.test(source);
+  }
+
   function renderMarkdown(markdown) {
     const root = el('div', { className: 'markdown' });
     const lines = String(markdown == null ? '' : markdown).replace(/\r\n?/g, '\n').split('\n');
@@ -1094,10 +1270,14 @@
         i += 1;
         continue;
       }
-      if (/^\s*```/.test(line)) {
+      const fenceStart = /^\s*(`{3,}|~{3,})/.exec(line);
+      if (fenceStart) {
+        const marker = fenceStart[1][0];
+        const minLen = fenceStart[1].length;
+        const closeRe = new RegExp('^\\s*' + (marker === '`' ? '`' : '~') + '{' + minLen + ',}\\s*$');
         const buf = [];
         i += 1;
-        while (i < lines.length && !/^\s*```/.test(lines[i])) {
+        while (i < lines.length && !closeRe.test(lines[i])) {
           buf.push(lines[i]);
           i += 1;
         }
@@ -1105,6 +1285,12 @@
         const pre = el('pre');
         pre.appendChild(el('code', { text: buf.join('\n') }));
         root.appendChild(pre);
+        continue;
+      }
+      const table = parseTableAt(lines, i);
+      if (table) {
+        root.appendChild(buildTableNode(table));
+        i = table.next;
         continue;
       }
       const heading = /^(#{1,4})\s+(.*)$/.exec(line);
@@ -1230,12 +1416,10 @@
     grid.replaceChildren();
     for (const card of cards) {
       const node = el('div', { className: 'stat-card', dataset: { tone: card.tone } },
-        el('div', { className: 'stat-top' },
-          el('span', { className: 'stat-label', text: card.label }),
-          el('span', { className: 'stat-icon' }, icon(card.icon)),
-        ),
+        el('span', { className: 'stat-icon' }, icon(card.icon)),
+        el('span', { className: 'stat-label', text: card.label }),
         el('div', { className: 'stat-value' }, card.value, card.suffix ? el('small', { text: card.suffix }) : null),
-        el('div', { className: 'stat-sub', text: card.sub }),
+        el('span', { className: 'stat-sub', text: card.sub, title: card.sub }),
       );
       grid.appendChild(node);
     }
@@ -1276,127 +1460,47 @@
   /* ==================================================================
    * 设备卡片
    * ================================================================== */
-  function chipGroup(items, { max = 3, kind = 'model', labelOf, titleOf }) {
-    const group = el('div', { className: 'chip-group' });
-    if (!items.length) {
-      group.appendChild(el('span', { className: 'cap-empty', text: '—' }));
-      return group;
-    }
-    items.slice(0, max).forEach((item) => {
-      const text = labelOf(item);
-      group.appendChild(el('span', { className: 'chip', dataset: { kind }, text, title: titleOf ? titleOf(item) : text }));
-    });
-    if (items.length > max) {
-      const rest = items.slice(max);
-      group.appendChild(el('span', {
-        className: 'chip chip-more',
-        text: `+${rest.length}`,
-        title: rest.map((x) => labelOf(x)).join('、'),
-      }));
-    }
-    return group;
-  }
-
-  function capRow(label, group) {
-    return el('div', { className: 'cap-row' },
-      el('span', { className: 'cap-label', text: label }),
-      group,
-    );
+  function deviceIconName(device) {
+    return String(device.platform || '').toLowerCase() === 'android' ? 'phone' : 'computer';
   }
 
   function deviceCard(device) {
     const load = loadOf(device);
     const status = deviceStatusOf(device);
-    const models = modelsOf(device);
-    const skills = skillsOf(device);
-    const profiles = profilesOf(device);
-    const gateways = gatewaysOf(device);
-    const tags = tagsOf(device);
-    const active = activeTasksOfDevice(device.id);
+    const active = activeTasksOfDevice(device.id).length;
+    const platform = PLATFORM_LABEL[device.platform] || device.platform || '未知平台';
+    const stateLabel = DEVICE_STATUS[status] || status;
+    const displayName = deviceDisplayName(device);
 
     const card = el('article', {
       className: 'device-card' + (device.online ? '' : ' is-offline') + (device.disabled ? ' is-disabled' : ''),
-      dataset: { deviceId: device.id },
+      dataset: { deviceId: device.id, platform: deviceIconName(device) },
       role: 'button',
       tabIndex: 0,
-      attrs: { 'aria-label': `查看设备 ${device.name || device.id} 的详情` },
+      attrs: { 'aria-label': `查看设备 ${displayName} 的详情` },
     });
 
-    const top = el('div', { className: 'device-top' },
-      el('i', {
-        className: 'status-dot',
-        dataset: {
-          tone: !device.online ? 'offline' : device.status === 'busy' ? 'busy' : device.status === 'degraded' ? 'degraded' : 'online',
-        },
-      }),
-      el('h3', { className: 'device-name', text: device.name || device.id, title: device.name || device.id }),
-      el('span', { className: 'device-state', dataset: { state: status }, text: DEVICE_STATUS[status] || status }),
-    );
-    card.appendChild(top);
-
-    const meta = el('div', { className: 'device-meta' },
-      el('span', { className: 'meta-strong', text: PLATFORM_LABEL[device.platform] || device.platform || '未知平台' }),
-      el('span', { className: 'meta-sep', text: '·' }),
-      el('span', { text: KIND_LABEL[device.kind] || device.kind || '设备' }),
-    );
-    if (device.agentVersion) {
-      meta.appendChild(el('span', { className: 'meta-sep', text: '·' }));
-      meta.appendChild(el('span', { text: `v${device.agentVersion}` }));
-    }
-    tags.slice(0, 2).forEach((tag) => meta.appendChild(el('span', { className: 'tag', text: `#${tag}` })));
-    card.appendChild(meta);
-
-    const loadBar = el('div', { className: 'bar', dataset: { tone: 'load', level: load.ratio >= 0.75 ? 'high' : 'low' } },
-      el('span', { style: { width: `${Math.round(load.ratio * 100)}%` } }),
-    );
-    card.appendChild(el('div', { className: 'load-row' },
-      el('span', { className: 'load-label', text: '负载' }),
-      loadBar,
-      el('span', { className: 'load-val', text: `${load.running} / ${load.max}` }),
+    card.appendChild(el('span', { className: 'device-icon' }, icon(deviceIconName(device))));
+    card.appendChild(el('div', { className: 'device-main' },
+      el('div', { className: 'device-line' },
+        el('i', {
+          className: 'status-dot',
+          dataset: {
+            tone: !device.online ? 'offline' : device.status === 'busy' ? 'busy' : device.status === 'degraded' ? 'degraded' : 'online',
+          },
+        }),
+        el('h3', { className: 'device-name', text: displayName, title: displayName }),
+      ),
+      el('div', { className: 'device-sub' },
+        el('span', { text: platform }),
+        ' · ',
+        el('span', { className: 'device-state', dataset: { status }, text: stateLabel }),
+        ' · ',
+        active ? el('span', { text: `${active} 个任务` }) : el('span', { text: '负载' }),
+        active ? null : ` ${load.running}/${load.max}`,
+      ),
     ));
-
-    const caps = el('div', { className: 'caps' },
-      capRow('模型', chipGroup(models, {
-        max: 2,
-        kind: 'model',
-        labelOf: (m) => m.id,
-        titleOf: (m) => [m.id, m.provider, m.contextWindow ? `${Math.round(m.contextWindow / 1000)}K 上下文` : '', arr(m.strengths).join('/')].filter(Boolean).join(' · '),
-      })),
-      capRow('技能', chipGroup(skills, {
-        max: 3,
-        kind: 'skill',
-        labelOf: (s) => s.name || s.id,
-        titleOf: (s) => `${s.id}${s.version ? ' · v' + s.version : ''}`,
-      })),
-      capRow('配置', chipGroup(profiles, { max: 1, kind: 'profile', labelOf: (p) => p.name || p.id, titleOf: (p) => p.id })),
-      capRow('网关', chipGroup(gateways, { max: 1, kind: 'gateway', labelOf: (g) => g.id, titleOf: (g) => `${g.id}${g.baseUrl ? ' · ' + g.baseUrl : ''}` })),
-    );
-    card.appendChild(caps);
-
-    const footLeft = el('span', { className: 'heartbeat' },
-      icon('clock'),
-      relNode(device.lastSeenAt, '心跳 '),
-    );
-    if (active.length) footLeft.appendChild(el('span', { text: ` · ${active.length} 个任务` }));
-    const toggleBtn = el('button', {
-      type: 'button', className: 'link-btn device-disable',
-      text: device.disabled ? '启用' : '禁用',
-    });
-    toggleBtn.addEventListener('click', (event) => {
-      event.stopPropagation();
-      toggleDeviceDisabled(device.id);
-    });
-    const removeBtn = el('button', { type: 'button', className: 'link-btn device-remove', text: '移除' });
-    removeBtn.addEventListener('click', (event) => {
-      event.stopPropagation();
-      deleteDevice(device.id);
-    });
-    card.appendChild(el('div', { className: 'device-foot' },
-      footLeft,
-      toggleBtn,
-      removeBtn,
-      el('span', { className: 'open-hint' }, '详情', icon('chevron')),
-    ));
+    card.appendChild(el('span', { className: 'device-chevron' }, icon('chevron')));
 
     card.addEventListener('click', () => openDeviceDrawer(device.id));
     card.addEventListener('keydown', (event) => {
@@ -1409,10 +1513,12 @@
   }
 
   function sortDevices(a, b) {
-    const rank = (d) => (d.online ? (d.status === 'busy' ? 1 : d.status === 'degraded' ? 2 : 0) : 3);
-    const diff = rank(a) - rank(b);
-    if (diff !== 0) return diff;
-    return (parseIso(b.lastSeenAt) || 0) - (parseIso(a.lastSeenAt) || 0);
+    const ta = parseIso(a.registeredAt);
+    const tb = parseIso(b.registeredAt);
+    if (ta !== null && tb !== null && ta !== tb) return ta - tb;
+    if (ta === null && tb !== null) return 1;
+    if (tb === null && ta !== null) return -1;
+    return String(deviceDisplayName(a)).localeCompare(String(deviceDisplayName(b)));
   }
 
   function emptyState({ iconName = 'devices', title, desc }) {
@@ -1427,8 +1533,8 @@
     const grid = $('#device-grid');
     const list = Array.from(state.devices.values()).sort(sortDevices);
     const sig = JSON.stringify(list.map((d) => [
-      d.id, d.name, d.online, d.status, d.disabled, d.load, d.lastSeenAt,
-      d.metrics, d.tags, d.capabilities, activeTasksOfDevice(d.id).length,
+      d.id, d.name, d.nickname, d.platform, d.kind, d.online, d.status, d.disabled, d.load,
+      d.registeredAt, activeTasksOfDevice(d.id).length,
     ]));
     if (sig === state.sigs.devices && grid.childElementCount) return;
     state.sigs.devices = sig;
@@ -1487,7 +1593,7 @@
   function renderComposerOptions() {
     const agg = aggregateCapabilities();
     const sig = JSON.stringify({
-      devices: agg.devices.map((d) => [d.id, d.name, d.status]),
+      devices: agg.devices.map((d) => [d.id, d.name, d.nickname, d.status]),
       models: agg.models.map((m) => m.id),
       skills: agg.skills.map((s) => s.id),
       selected: Array.from(state.selectedSkills),
@@ -1514,7 +1620,7 @@
     for (const device of agg.devices) {
       deviceSelect.appendChild(el('option', {
         value: device.id,
-        text: `${device.name || device.id} · ${DEVICE_STATUS[device.status] || '在线'}`,
+        text: `${deviceDisplayName(device)} · ${DEVICE_STATUS[device.status] || '在线'}`,
       }));
     }
     if (Array.from(deviceSelect.options).some((o) => o.value === prevDevice)) setSelectValue(deviceSelect, prevDevice);
@@ -1586,7 +1692,7 @@
     if (deviceId) {
       const device = state.devices.get(deviceId);
       node.appendChild(document.createTextNode(tx('指定设备：')));
-      node.appendChild(el('b', { text: device ? device.name : deviceId }));
+      node.appendChild(el('b', { text: device ? deviceDisplayName(device) : deviceId }));
       if (device && !device.online) node.appendChild(document.createTextNode(tx('（当前离线，任务将排队）')));
       return;
     }
@@ -1901,7 +2007,7 @@
   function taskCard(task) {
     const status = normStatus(task.status);
     const card = el('article', {
-      className: 'task-card' + (state.expandedOutput.has(task.id) ? ' output-open' : '') + (task.archived ? ' is-archived' : ''),
+      className: 'task-card' + (state.expandedOutput.has(task.id) ? ' output-open' : '') + (state.tasksCollapsed ? ' is-collapsed' : '') + (task.archived ? ' is-archived' : ''),
       dataset: { id: task.id, status },
       role: 'button',
       tabIndex: 0,
@@ -1926,6 +2032,7 @@
     );
     card.appendChild(top);
     card.appendChild(el('p', { className: 'task-instruction', text: task.instruction || '（无指令内容）' }));
+    card.appendChild(el('div', { className: 'task-collapsed-meta', text: `创建于 ${fmtDateTime(task.createdAt)}` }));
     const waitingQuestion = status === 'waiting' && task.progress && task.progress.question ? String(task.progress.question) : '';
     if (waitingQuestion) {
       card.appendChild(el('div', { className: 'task-question' },
@@ -1954,16 +2061,43 @@
 
     const output = outputOf(task);
     if (output) {
-      const body = renderMarkdown(output.markdown || output.text || '');
-      const outWrap = el('div', { className: 'task-output' }, body);
+      const rawOutput = output.markdown || output.text || '';
+      const structured = looksLikeMarkdown(rawOutput);
+      const showRaw = !structured || state.rawOutputs.has(task.id);
+      const outWrap = el('div', { className: 'task-output' });
+      outWrap.appendChild(showRaw
+        ? el('pre', { className: 'task-output-raw', text: rawOutput })
+        : renderMarkdown(rawOutput));
       card.appendChild(outWrap);
-      const longOutput = (output.markdown || output.text || '').length > 260;
-      if (longOutput) {
+      const outputActions = [el('button', {
+        type: 'button',
+        className: 'link-btn',
+        onclick: (event) => {
+          event.stopPropagation();
+          copyText(rawOutput, 'Markdown 已复制');
+        },
+      }, icon('copy'), el('span', { text: '复制 Markdown' }))];
+      if (structured) {
+        outputActions.push(el('button', {
+          type: 'button',
+          className: 'link-btn',
+          dataset: { action: 'toggle-output-mode' },
+          onclick: (event) => {
+            event.stopPropagation();
+            if (state.rawOutputs.has(task.id)) state.rawOutputs.delete(task.id);
+            else state.rawOutputs.add(task.id);
+            state.sigs.tasks = '';
+            renderTasks();
+          },
+        }, el('span', { text: showRaw ? '渲染' : '原文' })));
+      }
+      card.appendChild(el('div', { className: 'task-output-actions' }, ...outputActions));
+      if (rawOutput.length > 260) {
         card.appendChild(el('button', {
           type: 'button',
           className: 'link-btn',
           dataset: { action: 'toggle-output' },
-          text: state.expandedOutput.has(task.id) ? '收起输出' : '展开输出',
+          text: state.expandedOutput.has(task.id) ? '收起全文' : '查看全文',
         }));
       }
     }
@@ -2031,15 +2165,21 @@
     if (!['assigned', 'running'].includes(status)) return null;
     const progress = taskProgressOf(task);
     const percent = progress ? progress.percent : null;
+    const message = progress && progress.message ? String(progress.message) : '';
     const bar = el('div', { className: 'bar', dataset: { tone: status === 'assigned' ? 'queued' : 'load' } },
       percent === null
         ? el('span', { className: 'is-indeterminate', style: { width: '35%' } })
         : el('span', { style: { width: `${Math.max(2, percent)}%` } }),
     );
-    const label = percent === null ? (status === 'assigned' ? '等待设备接受…' : '处理中…') : `${Math.round(percent)}%`;
-    return el('div', { className: 'task-progress' },
+    const percentText = percent === null ? '' : ` · ${Math.round(percent)}%`;
+    const label = message
+      ? `${shorten(message, 42)}${percentText}`
+      : percent === null
+        ? (status === 'assigned' ? '等待设备接受…' : '处理中…')
+        : `${Math.round(percent)}%`;
+    return el('div', { className: 'task-progress', title: message || '' },
       bar,
-      el('span', { className: 'task-progress-text', text: label, title: progress && progress.message ? progress.message : '' }),
+      el('span', { className: 'task-progress-text', text: label }),
     );
   }
 
@@ -2048,6 +2188,7 @@
     const tasks = filteredTasks();
     const sig = JSON.stringify({
       filter: state.taskFilter,
+      collapsed: state.tasksCollapsed,
       expandedEvents: Array.from(state.expandedEvents),
       expandedOutput: Array.from(state.expandedOutput),
       tasks,
@@ -2118,80 +2259,69 @@
     );
   }
 
-  function goalNextNode(goal) {
-    return el('span', { className: 'goal-next' },
-      icon('clock'),
-      el('span', { className: 'goal-next-label', text: '下次跟进' }),
-      el('span', { className: 'goal-next-val', dataset: { relFuture: goal.nextCheckAt || '' }, text: fmtRelFuture(goal.nextCheckAt) }),
-    );
+  function goalPendingAction(action, label, iconName) {
+    return el('button', {
+      type: 'button',
+      className: `goal-compact-btn is-${action}`,
+      dataset: { action },
+    }, icon(iconName), el('span', { text: label }));
   }
 
-  function goalMetaNode(goal) {
-    const meta = el('div', { className: 'goal-meta' });
-    const last = goal.lastCheckAt
-      ? el('span', { className: 'goal-check-state' },
-        el('span', { className: 'goal-summary-label', text: '上次检查' }),
-        relNode(goal.lastCheckAt),
-      )
-      : el('span', { className: 'goal-check-state' },
-        el('span', { className: 'goal-summary-label', text: '上次检查' }),
-        el('span', { text: '暂无检查记录' }),
-      );
-    meta.appendChild(last);
-    const stateNode = goalCheckState(goal);
-    if (stateNode) meta.appendChild(stateNode);
-    return meta;
-  }
-
-  function goalActionBtn(action, label) {
-    return el('button', { type: 'button', className: 'link-btn', dataset: { action } }, el('span', { text: label }));
-  }
-
+  /**
+   * 目标卡片默认收起：只显示昵称（无昵称回退标题）、达成状态、最近进度和下次执行细节。
+   * 其它信息都在点击卡片后打开的详情抽屉里。
+   */
   function goalCard(goal) {
     const status = goal.status || 'active';
-    const busy = goalBusy.has(goal.id);
-    const running = Boolean(goal.runningTaskId) || busy;
+    const nickname = str(goal.nickname);
+    const displayName = nickname || str(goal.title) || '未命名目标';
+    const achieved = status === 'completed';
     const card = el('article', {
-      className: 'goal-card',
+      className: 'goal-card goal-card-compact',
       dataset: { id: goal.id, status },
-      attrs: { role: 'button', tabindex: '0', 'aria-label': goal.title || '目标' },
+      attrs: { role: 'button', tabindex: '0', 'aria-label': displayName },
     });
 
-    const top = el('div', { className: 'goal-top' },
-      goalStatusBadge(goal),
-      el('span', { className: 'goal-plan' }, icon('clock'), el('span', { text: goalPlanText(goal.schedule) })),
-    );
-    if (status === 'active' && goal.nextCheckAt) top.appendChild(goalNextNode(goal));
-    card.appendChild(top);
+    card.appendChild(el('div', { className: 'goal-compact-head' },
+      goalRawText('h3', 'goal-title', displayName),
+      el('span', { className: 'goal-achieved', dataset: { achieved: achieved ? 'yes' : 'no' } },
+        icon(achieved ? 'check' : 'clock'),
+        el('span', { text: achieved ? '已达成' : '未达成' })),
+    ));
 
-    card.appendChild(goalRawText('h3', 'goal-title', goal.title || '未命名目标'));
+    const progressText = str(goal.lastSummary) ? shorten(goal.lastSummary, 160) : '还没有进度记录';
+    card.appendChild(el('p', { className: 'goal-compact-line' },
+      el('span', { className: 'goal-compact-label', text: '最近进度' }),
+      goalRawText('span', 'goal-compact-text', progressText),
+    ));
 
-    const summaryNode = el('p', { className: 'goal-summary' },
-      el('span', { className: 'goal-summary-label', text: '上次建议' }),
-    );
-    if (str(goal.lastSummary)) {
-      summaryNode.appendChild(goalRawText('span', '', shorten(goal.lastSummary, 120)));
+    let nextText;
+    if (goal.pendingApproval) {
+      nextText = `${str(goal.pendingApproval.reason) || '到点跟进'} · 等你同意后才执行`;
+    } else if (status === 'active' && goal.nextCheckAt) {
+      nextText = `${fmtRelFuture(goal.nextCheckAt)}（${goalPlanText(goal.schedule)}）· 到点先征求你的同意`;
+    } else if (status === 'paused') {
+      nextText = '已暂缓 · 等你的下一步指令';
+    } else if (status === 'stopped') {
+      nextText = '已停止 · 不再自动执行';
+    } else if (status === 'completed') {
+      nextText = '已达成 · 不再自动执行';
     } else {
-      summaryNode.appendChild(el('span', { className: 'goal-summary-empty', text: '还没有检查记录，点击「立即跟进」查看建议。' }));
+      nextText = '未设置计划';
     }
-    card.appendChild(summaryNode);
-
-    card.appendChild(goalMetaNode(goal));
-
-    const actions = el('div', { className: 'goal-actions' });
-    if (status === 'active' || status === 'paused') {
-      const check = el('button', { type: 'button', className: 'link-btn', dataset: { action: 'check' } },
-        icon('send'), el('span', { text: running ? '跟进中…' : '立即跟进' }));
-      check.disabled = running;
-      actions.appendChild(check);
+    const nextRow = el('p', {
+      className: `goal-compact-line goal-compact-next${goal.pendingApproval ? ' is-pending' : ''}`,
+    },
+    el('span', { className: 'goal-compact-label', text: '下次执行' }),
+    goalRawText('span', 'goal-compact-text', nextText),
+    );
+    if (goal.pendingApproval) {
+      nextRow.appendChild(el('span', { className: 'goal-compact-actions' },
+        goalPendingAction('approve', '同意', 'check'),
+        goalPendingAction('reject', '否决', 'x'),
+      ));
     }
-    if (status === 'active') actions.appendChild(goalActionBtn('pause', '暂停'));
-    else if (status === 'paused') actions.appendChild(goalActionBtn('resume', '恢复'));
-    if (status === 'active' || status === 'paused') actions.appendChild(goalActionBtn('stop', '停止'));
-    actions.appendChild(goalActionBtn('details', '详情'));
-    actions.appendChild(goalActionBtn('delete', '删除'));
-    if (busy) actions.querySelectorAll('button').forEach((btn) => { btn.disabled = true; });
-    card.appendChild(actions);
+    card.appendChild(nextRow);
     return card;
   }
 
@@ -2252,6 +2382,102 @@
     }
     for (const goal of goals) list.appendChild(goalCard(goal));
     updateGoalsSub(goals);
+  }
+
+  function nightlyStatusLabel(review) {
+    const labels = {
+      queued: '排队中',
+      assigned: '已派发',
+      running: '生成中',
+      waiting: '等待输入',
+      completed: '已完成',
+      failed: '失败',
+      timeout: '超时',
+      cancelled: '已取消',
+    };
+    const status = str(review && review.status);
+    if (status) return labels[status] || status;
+    return review && review.enabled ? `每晚 ${review.time}` : '未启用';
+  }
+
+  function renderNightlyReview() {
+    const box = $('#nightly-review');
+    if (!box) return;
+    const review = state.nightlyReview;
+    if (!review) {
+      box.hidden = true;
+      box.replaceChildren();
+      return;
+    }
+    const status = str(review.status);
+    const head = el('div', { className: 'nightly-head' },
+      el('div', { className: 'nightly-title' },
+        icon('spark'),
+        el('strong', { text: '每日总结' }),
+        el('span', { className: 'nightly-date', text: review.date || '—' }),
+      ),
+      el('div', { className: 'nightly-actions' },
+        el('span', {
+          className: 'nightly-status',
+          dataset: { status: status || 'idle' },
+          text: nightlyStatusLabel(review),
+        }),
+        el('button', {
+          type: 'button',
+          className: 'btn btn-ghost btn-sm',
+          attrs: { title: '立即创建一次每日总结任务' },
+          onclick: () => void runNightlyReview(),
+        }, icon('refresh'), el('span', { text: state.nightlyReviewBusy ? '生成中…' : '立即生成' })),
+      ),
+    );
+    const body = el('div', { className: 'nightly-body' });
+    if (str(review.summary)) {
+      const article = el('article', { className: 'record-markdown nightly-markdown' });
+      article.innerHTML = renderMarkdownHtml(review.summary);
+      body.appendChild(article);
+    } else if (status === 'queued' || status === 'assigned' || status === 'running' || status === 'waiting') {
+      body.appendChild(el('p', { className: 'nightly-empty', text: '正在生成今晚的总结，完成后会显示全文…' }));
+    } else {
+      body.appendChild(el('p', {
+        className: 'nightly-empty',
+        text: `今晚还没有总结。默认每晚 ${str(review.time) || '22:00'} 自动生成，也可以点「立即生成」。`,
+      }));
+    }
+    box.hidden = false;
+    box.replaceChildren(head, body);
+  }
+
+  async function runNightlyReview() {
+    if (state.nightlyReviewBusy) return;
+    const ok = await confirmDialog({
+      title: '立即生成每日总结',
+      message: '将创建一个「每日总结」任务，由工作机复盘长期目标与今天的任务/子任务进度，并规划明天的工作方向。',
+      okText: '生成',
+      danger: false,
+    });
+    if (!ok) return;
+    state.nightlyReviewBusy = true;
+    renderNightlyReview();
+    try {
+      const res = await api('/api/nightly-review/run', { method: 'POST', timeout: 20000 });
+      if (res && res.review) onNightlyReviewUpdated(res.review);
+      if (res && res.task) {
+        upsertTask(res.task);
+        renderTasks();
+        toast('每日总结任务已创建，完成后会显示全文', 'success');
+      } else {
+        toast('每日总结任务已在执行中，请稍候', 'warn');
+      }
+    } catch (err) {
+      if (err.status === 401) {
+        handleAuthLost(err.message);
+        return;
+      }
+      toast(err.message || '生成每日总结失败', 'error');
+    } finally {
+      state.nightlyReviewBusy = false;
+      renderNightlyReview();
+    }
   }
 
   function ensureGoalsLoaded() {
@@ -2322,6 +2548,26 @@
     }
   }
 
+  /** 提醒的 SSE 增量：其他标签页 / APK 触发变更时保持列表与抽屉一致。 */
+  function onReminderEvent(name, payload) {
+    if (name === 'reminder.deleted') {
+      const reminderId = str(payload && payload.reminderId);
+      if (!reminderId) return;
+      removeReminder(reminderId);
+      if (state.drawer.open && state.drawer.kind === 'reminder-form' && state.drawer.id === reminderId) hideDrawer();
+      state.sigs.reminders = '';
+      renderReminders();
+      syncRemindersToApk();
+      return;
+    }
+    const reminder = payload && payload.reminder && typeof payload.reminder === 'object' ? payload.reminder : null;
+    if (!reminder || !reminder.id) return;
+    upsertReminder(reminder);
+    state.sigs.reminders = '';
+    renderReminders();
+    syncRemindersToApk();
+  }
+
   function openGoalRecord(taskId) {
     const id = str(taskId);
     if (!id) return;
@@ -2369,8 +2615,101 @@
     }
   }
 
-  async function goalSetStatus(goalId, status) {
+  function pendingApprovalNode(goal, { compact = false } = {}) {
+    const approval = goal.pendingApproval;
+    if (!approval) return null;
+    const node = el('div', { className: compact ? 'goal-pending' : 'goal-pending goal-pending-block' },
+      el('div', { className: 'goal-pending-text' },
+        icon('alert'),
+        el('span', { text: `待确认：${approval.reason || '目标跟进提案'}` }),
+      ),
+      el('div', { className: 'goal-pending-actions' },
+        el('button', {
+          type: 'button',
+          className: 'btn btn-primary btn-sm',
+          attrs: { title: '同意后立即创建跟进任务' },
+          onclick: (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            void goalApprove(goal.id);
+          },
+        }, icon('check'), el('span', { text: '同意' })),
+        el('button', {
+          type: 'button',
+          className: 'btn btn-ghost btn-sm',
+          attrs: { title: '否决后目标暂停，等你下一步指令' },
+          onclick: (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            void goalReject(goal.id);
+          },
+        }, icon('x'), el('span', { text: '否决' })),
+      ),
+    );
+    if (!compact && str(approval.instruction)) {
+      node.appendChild(goalRawText('div', 'goal-pending-instruction', approval.instruction));
+    }
+    return node;
+  }
+
+  async function goalApproval(goalId, action) {
     const goal = goalById(goalId);
+    if (!goal || goalBusy.has(goalId)) return;
+    if (!goal.pendingApproval) {
+      toast('该目标没有待确认的跟进', 'warn');
+      return;
+    }
+    if (action === 'reject') {
+      const ok = await confirmDialog({
+        title: '否决这次跟进',
+        message: `否决后「${goal.title || ''}」会暂停，等你下一步指令再继续。`,
+        okText: '否决并暂缓',
+      });
+      if (!ok) return;
+    }
+    goalBusy.add(goalId);
+    state.sigs.goals = '';
+    renderGoals();
+    try {
+      const res = await api(`/api/goals/${encodeURIComponent(goalId)}/${action}`, {
+        method: 'POST',
+        timeout: 15000,
+      });
+      if (res && res.goal) upsertGoal(res.goal);
+      if (res && res.task) {
+        upsertTask(res.task);
+        renderTasks();
+      }
+      toast(
+        action === 'approve' ? '已同意，跟进任务已创建' : '已否决，目标已暂缓，等你下一步指令',
+        'success',
+      );
+    } catch (err) {
+      if (err.status === 401) {
+        handleAuthLost(err.message);
+        return;
+      }
+      if (err.status === 409) toast('该目标没有待确认的跟进', 'warn');
+      else toast(err.message || (action === 'approve' ? '同意失败' : '否决失败'), 'error');
+    } finally {
+      goalBusy.delete(goalId);
+      state.sigs.goals = '';
+      renderGoals();
+      if (state.drawer.open && state.drawer.kind === 'goal' && state.drawer.id === goalId) {
+        renderGoalDrawer({ preserveScroll: true });
+      }
+    }
+  }
+
+  function goalApprove(goalId) {
+    return goalApproval(goalId, 'approve');
+  }
+
+  function goalReject(goalId) {
+    return goalApproval(goalId, 'reject');
+  }
+
+  async function goalSetStatus(goalId, status) {    const goal = goalById(goalId);
     if (!goal || goalBusy.has(goalId)) return;
     if (status === 'stopped') {
       const ok = await confirmDialog({
@@ -2390,7 +2729,14 @@
         timeout: 12000,
       });
       if (res && res.goal) upsertGoal(res.goal);
-      toast(status === 'active' ? '目标已恢复' : status === 'paused' ? '目标已暂停' : '目标已停止', 'success');
+      const doneText = status === 'active'
+        ? '目标已恢复'
+        : status === 'paused'
+          ? '目标已暂停'
+          : status === 'completed'
+            ? '目标已标记为达成'
+            : '目标已停止';
+      toast(doneText, 'success');
     } catch (err) {
       if (err.status === 401) {
         handleAuthLost(err.message);
@@ -2445,6 +2791,12 @@
 
     const form = el('form', { className: 'goal-form', attrs: { novalidate: 'novalidate' } });
 
+    const nicknameInput = el('input', {
+      type: 'text',
+      attrs: { maxlength: '40', placeholder: '例如：自由职业、求职、学日语（可选）', 'aria-label': '目标昵称' },
+    });
+    nicknameInput.value = goal ? str(goal.nickname) : '';
+
     const titleInput = el('input', {
       type: 'text',
       attrs: { maxlength: '120', placeholder: '例如：三个月内学会日语 N3', 'aria-label': '目标标题' },
@@ -2496,7 +2848,9 @@
     typeSelect.addEventListener('change', syncScheduleRows);
     syncScheduleRows();
 
+    const nicknameHint = el('span', { className: 'field-hint', text: '列表和提醒里优先用这个称呼；留空则显示标题' });
     form.append(
+      el('div', { className: 'field' }, el('label', { text: '昵称（可选）' }), nicknameInput, nicknameHint),
       el('div', { className: 'field' }, el('label', { text: '目标标题' }), titleInput),
       el('div', { className: 'field' }, el('label', { text: '描述（可选）' }), descInput),
       el('div', { className: 'field' }, el('label', { text: '检查计划' }), typeSelect),
@@ -2528,7 +2882,12 @@
       saving = true;
       saveBtn.disabled = true;
       try {
-        const body = { title, description: descInput.value.trim(), schedule: scheduleBody };
+        const body = {
+          title,
+          nickname: nicknameInput.value.trim(),
+          description: descInput.value.trim(),
+          schedule: scheduleBody,
+        };
         const res = goal
           ? await api(`/api/goals/${encodeURIComponent(goal.id)}`, { method: 'PATCH', body, timeout: 15000 })
           : await api('/api/goals', { method: 'POST', body, timeout: 15000 });
@@ -2614,17 +2973,33 @@
       check.prepend(icon('send'));
       check.disabled = running;
     }
+    if (goal.pendingApproval) {
+      const approveBtn = addAction('同意跟进', () => void goalApprove(goal.id), 'primary');
+      approveBtn.prepend(icon('check'));
+      const rejectBtn = addAction('否决并暂缓', () => void goalReject(goal.id), 'ghost');
+      rejectBtn.prepend(icon('x'));
+    }
     if (status === 'active') addAction('暂停', () => void goalSetStatus(goal.id, 'paused'));
     else if (status === 'paused') addAction('恢复', () => void goalSetStatus(goal.id, 'active'));
-    if (status === 'active' || status === 'paused') addAction('停止', () => void goalSetStatus(goal.id, 'stopped'));
+    if (status === 'active' || status === 'paused') {
+      addAction('标记已达成', () => void goalSetStatus(goal.id, 'completed'));
+      addAction('停止', () => void goalSetStatus(goal.id, 'stopped'));
+    }
+    if (status === 'completed') addAction('重新激活', () => void goalSetStatus(goal.id, 'active'));
     addAction('编辑', () => openGoalFormDrawer(goal.id));
     addAction('删除', () => void goalDelete(goal.id), 'danger');
     wrap.appendChild(actions);
+
+    if (goal.pendingApproval) {
+      const pending = pendingApprovalNode(goal);
+      if (pending) wrap.appendChild(pending);
+    }
 
     const info = el('section', { className: 'detail-section' },
       el('div', { className: 'detail-section-head' }, el('h3', { text: '基础信息' })),
     );
     const grid = el('div', { className: 'kv-grid' },
+      kv('昵称', str(goal.nickname) || '—'),
       kv('状态', GOAL_STATUS[status] ? GOAL_STATUS[status].label : status),
       kv('计划', goalPlanText(goal.schedule)),
       kv('下次跟进', goal.nextCheckAt ? fmtDateTime(goal.nextCheckAt) : '—'),
@@ -2653,7 +3028,7 @@
     );
     if (str(goal.lastSummary)) {
       const article = el('article', { className: 'record-markdown goal-markdown' });
-      article.innerHTML = renderMarkdown(goal.lastSummary);
+      article.innerHTML = renderMarkdownHtml(goal.lastSummary);
       article.addEventListener('click', (event) => {
         const link = event.target.closest('[data-record-id]');
         if (!link) return;
@@ -2718,6 +3093,618 @@
   }
 
   /* ==================================================================
+   * 提醒（浏览器内只做管理，通知由手机 APK 的原生 AlarmManager 发出）
+   * ================================================================== */
+  const REMINDER_REPEATS = ['none', 'daily', 'weekly'];
+  const REMINDER_NOTIFY_STYLES = ['gentle', 'alarm'];
+
+  function reminderById(id) {
+    return state.reminders.find((item) => item && item.id === id) || null;
+  }
+
+  function reminderDueIso(dueAt) {
+    const t = Number(dueAt);
+    return Number.isFinite(t) && t > 0 ? new Date(t).toISOString() : '';
+  }
+
+  /** 到期时间统一按本机时区展示。 */
+  function reminderDueText(dueAt) {
+    return fmtDateTime(reminderDueIso(dueAt));
+  }
+
+  function reminderRepeatLabel(repeat) {
+    if (repeat === 'daily') return tr('reminders.repeatDaily');
+    if (repeat === 'weekly') return tr('reminders.repeatWeekly');
+    return tr('reminders.repeatNone');
+  }
+
+  /** 通知方式：旧数据没有该字段（或值非法）时一律回落为温柔通知。 */
+  function reminderNotifyStyleOf(reminder) {
+    const value = reminder && reminder.notifyStyle;
+    return REMINDER_NOTIFY_STYLES.includes(value) ? value : 'gentle';
+  }
+
+  function reminderNotifyLabel(style) {
+    return style === 'alarm' ? tr('reminders.notifyAlarm') : tr('reminders.notifyGentle');
+  }
+
+  function reminderNotifyBadge(style) {
+    return style === 'alarm' ? tr('reminders.badgeAlarm') : tr('reminders.badgeGentle');
+  }
+
+  /** 启用状态 / 是否已过期 / 是否已提醒过。 */
+  function reminderStatusOf(reminder) {
+    const due = Number(reminder.dueAt);
+    const hasDue = Number.isFinite(due) && due > 0;
+    const repeat = REMINDER_REPEATS.includes(reminder.repeat) ? reminder.repeat : 'none';
+    const fired = Boolean(reminder.lastFiredAt) && num(reminder.fireCount) > 0;
+    // 一次性提醒触发后后端会自动停用，所以「已提醒」要优先于「已停用」判断
+    if (repeat === 'none' && fired) return { tone: 'fired', label: tr('reminders.statusFired') };
+    if (reminder.enabled === false) return { tone: 'disabled', label: tr('reminders.statusDisabled') };
+    if (hasDue && due <= Date.now()) return { tone: 'overdue', label: tr('reminders.statusOverdue') };
+    return { tone: 'pending', label: '' };
+  }
+
+  function sortReminders() {
+    state.reminders.sort((a, b) => (num(a && a.dueAt) || 0) - (num(b && b.dueAt) || 0));
+  }
+
+  function reminderCard(reminder) {
+    const status = reminderStatusOf(reminder);
+    const busy = reminderBusy.has(reminder.id);
+    const title = str(reminder.title) || tr('reminders.untitled');
+    const card = el('article', {
+      className: 'reminder-card',
+      dataset: { id: reminder.id, status: status.tone },
+      attrs: {
+        role: 'button',
+        tabindex: '0',
+        'aria-label': tr('reminders.cardAria', { title }),
+      },
+    });
+
+    const head = el('div', { className: 'reminder-card-head' },
+      el('h3', { className: 'reminder-title', text: title, attrs: { 'data-i18n-skip': '1' } }),
+      status.label
+        ? el('span', { className: 'reminder-status', dataset: { tone: status.tone }, text: status.label })
+        : null,
+    );
+    card.appendChild(head);
+
+    if (str(reminder.note)) {
+      card.appendChild(el('p', {
+        className: 'reminder-note',
+        text: str(reminder.note),
+        attrs: { 'data-i18n-skip': '1' },
+      }));
+    }
+
+    const notifyStyle = reminderNotifyStyleOf(reminder);
+    const meta = el('div', { className: 'reminder-meta' },
+      el('span', { className: 'reminder-due' }, icon('clock'), el('span', { text: reminderDueText(reminder.dueAt) })),
+      el('span', { className: 'reminder-repeat' }, el('span', { text: reminderRepeatLabel(reminder.repeat) })),
+      el('span', { className: 'reminder-style', dataset: { style: notifyStyle } },
+        icon(notifyStyle === 'alarm' ? 'alert' : 'bell'),
+        el('span', { text: reminderNotifyBadge(notifyStyle) }),
+      ),
+    );
+    if (reminder.lastFiredAt) {
+      meta.appendChild(el('span', { className: 'reminder-fired' },
+        el('span', { className: 'reminder-meta-label', text: tr('reminders.lastFiredLabel') }),
+        el('span', { text: fmtRel(reminder.lastFiredAt) }),
+      ));
+    }
+    card.appendChild(meta);
+
+    const actions = el('div', { className: 'reminder-actions' },
+      el('button', {
+        type: 'button',
+        className: 'link-btn',
+        dataset: { action: 'edit' },
+        attrs: { 'aria-label': tr('reminders.editAria', { title }) },
+        disabled: busy,
+      }, icon('edit'), el('span', { text: tr('reminders.edit') })),
+      el('button', {
+        type: 'button',
+        className: 'link-btn',
+        dataset: { action: 'toggle' },
+        attrs: { 'aria-label': tr('reminders.toggleAria', { title }) },
+        disabled: busy,
+      }, icon('power'), el('span', { text: reminder.enabled === false ? tr('reminders.enable') : tr('reminders.disable') })),
+      el('button', {
+        type: 'button',
+        className: 'link-btn',
+        dataset: { action: 'delete' },
+        attrs: { 'aria-label': tr('reminders.deleteAria', { title }) },
+        disabled: busy,
+      }, icon('trash'), el('span', { text: tr('reminders.delete') })),
+    );
+    card.appendChild(actions);
+    return card;
+  }
+
+  function updateRemindersSub() {
+    const total = state.reminders.length;
+    const active = state.reminders.filter((item) => item && item.enabled !== false).length;
+    if (total) setText('#reminders-sub', tr('reminders.sub', { active, total }));
+    else if (!state.remindersLoaded || state.remindersLoading) setText('#reminders-sub', tr('reminders.loading'));
+    else setText('#reminders-sub', tr('reminders.subEmpty'));
+  }
+
+  function reminderBridge() {
+    let bridge = null;
+    try {
+      bridge = window.ButlerBridge;
+    } catch (e) {
+      bridge = null;
+    }
+    if (!bridge || typeof bridge.syncReminders !== 'function') return null;
+    return bridge;
+  }
+
+  function readReminderBridgeStatus() {
+    const bridge = reminderBridge();
+    if (!bridge || typeof bridge.getReminderStatus !== 'function') return null;
+    try {
+      const res = JSON.parse(bridge.getReminderStatus());
+      if (!res || typeof res !== 'object') return null;
+      return {
+        ok: res.ok !== false,
+        scheduled: num(res.scheduled),
+        permissionGranted: res.permissionGranted === undefined ? null : Boolean(res.permissionGranted),
+        exact: res.exact === undefined ? null : Boolean(res.exact),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /** 把提醒清单同步给手机 APK；浏览器里没有桥，安全跳过。 */
+  function syncRemindersToApk() {
+    const bridge = reminderBridge();
+    if (!bridge) {
+      state.remindersBridge = { available: false, ok: false, scheduled: 0, permissionGranted: null, exact: null, error: '' };
+      reminderSyncSig = '';
+      renderReminderHint();
+      return;
+    }
+    const payload = {
+      reminders: state.reminders.map((item) => ({
+        id: item.id,
+        title: str(item.title),
+        note: str(item.note),
+        dueAt: num(item.dueAt),
+        repeat: REMINDER_REPEATS.includes(item.repeat) ? item.repeat : 'none',
+        enabled: item.enabled !== false,
+        notifyStyle: reminderNotifyStyleOf(item),
+      })),
+    };
+    const serialized = JSON.stringify(payload);
+    if (serialized === reminderSyncSig) {
+      renderReminderHint();
+      return;
+    }
+    let result = null;
+    let error = '';
+    try {
+      const raw = bridge.syncReminders(serialized);
+      result = raw ? JSON.parse(raw) : null;
+    } catch (err) {
+      error = err && err.message ? err.message : String(err);
+    }
+    const status = readReminderBridgeStatus();
+    state.remindersBridge = {
+      available: true,
+      ok: !error && !!result && result.ok !== false,
+      scheduled: num(result && result.scheduled, status ? status.scheduled : 0),
+      permissionGranted: result && result.permissionGranted !== undefined
+        ? Boolean(result.permissionGranted)
+        : (status ? status.permissionGranted : null),
+      exact: result && result.exact !== undefined ? Boolean(result.exact) : (status ? status.exact : null),
+      error,
+    };
+    reminderSyncSig = error ? '' : serialized;
+    renderReminderHint();
+  }
+
+  function renderReminderHint() {
+    const hint = $('#reminder-hint');
+    if (!hint) return;
+    const info = state.remindersBridge;
+    const lines = [];
+    if (!info.available) {
+      lines.push({ tone: 'info', iconName: 'bell', text: tr('reminders.hintBrowser') });
+    } else {
+      lines.push({ tone: 'info', iconName: 'bell', text: tr('reminders.hintApk') });
+      if (info.permissionGranted === false) {
+        lines.push({ tone: 'warn', iconName: 'alert', text: tr('reminders.hintPermission') });
+      }
+      if (info.error) lines.push({ tone: 'warn', iconName: 'alert', text: tr('reminders.hintSyncFailed', { message: info.error }) });
+    }
+    if (state.remindersError) lines.push({ tone: 'warn', iconName: 'alert', text: state.remindersError });
+    hint.replaceChildren();
+    for (const line of lines) {
+      hint.appendChild(el('p', { className: 'reminder-hint-line', dataset: { tone: line.tone } },
+        icon(line.iconName),
+        el('span', { text: line.text }),
+      ));
+    }
+    hint.hidden = lines.length === 0;
+  }
+
+  function renderReminders() {
+    const list = $('#reminder-list');
+    if (!list) return;
+    setText('#reminders-title', tr('reminders.title'));
+    setText('#reminder-new-label', tr('reminders.new'));
+    const newBtn = $('#reminder-new');
+    if (newBtn) {
+      const blocked = Boolean(state.remindersError && !state.remindersSupported);
+      newBtn.disabled = blocked;
+      newBtn.title = blocked ? state.remindersError : '';
+    }
+    const sig = JSON.stringify({
+      reminders: state.reminders,
+      loaded: state.remindersLoaded,
+      loading: state.remindersLoading,
+      error: state.remindersError,
+      busy: Array.from(reminderBusy),
+      bridge: state.remindersBridge,
+      lang: currentLang(),
+    });
+    if (sig === state.sigs.reminders && list.childElementCount) {
+      updateRemindersSub();
+      return;
+    }
+    state.sigs.reminders = sig;
+    list.replaceChildren();
+    if (!state.reminders.length) {
+      if (state.remindersLoading || (!state.remindersLoaded && state.connected)) {
+        list.appendChild(el('p', { className: 'reminder-loading', text: tr('reminders.loading') }));
+      } else if (state.remindersError) {
+        list.appendChild(emptyState({
+          iconName: 'bell',
+          title: tr('reminders.loadFailed'),
+          desc: state.remindersError,
+        }));
+        list.appendChild(el('div', { className: 'reminder-empty-actions' },
+          el('button', {
+            type: 'button',
+            className: 'btn btn-ghost btn-sm',
+            dataset: { action: 'reload-reminders' },
+          }, icon('refresh'), el('span', { text: tr('reminders.retry') })),
+        ));
+      } else {
+        list.appendChild(emptyState({
+          iconName: 'bell',
+          title: tr('reminders.emptyTitle'),
+          desc: tr('reminders.emptyDesc'),
+        }));
+      }
+      updateRemindersSub();
+      renderReminderHint();
+      return;
+    }
+    for (const reminder of state.reminders) list.appendChild(reminderCard(reminder));
+    updateRemindersSub();
+    renderReminderHint();
+  }
+
+  function upsertReminder(reminder) {
+    if (!reminder || !reminder.id) return;
+    const index = state.reminders.findIndex((item) => item && item.id === reminder.id);
+    if (index >= 0) state.reminders[index] = reminder;
+    else state.reminders.push(reminder);
+    sortReminders();
+    state.remindersLoaded = true;
+    state.sigs.reminders = '';
+  }
+
+  function removeReminder(id) {
+    state.reminders = state.reminders.filter((item) => item && item.id !== id);
+    state.remindersLoaded = true;
+    state.sigs.reminders = '';
+  }
+
+  function ensureRemindersLoaded() {
+    if (!state.connected || state.remindersLoaded || state.remindersLoading) return;
+    void loadReminders();
+  }
+
+  async function loadReminders({ silent = false } = {}) {
+    if (!state.connected || state.remindersLoading) return;
+    state.remindersLoading = true;
+    if (!silent) state.remindersError = '';
+    state.sigs.reminders = '';
+    renderReminders();
+    try {
+      const res = await api('/api/reminders', { timeout: 12000 });
+      state.reminders = arr(res.reminders).filter((item) => item && item.id);
+      sortReminders();
+      state.remindersHubTime = str(res.hubTime);
+      state.remindersSupported = true;
+      state.remindersError = '';
+      state.remindersLoaded = true;
+      syncRemindersToApk();
+    } catch (err) {
+      if (err.status === 401) {
+        handleAuthLost(err.message);
+        return;
+      }
+      state.remindersSupported = err.status === 404 ? false : state.remindersSupported;
+      state.remindersError = err.status === 404
+        ? tr('reminders.unsupported')
+        : (err.message || tr('reminders.loadFailed'));
+      state.remindersLoaded = true;
+    } finally {
+      state.remindersLoading = false;
+      state.sigs.reminders = '';
+      renderReminders();
+    }
+  }
+
+  /** datetime-local 需要本地时间字符串（yyyy-MM-ddTHH:mm）。 */
+  function reminderLocalInput(dueAt) {
+    const t = Number(dueAt);
+    const d = new Date(Number.isFinite(t) && t > 0 ? t : Date.now());
+    if (!Number.isFinite(d.getTime())) return '';
+    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  }
+
+  function openReminderFormDrawer(reminderId) {
+    const reminder = reminderId ? reminderById(reminderId) : null;
+    if (reminderId && !reminder) {
+      toast(tr('reminders.notFound'), 'warn');
+      return;
+    }
+
+    const form = el('form', { className: 'reminder-form', attrs: { novalidate: 'novalidate' } });
+
+    const titleInput = el('input', {
+      type: 'text',
+      attrs: {
+        maxlength: '80',
+        placeholder: tr('reminders.fieldTitlePlaceholder'),
+        'aria-label': tr('reminders.fieldTitle'),
+      },
+    });
+    titleInput.value = reminder ? str(reminder.title) : '';
+
+    const noteInput = el('textarea', {
+      attrs: {
+        rows: '3',
+        maxlength: '500',
+        placeholder: tr('reminders.fieldNotePlaceholder'),
+        'aria-label': tr('reminders.fieldNote'),
+      },
+    });
+    noteInput.value = reminder ? str(reminder.note) : '';
+
+    const dueInput = el('input', {
+      type: 'datetime-local',
+      attrs: { 'aria-label': tr('reminders.fieldDue') },
+    });
+    dueInput.value = reminder
+      ? reminderLocalInput(reminder.dueAt)
+      : reminderLocalInput(Date.now() + 10 * 60 * 1000);
+
+    const repeatSelect = el('select', { attrs: { 'aria-label': tr('reminders.fieldRepeat') } });
+    const currentRepeat = reminder && REMINDER_REPEATS.includes(reminder.repeat) ? reminder.repeat : 'none';
+    for (const repeat of REMINDER_REPEATS) {
+      const option = el('option', { value: repeat, text: reminderRepeatLabel(repeat) });
+      if (repeat === currentRepeat) option.selected = true;
+      repeatSelect.appendChild(option);
+    }
+
+    const notifySelect = el('select', { attrs: { 'aria-label': tr('reminders.fieldNotifyStyle') } });
+    const currentNotifyStyle = reminderNotifyStyleOf(reminder);
+    for (const style of REMINDER_NOTIFY_STYLES) {
+      const option = el('option', { value: style, text: reminderNotifyLabel(style) });
+      if (style === currentNotifyStyle) option.selected = true;
+      notifySelect.appendChild(option);
+    }
+
+    const enabledInput = el('input', { type: 'checkbox' });
+    enabledInput.checked = reminder ? reminder.enabled !== false : true;
+    const enabledRow = el('label', { className: 'reminder-toggle' },
+      enabledInput,
+      el('span', { className: 'reminder-toggle-text' },
+        el('span', { className: 'reminder-toggle-label', text: tr('reminders.fieldEnabled') }),
+        el('span', { className: 'reminder-toggle-hint', text: tr('reminders.fieldEnabledHint') }),
+      ),
+    );
+
+    form.appendChild(el('div', { className: 'field' },
+      el('label', { text: tr('reminders.fieldTitle') }),
+      titleInput,
+      el('span', { className: 'field-hint', text: tr('reminders.fieldTitleHint') }),
+    ));
+    form.appendChild(el('div', { className: 'field' },
+      el('label', { text: tr('reminders.fieldNote') }),
+      noteInput,
+    ));
+    form.appendChild(el('div', { className: 'field-row' },
+      el('div', { className: 'field' },
+        el('label', { text: tr('reminders.fieldDue') }),
+        dueInput,
+        el('span', { className: 'field-hint', text: tr('reminders.fieldDueHint') }),
+      ),
+      el('div', { className: 'field' },
+        el('label', { text: tr('reminders.fieldRepeat') }),
+        repeatSelect,
+      ),
+    ));
+    form.appendChild(el('div', { className: 'field' },
+      el('label', { text: tr('reminders.fieldNotifyStyle') }),
+      notifySelect,
+      el('span', { className: 'field-hint', text: tr('reminders.notifyStyleHint') }),
+    ));
+    form.appendChild(el('div', { className: 'field reminder-enabled-field' }, enabledRow));
+    form.appendChild(el('p', { className: 'reminder-form-hint', text: tr('reminders.formHint') }));
+
+    const saveBtn = el('button', { type: 'button', className: 'btn btn-primary btn-sm' },
+      icon('check'),
+      el('span', { text: reminder ? tr('reminders.save') : tr('reminders.create') }),
+    );
+
+    let saving = false;
+    const save = async () => {
+      if (saving) return;
+      const title = titleInput.value.trim();
+      const note = noteInput.value.trim();
+      if (!title) {
+        toast(tr('reminders.fieldTitleRequired'), 'warn');
+        titleInput.focus();
+        return;
+      }
+      if (title.length > 80) {
+        toast(tr('reminders.fieldTitleTooLong'), 'warn');
+        titleInput.focus();
+        return;
+      }
+      if (note.length > 500) {
+        toast(tr('reminders.fieldNoteTooLong'), 'warn');
+        noteInput.focus();
+        return;
+      }
+      const dueMs = dueInput.value ? new Date(dueInput.value).getTime() : NaN;
+      if (!Number.isFinite(dueMs)) {
+        toast(tr('reminders.fieldDueRequired'), 'warn');
+        dueInput.focus();
+        return;
+      }
+      const body = {
+        title,
+        note,
+        dueAt: dueMs,
+        repeat: REMINDER_REPEATS.includes(repeatSelect.value) ? repeatSelect.value : 'none',
+        notifyStyle: REMINDER_NOTIFY_STYLES.includes(notifySelect.value) ? notifySelect.value : 'gentle',
+        enabled: enabledInput.checked,
+      };
+      saving = true;
+      saveBtn.disabled = true;
+      try {
+        const res = reminder
+          ? await api(`/api/reminders/${encodeURIComponent(reminder.id)}`, { method: 'PATCH', body, timeout: 15000 })
+          : await api('/api/reminders', { method: 'POST', body, timeout: 15000 });
+        const saved = res && res.reminder && res.reminder.id ? res.reminder : null;
+        if (saved) upsertReminder(saved);
+        else if (reminder) upsertReminder({ ...reminder, ...body });
+        state.remindersHubTime = str(res && res.hubTime) || state.remindersHubTime;
+        state.remindersLoaded = true;
+        state.remindersSupported = true;
+        state.remindersError = '';
+        state.sigs.reminders = '';
+        renderReminders();
+        syncRemindersToApk();
+        toast(reminder ? tr('reminders.saved') : tr('reminders.created'), 'success');
+        hideDrawer();
+      } catch (err) {
+        if (err.status === 401) {
+          handleAuthLost(err.message);
+          return;
+        }
+        toast(err.message || tr('reminders.saveFailed'), 'error');
+      } finally {
+        saving = false;
+        saveBtn.disabled = false;
+      }
+    };
+
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      void save();
+    });
+    saveBtn.addEventListener('click', () => void save());
+
+    openDrawer({
+      kind: 'reminder-form',
+      id: reminder ? reminder.id : null,
+      title: reminder ? tr('reminders.formEditTitle') : tr('reminders.formNewTitle'),
+      subNodes: [el('span', { text: reminder ? tr('reminders.formSubEdit') : tr('reminders.formSubNew') })],
+      body: form,
+      footerNodes: [
+        el('button', { type: 'button', className: 'btn btn-ghost btn-sm', text: tr('common.cancel'), onclick: hideDrawer }),
+        el('span', { className: 'spacer' }),
+        saveBtn,
+      ],
+    });
+    setTimeout(() => titleInput.focus(), 80);
+  }
+
+  async function reminderToggleEnabled(id) {
+    const reminder = reminderById(id);
+    if (!reminder || reminderBusy.has(id)) return;
+    const next = reminder.enabled === false;
+    reminderBusy.add(id);
+    state.sigs.reminders = '';
+    renderReminders();
+    try {
+      const res = await api(`/api/reminders/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        body: { enabled: next },
+        timeout: 12000,
+      });
+      if (res && res.reminder && res.reminder.id) upsertReminder(res.reminder);
+      else upsertReminder({ ...reminder, enabled: next });
+      state.remindersHubTime = str(res && res.hubTime) || state.remindersHubTime;
+      state.sigs.reminders = '';
+      renderReminders();
+      syncRemindersToApk();
+      toast(next ? tr('reminders.enabledToast') : tr('reminders.disabledToast'), 'success');
+    } catch (err) {
+      if (err.status === 401) return handleAuthLost(err.message);
+      if (err.status === 404) {
+        removeReminder(id);
+        toast(tr('reminders.notFound'), 'warn');
+      } else {
+        toast(err.message || tr('reminders.toggleFailed'), 'error');
+      }
+    } finally {
+      reminderBusy.delete(id);
+      state.sigs.reminders = '';
+      renderReminders();
+    }
+  }
+
+  async function reminderDelete(id) {
+    const reminder = reminderById(id);
+    if (!reminder || reminderBusy.has(id)) return;
+    const ok = await confirmDialog({
+      title: tr('reminders.deleteTitle'),
+      message: tr('reminders.deleteMessage'),
+      okText: tr('reminders.deleteOk'),
+    });
+    if (!ok) return;
+    reminderBusy.add(id);
+    state.sigs.reminders = '';
+    renderReminders();
+    try {
+      await api(`/api/reminders/${encodeURIComponent(id)}`, { method: 'DELETE', timeout: 12000 });
+      removeReminder(id);
+      if (state.drawer.open && state.drawer.kind === 'reminder-form' && state.drawer.id === id) hideDrawer();
+      state.sigs.reminders = '';
+      renderReminders();
+      syncRemindersToApk();
+      toast(tr('reminders.deleted'), 'success');
+    } catch (err) {
+      if (err.status === 401) return handleAuthLost(err.message);
+      if (err.status === 404) {
+        removeReminder(id);
+        if (state.drawer.open && state.drawer.kind === 'reminder-form' && state.drawer.id === id) hideDrawer();
+        renderReminders();
+        syncRemindersToApk();
+      } else {
+        toast(err.message || tr('reminders.deleteFailed'), 'error');
+      }
+    } finally {
+      reminderBusy.delete(id);
+      state.sigs.reminders = '';
+      renderReminders();
+    }
+  }
+
+  /* ==================================================================
    * 实时动态
    * ================================================================== */
   function activityEntries() {
@@ -2731,8 +3718,8 @@
         if (data.task && data.task.instruction) {
           const label = { 'task.created': '新任务', 'task.completed': '任务完成', 'task.failed': '任务失败', 'task.updated': '任务更新' }[type] || '任务';
           message = `${label}：${shorten(data.task.instruction, 26)}`;
-        } else if (data.device && data.device.name) {
-          message = `${type === 'device.online' ? '设备上线' : type === 'device.offline' ? '设备离线' : '设备更新'}：${data.device.name}`;
+        } else if (data.device && (data.device.nickname || data.device.name)) {
+          message = `${type === 'device.online' ? '设备上线' : type === 'device.offline' ? '设备离线' : '设备更新'}：${data.device.nickname || data.device.name}`;
         } else if (data.name) {
           message = `${type === 'device.offline' ? '设备离线' : '设备上线'}：${data.name}`;
         } else if (data.message) {
@@ -3205,6 +4192,7 @@
 
   function hideDrawer() {
     if (!state.drawer.open) return;
+    deviceNicknameDraft = null;
     $('#drawer-root').hidden = true;
     document.body.classList.remove('no-scroll');
     const returnFocus = state.drawer.returnFocus;
@@ -3268,12 +4256,14 @@
     return text;
   }
 
-  /** 极简安全 Markdown 渲染（标题/列表/表格/代码块/引用/粗体/行内代码/记录互链）。 */
-  function renderMarkdown(markdown) {
+  /** 字符串版 Markdown → HTML（仅用于 innerHTML 场景：记录抽屉 / 每晚总结 / 目标总结）；任务输出请用 DOM 版 renderMarkdown。 */
+  function renderMarkdownHtml(markdown) {
     const lines = String(markdown || '').replace(/\r\n/g, '\n').split('\n');
     const html = [];
     let paragraph = [];
     let inCode = false;
+    let fenceMarker = '';
+    let fenceLength = 0;
     let codeLines = [];
     let i = 0;
     const flushParagraph = () => {
@@ -3283,21 +4273,32 @@
     };
     while (i < lines.length) {
       const line = lines[i];
-      if (/^(`{3,})/.test(line)) {
-        if (inCode) {
+      const fenceMatch = /^(`{3,}|~{3,})/.exec(line);
+      if (inCode) {
+        const closes =
+          fenceMatch &&
+          fenceMatch[1][0] === fenceMarker &&
+          fenceMatch[1].length >= fenceLength &&
+          /^(`{3,}|~{3,})\s*$/.test(line);
+        if (closes) {
           html.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
           inCode = false;
+          fenceMarker = '';
+          fenceLength = 0;
           codeLines = [];
-        } else {
-          flushParagraph();
-          inCode = true;
-          codeLines = [];
+          i += 1;
+          continue;
         }
+        codeLines.push(line);
         i += 1;
         continue;
       }
-      if (inCode) {
-        codeLines.push(line);
+      if (fenceMatch) {
+        flushParagraph();
+        inCode = true;
+        fenceMarker = fenceMatch[1][0];
+        fenceLength = fenceMatch[1].length;
+        codeLines = [];
         i += 1;
         continue;
       }
@@ -3330,21 +4331,19 @@
         html.push(`<blockquote>${mdInline(quote.join(' '))}</blockquote>`);
         continue;
       }
-      if (/^\|/.test(line) && i + 1 < lines.length && /^\|?[\s:|-]*-{2,}/.test(lines[i + 1])) {
+      const table = parseTableAt(lines, i);
+      if (table) {
         flushParagraph();
-        const splitRow = (row) => row.replace(/^\|/, '').replace(/\|$/, '').split('|').map((cell) => cell.trim());
-        const head = splitRow(line);
-        i += 2;
-        const rows = [];
-        while (i < lines.length && /^\|/.test(lines[i])) {
-          rows.push(splitRow(lines[i]));
-          i += 1;
-        }
-        html.push(
-          `<div class="record-table"><table><thead><tr>${head.map((cell) => `<th>${mdInline(cell)}</th>`).join('')}</tr></thead><tbody>${rows
-            .map((row) => `<tr>${row.map((cell) => `<td>${mdInline(cell)}</td>`).join('')}</tr>`)
-            .join('')}</tbody></table></div>`,
-        );
+        const head = table.head
+          .map((cell, index) => `<th class="${tableAlignClass(table.aligns[index])}" scope="col">${mdInline(cell)}</th>`)
+          .join('');
+        const body = table.rows
+          .map((row) => `<tr>${table.head
+            .map((label, index) => `<td class="${tableAlignClass(table.aligns[index])}" data-label="${escapeHtml(label)}">${mdInline(row[index] || '')}</td>`)
+            .join('')}</tr>`)
+          .join('');
+        html.push(`<div class="md-table-wrap"><table class="md-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`);
+        i = table.next;
         continue;
       }
       if (/^- /.test(line)) {
@@ -3569,7 +4568,7 @@
       kv(tr('records.file'), record.file || '—', true),
     );
     const article = el('article', { className: 'record-markdown' });
-    article.innerHTML = renderMarkdown(record.markdown);
+    article.innerHTML = renderMarkdownHtml(record.markdown);
     article.addEventListener('click', (event) => {
       const link = event.target.closest('[data-record-id]');
       if (!link) return;
@@ -3579,6 +4578,8 @@
     const body = el('div', { className: 'records-wrap' }, meta, article);
     const copyBtn = el('button', { type: 'button', className: 'btn btn-ghost btn-sm' }, icon('copy'), tr('records.copy'));
     copyBtn.addEventListener('click', () => copyText(record.markdown, tr('records.copied')));
+    const copyIdBtn = el('button', { type: 'button', className: 'btn btn-ghost btn-sm' }, icon('copy'), '复制任务 ID');
+    copyIdBtn.addEventListener('click', () => copyText(record.taskId, '任务 ID 已复制'));
     const downloadBtn = el('button', { type: 'button', className: 'btn btn-ghost btn-sm' });
     downloadBtn.append(icon('send'), document.createTextNode(tr('records.download')));
     downloadBtn.addEventListener('click', () => {
@@ -3601,6 +4602,7 @@
       body,
       footerNodes: [
         backBtn,
+        copyIdBtn,
         copyBtn,
         downloadBtn,
         el('span', { className: 'spacer' }),
@@ -3612,6 +4614,11 @@
   /* ==================================================================
    * 设备详情抽屉
    * ================================================================== */
+  /**
+   * 设备昵称的“未提交草稿”（声明在模块顶部）：抽屉会被快照轮询/设备事件反复重建，
+   * 没有它的话输入内容会被服务端数据覆盖（表现为输入框不断闪空）。
+   */
+
   function buildDeviceBody(device) {
     const caps = capsOf(device);
     const load = loadOf(device);
@@ -3625,6 +4632,60 @@
     const status = deviceStatusOf(device);
     const body = el('div');
 
+    /* 昵称：用户自定义的用途标签，保存在 Hub 侧，不会被设备重报的机器名覆盖 */
+    const nicknameSection = el('section', { className: 'detail-section' },
+      el('div', { className: 'detail-section-head' },
+        el('h3', { text: '设备昵称' }),
+        el('span', { className: 'muted', style: { fontSize: '10.5px' }, text: '只保存在本机 Hub，用来标注用途' }),
+      ),
+    );
+    const nicknameInput = el('input', {
+      type: 'text',
+      className: 'nickname-input',
+      attrs: { 'aria-label': '设备昵称', maxlength: '40', placeholder: '例如：书房工作站（写代码）' },
+    });
+    const draft = deviceNicknameDraft && deviceNicknameDraft.deviceId === device.id ? deviceNicknameDraft.value : null;
+    nicknameInput.value = draft != null ? draft : (device.nickname || '');
+    nicknameInput.addEventListener('input', () => {
+      deviceNicknameDraft = { deviceId: device.id, value: nicknameInput.value };
+    });
+    nicknameInput.addEventListener('blur', () => {
+      /* 草稿和已保存值一样时清掉，让抽屉恢复正常自动刷新 */
+      if (deviceNicknameDraft && deviceNicknameDraft.deviceId === device.id
+        && String(deviceNicknameDraft.value || '').trim() === String(device.nickname || '')) {
+        deviceNicknameDraft = null;
+      }
+    });
+    const saveNickname = () => { void saveDeviceNickname(device.id, nicknameInput.value); };
+    nicknameInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        saveNickname();
+      }
+    });
+    nicknameSection.appendChild(el('div', { className: 'nickname-row' },
+      nicknameInput,
+      el('button', { type: 'button', className: 'btn btn-primary btn-sm', text: '保存昵称', onclick: saveNickname }),
+      el('button', {
+        type: 'button',
+        className: 'btn btn-ghost btn-sm',
+        text: '清除昵称',
+        onclick: () => {
+          nicknameInput.value = '';
+          deviceNicknameDraft = { deviceId: device.id, value: '' };
+          saveNickname();
+        },
+      }),
+    ));
+    /* 旧版 Hub 的 deviceToJson 里没有 nickname 字段：直接提示并给一键重启入口 */
+    if (typeof device.nickname !== 'string') {
+      nicknameSection.appendChild(el('div', { className: 'nickname-hint nickname-warn' },
+        el('span', { text: '当前 Hub 还没加载昵称功能，重启后即可保存' }),
+        el('button', { type: 'button', className: 'btn btn-ghost btn-sm', text: '重启 Hub', onclick: restartHubForNickname }),
+      ));
+    }
+    body.appendChild(nicknameSection);
+
     /* 运行状态 */
     const statusSection = el('section', { className: 'detail-section' },
       el('div', { className: 'detail-section-head' }, el('h3', { text: '运行状态' })),
@@ -3637,7 +4698,7 @@
       el('span', { className: 'detail-load-val', text: `${load.running} / ${load.max}` }),
     ));
     const metricsGrid = el('div', { className: 'detail-metrics' },
-      metricBox('状态', DEVICE_STATUS[status] || status, `最近心跳 ${fmtRel(device.lastSeenAt)}`),
+      metricBox('状态', DEVICE_STATUS[status] || status, `最近心跳 ${fmtRel(device.lastSeenAt)}`, undefined, status),
       metricBox('CPU', Number.isFinite(metrics.cpuPct) ? `${Math.round(metrics.cpuPct)}%` : '—',
         Number.isFinite(metrics.cpuPct) ? null : '未上报', Number.isFinite(metrics.cpuPct) ? Math.min(100, metrics.cpuPct) : null),
       metricBox('内存', Number.isFinite(metrics.memPct) ? `${Math.round(metrics.memPct)}%` : '—',
@@ -3726,6 +4787,8 @@
       el('div', { className: 'detail-section-head' }, el('h3', { text: '连接信息' })),
       el('div', { className: 'detail-kv-grid' },
         kv('设备 ID', device.id, true),
+        /* 设置了用途昵称就只显示昵称，机器名只对没起昵称的设备展示 */
+        device.nickname ? null : kv('机器名', device.name || '—', true),
         kv('端点', device.endpoint || '—', true),
         kv('平台', `${device.platform || '—'} / ${device.kind || '—'}`),
         kv('注册时间', fmtDateTime(device.registeredAt)),
@@ -3741,10 +4804,10 @@
     return body;
   }
 
-  function metricBox(label, value, sub, percent) {
+  function metricBox(label, value, sub, percent, status) {
     const box = el('div', { className: 'metric-box' },
       el('div', { className: 'metric-label', text: label }),
-      el('div', { className: 'metric-value', text: String(value) }),
+      el('div', { className: 'metric-value', dataset: status ? { status } : undefined, text: String(value) }),
     );
     if (sub) box.appendChild(el('div', { className: 'metric-label', text: sub, style: { marginTop: '2px' } }));
     if (Number.isFinite(percent)) {
@@ -3795,21 +4858,52 @@
     ];
   }
 
+  function deviceNicknameInputFocused() {
+    const input = document.querySelector('#drawer-body .nickname-input');
+    return !!(input && document.activeElement === input);
+  }
+
+  /** 有没保存的昵称改动（含“已输入但焦点已移到保存按钮”的情况）时，先别重建抽屉。 */
+  function deviceNicknameBusy(id) {
+    if (deviceNicknameInputFocused()) return true;
+    const draft = deviceNicknameDraft;
+    if (!draft || draft.deviceId !== id) return false;
+    const device = state.devices.get(id);
+    return String(draft.value || '').trim() !== String((device && device.nickname) || '');
+  }
+
   function renderDeviceDrawer(device, preserveScroll) {
-    const scroll = preserveScroll ? $('#drawer-body').scrollTop : 0;
-    setText('#drawer-title', device.name || device.id);
+    const bodyEl = $('#drawer-body');
+    const scroll = preserveScroll ? bodyEl.scrollTop : 0;
+    const prevInput = bodyEl.querySelector('.nickname-input');
+    const hadFocus = !!(prevInput && document.activeElement === prevInput);
+    const selStart = hadFocus ? prevInput.selectionStart : null;
+    const selEnd = hadFocus ? prevInput.selectionEnd : null;
+    setText('#drawer-title', deviceDisplayName(device));
     const sub = $('#drawer-sub');
+    const drawerStatus = deviceStatusOf(device);
     sub.replaceChildren(
       el('i', {
         className: 'status-dot',
         dataset: { tone: device.online ? (device.status === 'busy' ? 'busy' : 'online') : 'offline' },
       }),
-      el('span', { text: DEVICE_STATUS[deviceStatusOf(device)] || deviceStatusOf(device) }),
+      el('span', { className: 'device-state', dataset: { status: drawerStatus }, text: DEVICE_STATUS[drawerStatus] || drawerStatus }),
       el('span', { text: '·' }),
       el('span', { text: `${PLATFORM_LABEL[device.platform] || device.platform || '未知平台'} · ${KIND_LABEL[device.kind] || device.kind || '设备'}` }),
     );
-    $('#drawer-body').replaceChildren(buildDeviceBody(device));
-    $('#drawer-body').scrollTop = scroll;
+    bodyEl.replaceChildren(buildDeviceBody(device));
+    deviceDrawerSig = JSON.stringify(device);
+    bodyEl.scrollTop = scroll;
+    const nextInput = bodyEl.querySelector('.nickname-input');
+    if (nextInput && hadFocus && !deviceNicknameDraft) {
+      /* 只是被动刷新：把焦点和光标还给用户，别打断输入 */
+      try {
+        nextInput.focus({ preventScroll: true });
+        if (selStart != null && selEnd != null) nextInput.setSelectionRange(selStart, selEnd);
+      } catch {
+        /* ignore */
+      }
+    }
     const foot = $('#drawer-foot');
     foot.replaceChildren(...deviceFooterNodes(device));
     foot.hidden = false;
@@ -3821,10 +4915,11 @@
       toast('设备不存在或已被移除', 'warn');
       return;
     }
+    deviceNicknameDraft = null;
     openDrawer({
       kind: 'device',
       id,
-      title: device.name || device.id,
+      title: deviceDisplayName(device),
       subNodes: [],
       body: null,
       footerNodes: [],
@@ -3832,13 +4927,16 @@
     renderDeviceDrawer(device, false);
   }
 
-  function refreshDeviceDrawer(id) {
+  function refreshDeviceDrawer(id, force) {
     if (!state.drawer.open || state.drawer.kind !== 'device' || state.drawer.id !== id) return;
+    /* 用户正在输入或还有未保存的昵称时不要重建抽屉：重建会打断输入法组合（中文昵称）并让输入框闪空 */
+    if (!force && deviceNicknameBusy(id)) return;
     const device = state.devices.get(id);
     if (!device) {
       hideDrawer();
       return;
     }
+    if (!force && deviceDrawerSig === JSON.stringify(device)) return;
     renderDeviceDrawer(device, true);
   }
 
@@ -3853,6 +4951,68 @@
     } catch (err) {
       if (err.status === 401) return handleAuthLost(err.message);
       toast(err.message || '刷新失败', 'error');
+    }
+  }
+
+  /** 让旧版 Hub 加载昵称相关后端代码（/api/system/restart 会 re-exec 进程）。 */
+  async function restartHubForNickname() {
+    const ok = await confirmDialog({
+      title: '重启 Hub 以启用设备昵称',
+      message: '昵称功能需要 Hub 重启后才会生效；重启期间运行中的任务会自动重新排队。确定现在重启？',
+      okText: '重启 Hub',
+    });
+    if (!ok) return;
+    try {
+      await api('/api/system/restart', { method: 'POST', body: { reason: 'console:device-nickname' }, timeout: 10000 });
+      const warn = document.querySelector('#drawer-body .nickname-warn');
+      if (warn) warn.remove();
+      toast('Hub 正在重启，约 15 秒后自动重连…', 'success', 6000);
+      setTimeout(() => { try { refreshNow(true); } catch { /* ignore */ } }, 16000);
+      setTimeout(() => { try { startSse(); refreshNow(true); } catch { /* ignore */ } }, 18000);
+    } catch (err) {
+      if (err.status === 401) return handleAuthLost(err.message);
+      toast(err.message || '重启失败', 'error');
+    }
+  }
+
+  async function saveDeviceNickname(id, nickname) {
+    const device = state.devices.get(id);
+    if (!device) return;
+    const next = String(nickname == null ? '' : nickname).trim();
+    if (next.length > 40) {
+      toast('设备昵称最多 40 个字符', 'warn');
+      return;
+    }
+    if (next === (device.nickname || '')) {
+      toast(next ? '昵称没有变化' : '昵称已是空', 'warn');
+      return;
+    }
+    try {
+      const res = await api(`/api/devices/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        body: { nickname: next },
+        timeout: 10000,
+      });
+      const updated = (res && res.device) || null;
+      if (!updated || typeof updated.nickname !== 'string') {
+        /* 旧版 Hub 不认识 nickname，会 200 返回原设备：不要谎报成功 */
+        toast('昵称未保存：Hub 需要重启后才能保存昵称', 'warn', 6000);
+        return;
+      }
+      if (updated.nickname !== next) {
+        toast('昵称没有保存成功，请重启 Hub 后重试', 'warn', 6000);
+        return;
+      }
+      state.devices.set(id, { ...device, ...updated });
+      state.sigs.devices = '';
+      state.sigs.composer = '';
+      deviceNicknameDraft = null;
+      renderAll();
+      refreshDeviceDrawer(id, true);
+      toast(next ? '设备昵称已保存' : '设备昵称已清除', 'success');
+    } catch (err) {
+      if (err.status === 401) return handleAuthLost(err.message);
+      toast(err.message || '昵称保存失败', 'error');
     }
   }
 
@@ -3879,7 +5039,7 @@
     if (!device) return;
     const ok = await confirmDialog({
       title: '删除设备？',
-      message: `将从 Hub 移除「${device.name || device.id}」。如果设备仍在线，它会在下次心跳时重新注册。`,
+      message: `将从 Hub 移除「${deviceDisplayName(device)}」。如果设备仍在线，它会在下次心跳时重新注册。`,
       okText: '删除设备',
     });
     if (!ok) return;
@@ -3905,9 +5065,61 @@
     const body = el('div');
     const requirements = (task.requirements && typeof task.requirements === 'object') ? task.requirements : {};
 
+    const rawInstruction = task.instruction || '';
+    const instructionText = rawInstruction || '（无指令内容）';
+    const instructionStructured = Boolean(rawInstruction) && looksLikeMarkdown(rawInstruction);
+    // 指令过长时默认折叠，把视觉重心留给输出结果；阈值按字符数与行数双重判断。
+    const instructionLong = rawInstruction.length > 280
+      || rawInstruction.split('\n').length > 6;
+    const showRawInstruction = !instructionStructured || state.rawInstructions.has(task.id);
+    const instructionQuote = el('div', {
+      className: 'detail-quote instruction-quote'
+        + (instructionStructured && !showRawInstruction ? ' is-rendered' : '')
+        + (instructionLong ? ' is-collapsible is-collapsed' : ''),
+    });
+    const instructionRaw = el('p', { className: 'instruction-raw', text: instructionText });
+    const instructionRendered = instructionStructured ? renderMarkdown(rawInstruction) : null;
+    if (instructionRendered) instructionRendered.classList.add('instruction-rendered');
+    instructionQuote.appendChild(showRawInstruction ? instructionRaw : instructionRendered);
+
+    const instructionActions = el('div', { className: 'detail-head-actions' });
+    if (instructionRendered) {
+      const instructionModeToggle = el('button', {
+        type: 'button',
+        className: 'link-btn instruction-mode-toggle',
+      }, el('span', { text: showRawInstruction ? '渲染' : '原文' }));
+      instructionModeToggle.addEventListener('click', () => {
+        const nextRaw = !state.rawInstructions.has(task.id);
+        if (nextRaw) state.rawInstructions.add(task.id);
+        else state.rawInstructions.delete(task.id);
+        instructionQuote.replaceChildren(nextRaw ? instructionRaw : instructionRendered);
+        instructionQuote.classList.toggle('is-rendered', !nextRaw);
+        const label = instructionModeToggle.querySelector('span');
+        if (label) label.textContent = tx(nextRaw ? '渲染' : '原文');
+      });
+      instructionActions.appendChild(instructionModeToggle);
+    }
+    if (instructionLong) {
+      const instructionToggle = el('button', {
+        type: 'button',
+        className: 'link-btn instruction-toggle',
+        attrs: { 'aria-expanded': 'false' },
+      }, icon('chevron'), el('span', { text: '展开指令' }));
+      instructionToggle.addEventListener('click', () => {
+        const collapsed = instructionQuote.classList.toggle('is-collapsed');
+        instructionToggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+        instructionToggle.classList.toggle('is-open', !collapsed);
+        const label = instructionToggle.querySelector('span');
+        if (label) label.textContent = tx(collapsed ? '展开指令' : '收起指令');
+      });
+      instructionActions.appendChild(instructionToggle);
+    }
+    const instructionHead = el('div', { className: 'detail-section-head' },
+      el('h3', { text: '指令' }));
+    if (instructionActions.childElementCount) instructionHead.appendChild(instructionActions);
     const instructionSection = el('section', { className: 'detail-section' },
-      el('div', { className: 'detail-section-head' }, el('h3', { text: '指令' })),
-      el('p', { className: 'detail-quote', text: task.instruction || '（无指令内容）' }),
+      instructionHead,
+      instructionQuote,
     );
     const reqChips = el('div', { className: 'requirements-row' });
     if (requirements.model) reqChips.appendChild(el('span', { className: 'chip', dataset: { kind: 'model' }, text: `模型 ${requirements.model}` }));
@@ -3982,9 +5194,35 @@
 
     const output = outputOf(task);
     if (output) {
+      const rawOutput = output.markdown || output.text || '';
+      const structured = looksLikeMarkdown(rawOutput);
+      const showRaw = !structured || state.rawOutputs.has(task.id);
+      const rawNode = el('pre', { className: 'detail-output-raw', text: rawOutput });
+      const renderedNode = structured ? renderMarkdown(rawOutput) : null;
+      if (renderedNode) renderedNode.classList.add('detail-output-rendered');
+      const outputBody = el('div', { className: 'detail-output' }, showRaw ? rawNode : renderedNode);
+      const headActions = el('div', { className: 'detail-head-actions' },
+        el('button', { type: 'button', className: 'link-btn', onclick: () => copyText(rawOutput, 'Markdown 已复制') },
+          icon('copy'), el('span', { text: '复制 Markdown' })),
+      );
+      if (structured && renderedNode) {
+        const toggleBtn = el('button', { type: 'button', className: 'link-btn' },
+          el('span', { text: showRaw ? '渲染' : '原文' }));
+        toggleBtn.addEventListener('click', () => {
+          const nextRaw = !outputBody.contains(rawNode);
+          outputBody.replaceChildren(nextRaw ? rawNode : renderedNode);
+          toggleBtn.querySelector('span').textContent = nextRaw ? '渲染' : '原文';
+          if (nextRaw) state.rawOutputs.add(task.id);
+          else state.rawOutputs.delete(task.id);
+        });
+        headActions.appendChild(toggleBtn);
+      }
       const outSection = el('section', { className: 'detail-section' },
-        el('div', { className: 'detail-section-head' }, el('h3', { text: '输出' })),
-        el('div', { className: 'detail-quote output-quote' }, renderMarkdown(output.markdown || output.text || '')),
+        el('div', { className: 'detail-section-head' },
+          el('h3', { text: '输出' }),
+          headActions,
+        ),
+        outputBody,
       );
       body.appendChild(outSection);
     }
@@ -4013,6 +5251,7 @@
       el('button', { type: 'button', className: 'btn btn-ghost btn-sm', onclick: hideDrawer, text: '关闭' }),
       el('span', { className: 'spacer' }),
       el('button', { type: 'button', className: 'btn btn-ghost btn-sm', onclick: () => copyText(task.instruction || '', '指令已复制') }, icon('copy'), '复制指令'),
+      el('button', { type: 'button', className: 'btn btn-ghost btn-sm', onclick: () => copyText(task.id, '任务 ID 已复制') }, icon('copy'), '复制任务 ID'),
       el('button', {
         type: 'button', className: 'btn btn-ghost btn-sm',
         onclick: () => { hideDrawer(); editTaskInstruction(task.id); },
@@ -4268,6 +5507,10 @@
         state.goalsLoaded = false;
         ensureGoalsLoaded();
       }
+      if (state.remindersSupported) {
+        state.remindersLoaded = false;
+        ensureRemindersLoaded();
+      }
       if (showToast) toast('数据已刷新', 'success');
     } catch (err) {
       if (err.status === 401) handleAuthLost(err.message);
@@ -4509,6 +5752,7 @@
       if (body) body.replaceChildren(buildSettings());
     }
     if (next === 'developer') void resumeDevJob();
+    if (next === 'reminders') ensureRemindersLoaded();
     if (isMobile() && scroll) {
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
@@ -4540,6 +5784,25 @@
       state.autoOpenDone = true;
       setTab('goals');
       if (id && goalById(id)) openGoalDrawer(id);
+    } else if (kind === 'reminders') {
+      state.autoOpenDone = true;
+      setTab('reminders');
+      if (!id) return;
+      if (reminderById(id)) {
+        openReminderFormDrawer(id);
+        return;
+      }
+      // 提醒列表是异步载入的：等它到达后再打开对应编辑抽屉（最多等 5 秒）
+      let tries = 0;
+      const timer = setInterval(() => {
+        tries += 1;
+        if (reminderById(id)) {
+          clearInterval(timer);
+          openReminderFormDrawer(id);
+        } else if (tries >= 20 || !state.connected) {
+          clearInterval(timer);
+        }
+      }, 250);
     }
   }
 
@@ -4644,6 +5907,23 @@
       openTaskDrawer(card.dataset.id);
     });
 
+    const collapseAllBtn = $('#tasks-collapse-all');
+    const expandAllBtn = $('#tasks-expand-all');
+    if (collapseAllBtn) {
+      collapseAllBtn.addEventListener('click', () => {
+        state.tasksCollapsed = true;
+        state.sigs.tasks = '';
+        renderTasks();
+      });
+    }
+    if (expandAllBtn) {
+      expandAllBtn.addEventListener('click', () => {
+        state.tasksCollapsed = false;
+        state.sigs.tasks = '';
+        renderTasks();
+      });
+    }
+
     /* 指令表单 */
     $('#task-form').addEventListener('submit', sendTask);
     const devForm = $('#dev-form');
@@ -4714,6 +5994,8 @@
           const goalId = card ? card.dataset.id : '';
           if (!goalId) return;
           if (action === 'check') void goalCheckNow(goalId);
+          else if (action === 'approve') void goalApprove(goalId);
+          else if (action === 'reject') void goalReject(goalId);
           else if (action === 'pause') void goalSetStatus(goalId, 'paused');
           else if (action === 'resume') void goalSetStatus(goalId, 'active');
           else if (action === 'stop') void goalSetStatus(goalId, 'stopped');
@@ -4730,6 +6012,43 @@
         if (!card || event.target.closest('[data-action]')) return;
         event.preventDefault();
         openGoalDrawer(card.dataset.id);
+      });
+    }
+
+    /* 提醒 */
+    const reminderNew = $('#reminder-new');
+    if (reminderNew) reminderNew.addEventListener('click', () => openReminderFormDrawer());
+    const reminderList = $('#reminder-list');
+    if (reminderList) {
+      reminderList.addEventListener('click', (event) => {
+        const actionBtn = event.target.closest('[data-action]');
+        if (actionBtn) {
+          event.preventDefault();
+          const action = actionBtn.dataset.action;
+          if (action === 'reload-reminders') {
+            state.remindersLoaded = false;
+            state.remindersError = '';
+            state.sigs.reminders = '';
+            void loadReminders();
+            return;
+          }
+          const actionCard = actionBtn.closest('.reminder-card');
+          const reminderId = actionCard ? actionCard.dataset.id : '';
+          if (!reminderId) return;
+          if (action === 'edit') openReminderFormDrawer(reminderId);
+          else if (action === 'toggle') void reminderToggleEnabled(reminderId);
+          else if (action === 'delete') void reminderDelete(reminderId);
+          return;
+        }
+        const card = event.target.closest('.reminder-card');
+        if (card) openReminderFormDrawer(card.dataset.id);
+      });
+      reminderList.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        const card = event.target.closest('.reminder-card');
+        if (!card || event.target.closest('[data-action]')) return;
+        event.preventDefault();
+        openReminderFormDrawer(card.dataset.id);
       });
     }
 
@@ -4811,6 +6130,8 @@
       renderDevices();
       renderTasks();
       renderGoals();
+      renderReminders();
+      renderNightlyReview();
       renderComposerOptions();
       renderActivity();
       refreshSettings();

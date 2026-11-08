@@ -21,6 +21,7 @@ const MIN_INTERVAL_MINUTES = 5;
 const MAX_INTERVAL_MINUTES = 7 * 24 * 60;
 const MAX_CHECKS = 20;
 const MAX_TITLE = 120;
+const MAX_NICKNAME = 40;
 const MAX_DESCRIPTION = 4000;
 const MAX_SUMMARY = 4000;
 
@@ -101,6 +102,13 @@ function normalizeGoalRequest(input, { partial = false, base = null } = {}) {
     else value.title = title;
   }
 
+  if (src.nickname !== undefined || !partial) {
+    value.nickname = util.str(
+      src.nickname !== undefined ? src.nickname : prev.nickname,
+      MAX_NICKNAME,
+    ).trim();
+  }
+
   if (src.description !== undefined || !partial) {
     value.description = util.str(
       src.description !== undefined ? src.description : prev.description,
@@ -158,9 +166,23 @@ function restoreGoal(raw) {
       error: check.error ? util.str(check.error, MAX_SUMMARY) : null,
     }));
   const nextCheckAt = typeof raw.nextCheckAt === 'string' ? raw.nextCheckAt : null;
+  const pendingApproval = (() => {
+    const pending = util.isPlainObject(raw.pendingApproval) ? raw.pendingApproval : null;
+    if (!pending) return null;
+    const instruction = util.str(pending.instruction, 6000);
+    if (!instruction) return null;
+    return {
+      id: util.str(pending.id, 80) || 'appr_restored',
+      at: util.str(pending.at, 40) || protocol.nowIso(),
+      reason: util.str(pending.reason, 300) || '',
+      instruction,
+      source: util.str(pending.source, 40) || 'schedule',
+    };
+  })();
   return {
     id,
     title: util.str(raw.title, MAX_TITLE) || '未命名目标',
+    nickname: util.str(raw.nickname, MAX_NICKNAME) || '',
     description: util.str(raw.description, MAX_DESCRIPTION) || '',
     status,
     schedule,
@@ -171,6 +193,7 @@ function restoreGoal(raw) {
     lastSummary: util.str(raw.lastSummary, MAX_SUMMARY) || '',
     lastTaskId: util.str(raw.lastTaskId, 80) || null,
     runningTaskId: util.str(raw.runningTaskId, 80) || null,
+    pendingApproval,
     taskIds: (Array.isArray(raw.taskIds) ? raw.taskIds : [])
       .map((item) => util.str(item, 80))
       .filter(Boolean)
@@ -186,6 +209,7 @@ function goalToJson(goal) {
   return {
     id: goal.id,
     title: goal.title,
+    nickname: goal.nickname || '',
     description: goal.description,
     status: goal.status,
     schedule: { ...goal.schedule },
@@ -196,12 +220,20 @@ function goalToJson(goal) {
     lastSummary: goal.lastSummary,
     lastTaskId: goal.lastTaskId,
     runningTaskId: goal.runningTaskId,
+    pendingApproval: goal.pendingApproval ? { ...goal.pendingApproval } : null,
     taskIds: [...goal.taskIds],
     checks: goal.checks.map((check) => ({ ...check })),
     createdAt: goal.createdAt,
     updatedAt: goal.updatedAt,
     stoppedAt: goal.stoppedAt,
   };
+}
+
+/** 目标的称呼：优先昵称，其次标题。 */
+function goalDisplayName(goal) {
+  const nickname = util.str(goal && goal.nickname, MAX_NICKNAME).trim();
+  if (nickname) return nickname;
+  return util.str(goal && goal.title, MAX_TITLE).trim() || '未命名目标';
 }
 
 /** 生成跟进任务指令：让设备检查目标进展并给出建议（中文 Markdown）。 */
@@ -216,7 +248,8 @@ function buildGoalCheckInstruction(goal) {
     .join('\n');
   const lines = [
     '【长期目标跟进】',
-    `目标：${goal.title}`,
+    `目标：${goalDisplayName(goal)}`,
+    goal.nickname ? `正式标题：${goal.title}` : '',
     `描述：${goal.description || '（未填写）'}`,
     `计划：${scheduleText}`,
     `上次检查：${goal.lastCheckAt || '尚未检查'}（${goal.lastCheckStatus || '无'}）`,
@@ -238,10 +271,12 @@ module.exports = {
   SCHEDULE_TYPES,
   DEFAULT_SCHEDULE,
   MAX_CHECKS,
+  MAX_NICKNAME,
   normalizeSchedule,
   computeNextCheckAt,
   normalizeGoalRequest,
   restoreGoal,
   goalToJson,
+  goalDisplayName,
   buildGoalCheckInstruction,
 };

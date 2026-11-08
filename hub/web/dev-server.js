@@ -63,12 +63,14 @@ function seedDevices() {
   const common = {
     online: true,
     disabled: false,
+    nickname: '',
   };
   const list = [
     {
       ...common,
       id: 'dev_ws07a1',
       name: '书房工作站',
+      nickname: '主力开发机（写代码）',
       platform: 'windows',
       kind: 'dsh',
       agentVersion: '0.1.0',
@@ -159,6 +161,7 @@ function seedDevices() {
     {
       id: 'dev_old5b20',
       name: '备用旧手机',
+      nickname: '',
       platform: 'android',
       kind: 'custom',
       agentVersion: '0.0.8',
@@ -190,6 +193,11 @@ function taskEvent(type, message, percent) {
   return event;
 }
 
+function deviceDisplayName(device) {
+  if (!device) return '';
+  return device.nickname || device.name || device.id || '';
+}
+
 function makeTask({ instruction, status = 'queued', deviceId = null, requirements = {}, priority = 5, timeoutSec = 300, maxAttempts = 2, createdAt, startedAt = null, finishedAt = null, attempts = 1, progress = null, output = null, error = null, route = null, events = [], durationMs = null }) {
   const device = deviceId ? devices.get(deviceId) : null;
   return {
@@ -202,7 +210,7 @@ function makeTask({ instruction, status = 'queued', deviceId = null, requirement
     attempts,
     status,
     assignedDeviceId: device ? device.id : null,
-    assignedDeviceName: device ? device.name : null,
+    assignedDeviceName: device ? deviceDisplayName(device) : null,
     createdAt: createdAt || nowIso(),
     updatedAt: nowIso(),
     startedAt,
@@ -228,11 +236,11 @@ function computeRoute(requirements = {}) {
   for (const device of devices.values()) {
     const caps = device.capabilities;
     if (device.disabled) {
-      excluded.push({ deviceId: device.id, deviceName: device.name, reason: '设备已禁用' });
+      excluded.push({ deviceId: device.id, deviceName: deviceDisplayName(device), reason: '设备已禁用' });
       continue;
     }
     if (!device.online) {
-      excluded.push({ deviceId: device.id, deviceName: device.name, reason: '设备离线' });
+      excluded.push({ deviceId: device.id, deviceName: deviceDisplayName(device), reason: '设备离线' });
       continue;
     }
     const missing = [];
@@ -247,12 +255,12 @@ function computeRoute(requirements = {}) {
       if (!device.tags.includes(tag)) missing.push(`tag:${tag}`);
     }
     if (missing.length) {
-      excluded.push({ deviceId: device.id, deviceName: device.name, reason: `缺少 ${missing.join('、')}` });
+      excluded.push({ deviceId: device.id, deviceName: deviceDisplayName(device), reason: `缺少 ${missing.join('、')}` });
       continue;
     }
     const max = Math.max(1, caps.limits.maxConcurrentTasks);
     if (device.load.running >= max) {
-      excluded.push({ deviceId: device.id, deviceName: device.name, reason: `并发已满（${device.load.running}/${max}）` });
+      excluded.push({ deviceId: device.id, deviceName: deviceDisplayName(device), reason: `并发已满（${device.load.running}/${max}）` });
       continue;
     }
     let score = 100;
@@ -264,7 +272,7 @@ function computeRoute(requirements = {}) {
     if (req.model) matched.push(`model:${req.model}`);
     for (const s of Array.isArray(req.skills) ? req.skills : []) matched.push(`skill:${s}`);
     if (req.deviceId) matched.push('device:exact');
-    candidates.push({ deviceId: device.id, deviceName: device.name, score: Math.round(score), matched, lastSeenAt: device.lastSeenAt });
+    candidates.push({ deviceId: device.id, deviceName: deviceDisplayName(device), score: Math.round(score), matched, lastSeenAt: device.lastSeenAt });
   }
   candidates.sort(routeSort);
   return { candidates, excluded };
@@ -317,7 +325,7 @@ function simulateStart(task) {
   task.startedAt = nowIso();
   task.updatedAt = nowIso();
   task.progress = 2;
-  task.events.push(taskEvent('ack', `${device.name} 已接受任务`, 2));
+  task.events.push(taskEvent('ack', `${deviceDisplayName(device)} 已接受任务`, 2));
   broadcast('task.updated', { task });
   broadcast('device.updated', { device });
   broadcast('snapshot', snapshot());
@@ -825,11 +833,19 @@ async function handleApi(req, res, url, pathname) {
         }
         device.name = name;
       }
+      if (typeof body.nickname === 'string') {
+        const nickname = body.nickname.trim();
+        if (nickname.length > 40) {
+          sendError(res, 400, 'bad_request', 'nickname 最多 40 字符');
+          return;
+        }
+        device.nickname = nickname;
+      }
       if (Array.isArray(body.tags)) {
         device.tags = body.tags.map((t) => String(t).trim()).filter(Boolean).slice(0, 20);
       }
       if (typeof body.disabled === 'boolean') device.disabled = body.disabled;
-      logEvent('device', `设备 ${device.name} 已更新`, 'info');
+      logEvent('device', `设备 ${deviceDisplayName(device)} 已更新`, 'info');
       broadcast('device.updated', { device });
       broadcast('snapshot', snapshot());
       sendJson(res, 200, { device });
@@ -837,7 +853,7 @@ async function handleApi(req, res, url, pathname) {
     }
     if (req.method === 'DELETE') {
       devices.delete(id);
-      logEvent('device', `设备 ${device.name} 已删除`, 'warn');
+      logEvent('device', `设备 ${deviceDisplayName(device)} 已删除`, 'warn');
       broadcast('snapshot', snapshot());
       sendJson(res, 200, { ok: true });
       return;

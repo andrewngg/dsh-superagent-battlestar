@@ -165,3 +165,137 @@ test('parseCliArgs：解析任务线程 ID', () => {
   const args = worker.parseCliArgs(['--instruction', '继续', '--thread-id', 'thread_abc']);
   assert.equal(args.threadId, 'thread_abc');
 });
+
+test('buildHermesStreamArgs：用 chat 子命令 + stream-json 实时事件流', () => {
+  const args = worker.buildHermesStreamArgs({
+    instruction: '调研竞品',
+    model: 'deepseek-chat',
+    provider: 'deepseek',
+    skills: 'autonomous-agents',
+    sessionId: 'local-abc123',
+    workdir: 'C:\\work',
+  });
+  assert.deepEqual(args, [
+    'chat', '-q', '调研竞品',
+    '--format', 'stream-json',
+    '--yolo',
+    '-m', 'deepseek-chat',
+    '--provider', 'deepseek',
+    '--skills', 'autonomous-agents',
+    '--resume', 'local-abc123',
+    '--in', 'C:\\work',
+  ]);
+  const minimal = worker.buildHermesStreamArgs({ instruction: 'hi' });
+  assert.deepEqual(minimal, ['chat', '-q', 'hi', '--format', 'stream-json', '--yolo']);
+});
+
+test('parseCliArgs：stream-progress 默认开启，可用 --no-stream-progress 关闭', () => {
+  const defaults = worker.parseCliArgs(['--instruction', 'hi']);
+  assert.equal(defaults.streamProgress, true);
+  const off = worker.parseCliArgs(['--instruction', 'hi', '--no-stream-progress']);
+  assert.equal(off.streamProgress, false);
+  const on = worker.parseCliArgs(['--instruction', 'hi', '--stream-progress']);
+  assert.equal(on.streamProgress, true);
+});
+
+test('createJsonlSplitter：分片、CRLF 与空行容错', () => {
+  const lines = [];
+  const splitter = worker.createJsonlSplitter((line) => lines.push(line));
+  splitter.push('{"type":"sys');
+  splitter.push('tem"}\n{"type":"text",');
+  splitter.push('"text":"hi"}\r\n\n');
+  splitter.push('{"type":"result"}');
+  splitter.end();
+  assert.deepEqual(lines, ['{"type":"system"}', '{"type":"text","text":"hi"}', '{"type":"result"}']);
+});
+
+test('describeHermesTool：识别子任务、执行计划与普通工具', () => {
+  assert.equal(
+    worker.describeHermesTool('delegate_task', { tasks: [{ goal: '调研竞品' }, { goal: '整理报告' }] }),
+    '子任务：调研竞品（共 2 个）',
+  );
+  assert.equal(
+    worker.describeHermesTool('todo_list', { todos: [{ content: '收集资料', status: 'in_progress' }] }),
+    '执行步骤：收集资料',
+  );
+  assert.equal(
+    worker.describeHermesTool('todo_list', { todos: [{ status: 'completed' }, { status: 'completed' }, { status: 'pending' }] }),
+    '更新执行计划：2/3 步完成',
+  );
+  assert.equal(
+    worker.describeHermesTool('terminal', { command: 'npm test -- --watch=false' }),
+    '正在执行：terminal · npm test -- --watch=false',
+  );
+  assert.equal(worker.describeHermesTool('read_file', {}), '正在执行：read_file');
+});
+
+test('planPercentForTodos：按完成比例推进且不超过工具上限', () => {
+  const half = worker.planPercentForTodos([{ status: 'completed' }, { status: 'pending' }]);
+  assert.ok(half > 8 && worker.planPercentForTodos([{ status: 'completed' }]) >= half);
+  assert.equal(
+    worker.planPercentForTodos(Array.from({ length: 100 }, () => ({ status: 'completed' }))),
+    82,
+  );
+  assert.equal(worker.planPercentForTodos([]), null);
+});
+
+test('createHermesStreamParser：事件流转成单调进度并保留最终结果', () => {
+  const sessionId = `local-${'a'.repeat(32)}`;
+  const events = [
+    { type: 'system', subtype: 'init', model: 'deepseek-chat', session_id: sessionId },
+    { type: 'text', text: '我先看看' },
+    { type: 'tool_use', name: 'terminal', input: { command: 'ls' } },
+    { type: 'tool_result', name: 'terminal', output: 'ok', is_error: false },
+    { type: 'tool_use', name: 'delegate_task', input: { tasks: [{ goal: '调研竞品' }] } },
+    { type: 'tool_result', name: 'delegate_task', output: 'timeout', is_error: true },
+    { type: 'text', text: '完成' },
+    { type: 'result', session_id: sessionId, exit_code: 0, text: '最终答案', tokens: { total: 42 } },
+  ];
+  const payloads = [];
+  const parser = worker.createHermesStreamParser({ onProgress: (payload) => payloads.push(payload) });
+  events.forEach((event) => parser.push(`${JSON.stringify(event)}\n`));
+  parser.end();
+  const result = parser.result();
+  assert.equal(result.text, '最终答案');
+  assert.equal(result.sessionId, sessionId);
+  assert.equal(result.sawResult, true);
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(result.result.tokens, { total: 42 });
+  assert.deepEqual(
+    payloads.map((payload) => payload.message),
+    ['正在执行：terminal · ls', '子任务：调研竞品', '工具失败：delegate_task：timeout'],
+  );
+  const percents = payloads.map((payload) => payload.percent);
+  assert.deepEqual(percents, [...percents].sort((a, b) => a - b));
+  assert.ok(percents.every((percent) => percent >= 8 && percent <= 85));
+});
+
+test('createHermesStreamParser：分片输入与损坏行不影响解析', () => {
+  const sessionId = `local-${'b'.repeat(32)}`;
+  const raw = [
+    'not json',
+    JSON.stringify({ type: 'system', session_id: sessionId }),
+    JSON.stringify({ type: 'tool_use', name: 'todo_list', input: { todos: [{ content: '写代码', status: 'in_progress' }] } }),
+    JSON.stringify({ type: 'result', session_id: sessionId, exit_code: 0, text: 'done' }),
+    '',
+  ].join('\n');
+  const payloads = [];
+  const parser = worker.createHermesStreamParser({ onProgress: (payload) => payloads.push(payload) });
+  for (let i = 0; i < raw.length; i += 7) parser.push(raw.slice(i, i + 7));
+  parser.end();
+  assert.equal(payloads.length, 1);
+  assert.equal(payloads[0].message, '执行步骤：写代码');
+  assert.equal(parser.result().text, 'done');
+  assert.equal(parser.result().sessionId, sessionId);
+});
+
+test('normalizeProgressPayload：消息截断、百分比钳制且不回退', () => {
+  const state = { lastPercent: 8 };
+  assert.deepEqual(
+    worker.normalizeProgressPayload({ message: 'x'.repeat(300), percent: 40 }, state),
+    { message: `${'x'.repeat(199)}…`, percent: 40 },
+  );
+  assert.equal(worker.normalizeProgressPayload({ message: 'retry', percent: 12 }, state).percent, 40);
+  assert.equal(worker.normalizeProgressPayload({ message: 'high', percent: 500 }, state).percent, 99);
+  assert.equal(worker.normalizeProgressPayload({ message: '' }, state), null);
+});

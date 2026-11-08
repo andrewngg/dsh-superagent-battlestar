@@ -28,8 +28,8 @@ node hub/server.js --port 7317
 
 - `?token=<adminToken>`：自动连接；成功后写入 `localStorage`（`sb.hub.token` / `sb.hub.base`），并清理地址栏中的 token。
 - `?base=<url>`（可选）：指定跨源 Hub 地址；同源（由 Hub 自己提供页面）时留空即可。
-- `?open=device:<deviceId>` / `?open=task:<taskId>`：连接后自动打开对应详情抽屉。
-- 手机端 Tab 支持 hash：`#status`、`#tasks`、`#command`、`#settings`。
+- `?open=device:<deviceId>` / `?open=task:<taskId>` / `?open=reminders:<reminderId>`：连接后自动打开对应详情/编辑抽屉。
+- 手机端 Tab 支持 hash：`#status`、`#tasks`、`#command`、`#goals`、`#reminders`、`#settings`。
 - 连接页可手动填写 Hub 地址与管理员令牌；设置面板可退出并清除本机令牌。
 
 ## 已实现交互
@@ -38,9 +38,21 @@ node hub/server.js --port 7317
 - 统计卡：在线设备、运行任务、排队任务、已完成、失败/超时。
 - 设备卡：在线圆点与状态、平台/kind/tags、负载条 `running/max`、最后心跳相对时间、models/profiles/gateways/skills chips（折叠 `+N`）；点击打开详情抽屉（完整能力清单、resources、metrics、endpoint、最近任务、禁用/删除）。
 - 指令区：大输入框 + 模型/目标设备下拉 + 技能多选 chips + 优先级/超时；发送后展示路由结果（选中设备、候选分数、excluded 原因），无匹配时明确提示「已排队，等待设备上线」。
-- 任务区：最新在上、状态徽章与颜色、设备、耗时、进度条（含 indeterminate）、输出 Markdown、错误、事件时间线展开、取消/重试、任务详情抽屉。
+- 任务区：最新在上、状态徽章与颜色、设备、耗时、进度条（含 indeterminate）、实时执行步骤（运行中显示「子任务：… / 正在执行：工具 / 执行步骤：…」，来源于设备侧 `progress` 事件）、输出 Markdown 渲染（GFM 表格：对齐、表头、斑马纹、横向滚动，窄屏转卡片式；任务输出可切「渲染 / 原文」）、错误、事件时间线展开、取消/重试、任务详情抽屉。
+- 任务筛选：默认只看「进行中」（`state.taskFilter = 'active'`），可切换「全部 / 已完成 / 失败 / 已归档」，各 chip 实时显示计数。
+- 任务详情：指令若含 Markdown（标题 / 列表 / 表格 / 代码块等）会像输出一样渲染为可视化视图，并可「渲染 / 原文」切换；指令超过约 6 行（或 280 字符）时默认折叠并渐隐，右上角「展开指令 / 收起指令」切换（`aria-expanded` 同步），让输出结果成为视觉重心。输出区同样保持「渲染 / 原文」切换。
 - SSE：`EventSource /api/events?token=`，断线指数退避重连，不可用时 5s 轮询 `/api/snapshot` 兜底；页面重新可见/网络恢复时补一次快照。
-- 安全：所有服务端数据均通过 `textContent` / DOM 节点渲染；Markdown 只构造 DOM（白名单链接），不使用 `innerHTML` 插入用户数据。
+- 安全：所有服务端数据均通过 `textContent` / DOM 节点渲染；Markdown 表格/列表等只构造 DOM 或输出转义后的 HTML（链接白名单），不把未转义的用户数据插入 HTML。任务记录抽屉与任务输出共用同一套表格解析（`parseTableAt` / `md-table`），保证两侧呈现一致。
+
+## 提醒（Reminders）
+
+控制台新增「提醒」Tab（桌面平铺在「长期目标」下方，手机底部 Tab 含「提醒」），支持提醒的增删改查与启用/停用：
+
+- 列表按到期时间升序，展示标题、备注、到期时间（本机时区）、重复方式（不重复/每天/每周）、通知方式（温和通知/闹钟）与状态（已过期/已停用/已提醒）；点击卡片或「编辑」打开抽屉表单。
+- 新建/编辑抽屉：标题（必填，≤80 字）、备注（≤500 字）、日期时间（`datetime-local`，新建默认当前 +10 分钟）、重复方式、通知方式（温和通知/闹钟，默认温和通知）、启用开关；保存后增量更新列表并提示。
+- 删除使用确认弹窗；启用/停用与删除均调用 `/api/reminders` 系列接口，Hub 未启用提醒（404）时页面降级提示「暂不支持」并禁用新建按钮。
+- **通知只在手机 APK 内生效**：浏览器仅做管理，不会弹出系统通知。页面在加载列表及每次增删改/启停后调用 `window.ButlerBridge.syncReminders(JSON.stringify({reminders:[…]}))`，每项包含 `notifyStyle`（`gentle` 普通通知 / `alarm` 闹钟式），由 APK 用原生 AlarmManager 调度并选择通知渠道；APK 返回 `permissionGranted=false` 时页面提示去系统设置开启通知权限。浏览器（无 `ButlerBridge`）中自动跳过同步并显示说明。
+- 无构建、无新依赖；文案全部走 `i18n.js` 的 `reminders.*` key（中英双语）。
 
 ## 开发期验证记录
 

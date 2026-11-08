@@ -12,6 +12,7 @@ const {
   request,
   makeManifest,
   registerDevice,
+  createTask,
   ackTask,
   resultTask,
   adminHeaders,
@@ -237,8 +238,9 @@ test('目标立即跟进：创建关联任务，完成结果回写建议与检�
   assert.match(afterFailure.lastSummary, /设备执行失败/);
 });
 
-test('目标调度器：到点自动创建跟进任务，执行中不重复触发', async (t) => {
+test('目标调度器：到点只创建待确认提案，批准后才创建跟进任务', async (t) => {
   const env = await startTestHub(t);
+  const device = await registerDevice(env, makeManifest({ name: '调度设备' }));
   const goal = await createGoal(env, {
     title: '每天复盘学习进度',
     description: '检查今天的学习任务是否完成',
@@ -249,14 +251,30 @@ test('目标调度器：到点自动创建跟进任务，执行中不重复触�
 
   const triggered = env.hub.runDueGoalChecks();
   assert.deepEqual(triggered, [goal.id]);
-  const latest = await getGoal(env, goal.id);
-  assert.ok(latest.runningTaskId, '到点后应创建跟进任务');
-  const task = env.hub.tasks.get(latest.runningTaskId);
-  assert.equal(task.goalId, goal.id);
-  assert.equal(task.context.goalCheck, true);
-  assert.equal(task.context.trigger, 'schedule');
+  let latest = await getGoal(env, goal.id);
+  assert.equal(latest.runningTaskId, null, '未批准前不应创建跟进任务');
+  assert.ok(latest.pendingApproval, '到点后应生成待确认提案');
+  assert.equal(latest.pendingApproval.source, 'schedule');
+  assert.match(latest.pendingApproval.instruction, /每天复盘学习进度/);
 
-  // 已有跟进任务执行中：再次扫描不重复创建
+  // 已有待确认提案：再次扫描不重复生成
+  stored.nextCheckAt = new Date(Date.now() - 1000).toISOString();
+  assert.deepEqual(env.hub.runDueGoalChecks(), []);
+
+  // 批准：创建跟进任务并清空提案
+  const approve = await request(env.base, 'POST', `/api/goals/${goal.id}/approve`, {
+    headers: adminHeaders(env),
+    body: {},
+  });
+  assert.equal(approve.status, 200, approve.text);
+  assert.equal(approve.json.goal.pendingApproval, null);
+  assert.equal(approve.json.task.goalId, goal.id);
+  assert.equal(approve.json.task.context.goalCheck, true);
+  latest = await getGoal(env, goal.id);
+  assert.ok(latest.runningTaskId, '批准后应创建跟进任务');
+  assert.equal(latest.runningTaskId, approve.json.task.id);
+
+  // 跟进任务执行中：再次扫描不重复创建
   stored.nextCheckAt = new Date(Date.now() - 1000).toISOString();
   assert.deepEqual(env.hub.runDueGoalChecks(), []);
 
@@ -269,12 +287,104 @@ test('目标调度器：到点自动创建跟进任务，执行中不重复触�
   assert.equal((await getGoal(env, future.id)).runningTaskId, null);
 });
 
+test('目标跟进待确认：列表、否决后暂停、重复批准报冲突', async (t) => {
+  const env = await startTestHub(t);
+  await registerDevice(env, makeManifest({ name: '否决设备' }));
+  const goal = await createGoal(env, {
+    title: '每天复盘写作进度',
+    description: '检查今天写了多少字',
+    schedule: { type: 'interval', minutes: 60 },
+  });
+  const stored = env.hub.goals.get(goal.id);
+  stored.nextCheckAt = new Date(Date.now() - 1000).toISOString();
+  env.hub.runDueGoalChecks();
+
+  const pending = await request(env.base, 'GET', '/api/approvals', {
+    headers: adminHeaders(env),
+  });
+  assert.equal(pending.status, 200);
+  assert.equal(pending.json.approvals.length, 1);
+  assert.equal(pending.json.approvals[0].goalId, goal.id);
+  assert.match(pending.json.approvals[0].approval.instruction, /每天复盘写作进度/);
+
+  const rejected = await request(env.base, 'POST', `/api/goals/${goal.id}/reject`, {
+    headers: adminHeaders(env),
+    body: {},
+  });
+  assert.equal(rejected.status, 200, rejected.text);
+  assert.equal(rejected.json.goal.status, 'paused');
+  assert.equal(rejected.json.goal.pendingApproval, null);
+  assert.equal(rejected.json.goal.nextCheckAt, null);
+  assert.equal(env.hub.tasks.size, 0, '否决后不应创建任务');
+
+  // 暂停后调度器不再触发
+  assert.deepEqual(env.hub.runDueGoalChecks(), []);
+
+  // 没有待确认提案时批准/否决都返回 409
+  const approveAgain = await request(env.base, 'POST', `/api/goals/${goal.id}/approve`, {
+    headers: adminHeaders(env),
+    body: {},
+  });
+  assert.equal(approveAgain.status, 409);
+  const rejectAgain = await request(env.base, 'POST', `/api/goals/${goal.id}/reject`, {
+    headers: adminHeaders(env),
+    body: {},
+  });
+  assert.equal(rejectAgain.status, 409);
+});
+
+test('每晚总结：手动任务完成后保存 Markdown 总结，手动运行条目可强制触发', async (t) => {
+  const env = await startTestHub(t, { nightlyReview: true, nightlyReviewTime: '00:00' });
+  const device = await registerDevice(env, makeManifest({ name: '总结设备' }));
+  const goal = await createGoal(env, {
+    title: '整理求职作品集',
+    description: '把项目案例整理成作品集',
+    schedule: { type: 'daily', time: '23:59' },
+  });
+
+  const task = env.hub.runNightlyReview();
+  assert.ok(task, '到点应创建每日总结任务');
+  assert.equal(task.context.nightlyReview, true);
+  assert.match(task.instruction, /每日总结/);
+  assert.match(task.instruction, /整理求职作品集/);
+  const status = await request(env.base, 'GET', '/api/nightly-review', {
+    headers: adminHeaders(env),
+  });
+  assert.equal(status.status, 200);
+  assert.equal(status.json.review.taskId, task.id);
+  assert.equal(status.json.review.date, new Date().toLocaleDateString('sv-SE'));
+  const snap = await request(env.base, 'GET', '/api/snapshot', { headers: adminHeaders(env) });
+  assert.equal(snap.json.nightlyReview.taskId, task.id);
+  assert.equal(snap.json.nightlyReview.time, '00:00');
+
+  // 同一天再次到点扫描不重复创建
+  assert.equal(env.hub.runNightlyReview(), null);
+
+  assert.equal((await ackTask(env, device, task.id)).status, 200);
+  const result = await resultTask(env, device, task.id, {
+    ok: true,
+    output: { text: '# 每日总结\n\n## 1. 目标进度\n作品集已整理 60%。' },
+  });
+  assert.equal(result.status, 200, result.text);
+  const finished = await waitFor(async () => {
+    const res = await request(env.base, 'GET', '/api/nightly-review', {
+      headers: adminHeaders(env),
+    });
+    return res.json.review.status === 'completed' ? res.json.review : null;
+  }, { label: '每日总结完成', timeout: 5000 });
+  assert.match(finished.summary, /作品集已整理 60%/);
+  assert.ok(finished.finishedAt);
+  void goal;
+});
+
+
 test('长期目标持久化：重启后恢复标题/计划/状态', async (t) => {
   const dataDir = await makeTempDir('butler-goals-');
   const first = await startHubAt(dataDir);
   try {
     const goal = await createGoal(first, {
       title: '长期健康计划',
+      nickname: '健康',
       description: '每周三次运动',
       schedule: { type: 'daily', time: '07:30' },
     });
@@ -295,6 +405,7 @@ test('长期目标持久化：重启后恢复标题/计划/状态', async (t) =>
     assert.equal(res.json.goals.length, 1);
     const [goal] = res.json.goals;
     assert.equal(goal.title, '长期健康计划');
+    assert.equal(goal.nickname, '健康');
     assert.equal(goal.description, '每周三次运动');
     assert.deepEqual(goal.schedule, { type: 'daily', time: '07:30' });
     assert.equal(goal.status, 'paused');
@@ -303,4 +414,137 @@ test('长期目标持久化：重启后恢复标题/计划/状态', async (t) =>
     await second.hub.close();
     await fs.promises.rm(dataDir, { recursive: true, force: true });
   }
+});
+
+test('目标昵称：创建/编辑/清除，跟进指令与每日总结优先用昵称称呼', async (t) => {
+  const env = await startTestHub(t);
+
+  const goal = await createGoal(env, {
+    title: '以自由职业（freelance）接案获得收入',
+    nickname: '自由职业',
+    schedule: { type: 'daily', time: '13:00' },
+  });
+  assert.equal(goal.nickname, '自由职业');
+
+  // 昵称参与跟进指令，并保留正式标题作为补充。
+  const instruction = buildGoalCheckInstruction(goal);
+  assert.match(instruction, /目标：自由职业/);
+  assert.match(instruction, /正式标题：以自由职业/);
+
+  // 每日总结指令同样使用昵称。
+  const nightly = env.hub._buildNightlyReviewInstruction('2026-11-08');
+  assert.match(nightly, /自由职业（标题：以自由职业/);
+
+  const renamed = await request(env.base, 'PATCH', `/api/goals/${goal.id}`, {
+    headers: adminHeaders(env),
+    body: { nickname: 'Fiverr 接单' },
+  });
+  assert.equal(renamed.status, 200);
+  assert.equal(renamed.json.goal.nickname, 'Fiverr 接单');
+  assert.equal(renamed.json.goal.title, '以自由职业（freelance）接案获得收入');
+
+  // 超长昵称截断到 40 字。
+  const tooLong = await request(env.base, 'PATCH', `/api/goals/${goal.id}`, {
+    headers: adminHeaders(env),
+    body: { nickname: '目'.repeat(60) },
+  });
+  assert.equal(tooLong.json.goal.nickname.length, 40);
+
+  // 传空字符串清除昵称，列表回退为标题。
+  const cleared = await request(env.base, 'PATCH', `/api/goals/${goal.id}`, {
+    headers: adminHeaders(env),
+    body: { nickname: '' },
+  });
+  assert.equal(cleared.json.goal.nickname, '');
+  const listed = await request(env.base, 'GET', '/api/goals', { headers: adminHeaders(env) });
+  assert.equal(listed.json.goals[0].nickname, '');
+
+  // 纯函数：没有昵称时目标称呼回退为标题。
+  const normalized = normalizeGoalRequest({ title: '没有昵称的目标' });
+  assert.equal(normalized.ok, true);
+  assert.equal(normalized.value.nickname, '');
+  assert.match(buildGoalCheckInstruction({ title: '没有昵称的目标', schedule: { type: 'daily', time: '09:00' }, checks: [] }), /目标：没有昵称的目标/);
+});
+
+test('目标关联已有任务：写入任务与检查历史，下一次跟进引用该结论', async (t) => {
+  const env = await startTestHub(t);
+  const device = await registerDevice(env, makeManifest({ name: '关联设备' }));
+  const goal = await createGoal(env, {
+    title: '按行动方案推进自由职业',
+    description: '按已有任务产出的方案执行',
+    schedule: { type: 'daily', time: '13:00' },
+  });
+
+  const task = await createTask(env, { instruction: '产出行动方案', timeoutSec: 120 });
+  assert.equal(task.goalId, null);
+  assert.equal((await ackTask(env, device, task.id)).status, 200);
+  const result = await resultTask(env, device, task.id, {
+    ok: true,
+    output: { text: '行动方案：先做自动化外包，主攻 Upwork，其次 Fiverr。' },
+  });
+  assert.equal(result.status, 200, result.text);
+  await waitFor(() => (env.hub.getTask(task.id).status === 'completed' ? true : null), {
+    label: '任务完成',
+    timeout: 5000,
+  });
+
+  const linked = await request(env.base, 'POST', `/api/goals/${goal.id}/link`, {
+    headers: adminHeaders(env),
+    body: { taskId: task.id },
+  });
+  assert.equal(linked.status, 200, linked.text);
+  assert.equal(linked.json.task.goalId, goal.id);
+  assert.equal(linked.json.goal.lastTaskId, task.id);
+  assert.match(linked.json.goal.lastSummary, /Upwork/);
+  assert.deepEqual(linked.json.goal.taskIds, [task.id]);
+  assert.equal(linked.json.goal.lastCheckStatus, 'completed');
+  assert.equal(linked.json.goal.checks.length, 1);
+  assert.equal(linked.json.goal.checks[0].taskId, task.id);
+  assert.ok(Date.parse(linked.json.goal.nextCheckAt) > Date.now());
+
+  // 重复关联：不重复追加检查历史
+  const again = await request(env.base, 'POST', `/api/goals/${goal.id}/link`, {
+    headers: adminHeaders(env),
+    body: { taskId: task.id },
+  });
+  assert.equal(again.status, 200, again.text);
+  assert.equal(again.json.goal.checks.length, 1);
+  assert.deepEqual(again.json.goal.taskIds, [task.id]);
+
+  // taskId 缺失或任务不存在
+  const invalid = await request(env.base, 'POST', `/api/goals/${goal.id}/link`, {
+    headers: adminHeaders(env),
+    body: {},
+  });
+  assert.equal(invalid.status, 400);
+  const missing = await request(env.base, 'POST', `/api/goals/${goal.id}/link`, {
+    headers: adminHeaders(env),
+    body: { taskId: 'task_missing' },
+  });
+  assert.equal(missing.status, 404);
+
+  // 下一次跟进任务带着关联任务的结论
+  const check = await request(env.base, 'POST', `/api/goals/${goal.id}/check`, {
+    headers: adminHeaders(env),
+    body: {},
+  });
+  assert.equal(check.status, 200, check.text);
+  assert.match(check.json.task.instruction, /Upwork/);
+});
+
+test('每晚总结：关闭开关不自动触发，手动运行接口可强制创建', async (t) => {
+  const env = await startTestHub(t);
+  assert.equal(env.hub.runNightlyReview(), null);
+
+  const run = await request(env.base, 'POST', '/api/nightly-review/run', {
+    headers: adminHeaders(env),
+    body: {},
+  });
+  assert.equal(run.status, 200, run.text);
+  assert.ok(run.json.task, '手动运行应创建每日总结任务');
+  assert.equal(run.json.review.taskId, run.json.task.id);
+  assert.equal(run.json.review.enabled, false);
+
+  // 手动运行创建的任务执行中：再次触发不重复创建
+  assert.equal(env.hub.runNightlyReview(), null);
 });

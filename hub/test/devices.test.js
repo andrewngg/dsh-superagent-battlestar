@@ -286,3 +286,53 @@ test('PATCH / DELETE / unregister 设备', async (t) => {
   });
   assert.equal(unknown.status, 404);
 });
+
+test('设备昵称：可设置/清除、超长拒绝、设备重报 manifest 不覆盖、任务展示名用昵称', async (t) => {
+  const env = await startTestHub(t);
+  const device = await registerDevice(env, makeManifest({ name: '自报机器名' }));
+
+  const named = await request(env.base, 'PATCH', `/api/devices/${device.deviceId}`, {
+    headers: adminHeaders(env),
+    body: { nickname: '  书房的主力机  ' },
+  });
+  assert.equal(named.status, 200);
+  assert.equal(named.json.device.nickname, '书房的主力机');
+  // 昵称与设备自报名称互不影响
+  assert.equal(named.json.device.name, '自报机器名');
+
+  const tooLong = await request(env.base, 'PATCH', `/api/devices/${device.deviceId}`, {
+    headers: adminHeaders(env),
+    body: { nickname: 'x'.repeat(41) },
+  });
+  assert.equal(tooLong.status, 400);
+
+  // 设备重新上报 manifest（带新 name）不应覆盖用户设置的昵称
+  const updated = await request(env.base, 'POST', `/api/devices/${device.deviceId}/manifest`, {
+    headers: deviceHeaders(device),
+    body: makeManifest({ name: '改名后的自报机器名' }),
+  });
+  assert.equal(updated.status, 200);
+  assert.equal(updated.json.device.name, '改名后的自报机器名');
+  assert.equal(updated.json.device.nickname, '书房的主力机');
+
+  // 任务记录里的设备展示名用昵称
+  const task = await createTask(env, {
+    instruction: '按昵称派发',
+    requirements: { deviceId: device.deviceId },
+  });
+  assert.equal(task.assignedDeviceName, '书房的主力机');
+
+  // 传空字符串清除昵称，展示名回退到设备自报名称
+  const cleared = await request(env.base, 'PATCH', `/api/devices/${device.deviceId}`, {
+    headers: adminHeaders(env),
+    body: { nickname: '' },
+  });
+  assert.equal(cleared.status, 200);
+  assert.equal(cleared.json.device.nickname, '');
+
+  const fallback = await createTask(env, {
+    instruction: '清除昵称后派发',
+    requirements: { deviceId: device.deviceId },
+  });
+  assert.equal(fallback.assignedDeviceName, '改名后的自报机器名');
+});

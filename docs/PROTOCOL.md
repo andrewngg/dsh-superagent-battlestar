@@ -35,7 +35,7 @@
 
 ```jsonc
 {
-  "name": "书房工作站",              // 必填，1-64 字符
+  "name": "书房工作站",              // 必填，1-64 字符；设备自报的机器名，每次上报都会刷新
   "platform": "windows",            // windows | macos | linux | android | other
   "kind": "dsh",                    // dsh | ollama | openai-gateway | multi | custom
   "agentVersion": "0.1.0",
@@ -122,24 +122,41 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
 
 ### 5.4 手机/控制台（管理员令牌）
 
-- `GET /api/snapshot?limit=50` → `{ server:{version,uptimeSec,hubTime}, settings:{language}, stats:{...}, devices:[Device], tasks:[Task], goals:[Goal], events:[Event] }`
+- `GET /api/snapshot?limit=50` → `{ server:{version,uptimeSec,hubTime}, settings:{language}, stats:{...}, devices:[Device], tasks:[Task], goals:[Goal], reminders:[Reminder], events:[Event] }`
 - `GET /api/settings` → `{ settings:{ language }, supportedLanguages:['zh-CN','en'], hubTime }`
 - `PATCH|PUT /api/settings` body `{ language:'zh-CN'|'en' }` → `{ settings, hubTime }`；持久化到 `<dataDir>/settings.json`，并广播 SSE `settings.updated`。
 - `GET /api/goals?status=` → `{ goals:[Goal], hubTime }`
-- `POST /api/goals` body `{ title, description?, schedule?, requirements? }` → `{ goal, hubTime }`
+- `POST /api/goals` body `{ title, nickname?, description?, schedule?, requirements? }` → `{ goal, hubTime }`
+  - `nickname`: 目标昵称（≤40 字，可选）；控制台卡片、提醒与每日总结优先用昵称称呼目标，留空则显示 `title`。
   - `schedule`: `{ type:'daily', time:'HH:mm' }`（默认）或 `{ type:'interval', minutes:5..10080 }`；缺省为每天 09:00。
   - 生命周期：`active | paused | stopped | completed`；创建默认 `active`，并按计划计算 `nextCheckAt`。
 - `GET /api/goals/:id` → `{ goal }`
-- `PATCH|PUT /api/goals/:id` body `{ title?, description?, schedule?, status? }` → `{ goal }`；恢复为 `active` 时从当前时间重新排期，不补跑错过的检查。
-- `POST /api/goals/:id/check` → `{ goal, task, hubTime }`：立即创建一次跟进任务（`task.goalId` 指向目标）；该目标已有执行中的跟进任务时返回 409。
+- `PATCH|PUT /api/goals/:id` body `{ title?, nickname?, description?, schedule?, status? }` → `{ goal }`；`nickname` 传空字符串可清除昵称；恢复为 `active` 时从当前时间重新排期，不补跑错过的检查。
+- `POST /api/goals/:id/check` → `{ goal, task, hubTime }`：立即创建一次跟进任务（`task.goalId` 指向目标），视为用户已同意执行；该目标已有执行中的跟进任务时返回 409。
+- `POST /api/goals/:id/link` body `{ taskId }` → `{ goal, task, hubTime }`：把已有任务关联到目标（`task.goalId` 指向目标、加入 `goal.taskIds`）。任务已结束时同步写入 `goal.lastCheckAt/lastCheckStatus/lastTaskId/lastSummary` 并追加一条 `checks`（同一任务不会重复追加），下一次跟进任务会带着这段结论继续；关联执行中的任务则登记为 `goal.runningTaskId`。
+- `POST /api/goals/:id/approve` → `{ goal, task, hubTime }`：同意该目标的待确认跟进，立即创建跟进任务并清空 `pendingApproval`；没有待确认提案时返回 409。
+- `POST /api/goals/:id/reject` → `{ goal, hubTime }`：否决待确认跟进，清空 `pendingApproval`、把目标置为 `paused` 并清空 `nextCheckAt`（等用户下一步指令）；没有待确认提案时返回 409。
+- `GET /api/approvals` → `{ approvals:[{ goalId, goalTitle, createdAt, approval }], hubTime }`：所有等待用户确认的跟进提案（按创建时间升序）。
+- `GET /api/nightly-review` → `{ review, hubTime }`：每晚总结的状态与内容（`enabled/time/date/taskId/status/startedAt/finishedAt/summary/error/task`）。
+- `POST /api/nightly-review/run` → `{ task, review, hubTime }`：立即创建一次每日总结任务（强制触发，忽略开关与到点判断）；已有总结任务执行中时返回 `{ task:null, review }`。
 - `DELETE /api/goals/:id` → `{ ok:true }`（已创建的历史任务保留）。
-  - Hub 每 `goalTickMs`（默认 30s）扫描到点的 active 目标，自动创建跟进任务；任务结束后把输出写回目标的 `checks/lastSummary` 并重排下一次。
+  - Hub 每 `goalTickMs`（默认 30s）扫描到点的 active 目标，先生成一条 `pendingApproval` 提案（不会直接执行）；只有用户批准（`approve`）或手动 `check` 后才创建跟进任务。既有提案未处理时不会重复生成。
+  - 目标执行前必须获得用户同意；用户否决后目标暂停（`paused`），不再排期，等用户恢复或给出下一步指令。
   - 跟进任务是普通任务（`goalId` 关联），优先级手动 7 / 定时 4，`timeoutSec=600`、`maxAttempts=2`，消耗一条设备并发槽位。
+  - 每晚总结：Hub 每天本地时间 `nightlyReviewTime`（默认 22:00，`BUTLER_NIGHTLY_REVIEW_TIME` 或构造参数可改）自动创建一条总结任务，复盘所有目标、最近 24h 任务与子任务进度，并给出明天工作方向与目标下一步细节；完成后的 Markdown 摘要通过 `nightly.review.updated` 推送并在控制台展示。可用 `BUTLER_NIGHTLY_REVIEW=0` 关闭自动触发（手动接口仍可强制运行）。
+- `GET /api/reminders` → `{ reminders:[Reminder], hubTime }`：按 `dueAt` 升序（相同再按 `createdAt`）。
+- `POST /api/reminders` body `{ title, note?, dueAt, repeat?, notifyStyle?, enabled? }` → `{ reminder, hubTime }`
+  - `title`: 1–80 字；`note`: ≤500 字，可选；`dueAt`: 到期时间，epoch 毫秒（整数）；`repeat`: `none`（默认）/`daily`/`weekly`；`notifyStyle`: `gentle`（默认，普通系统通知）/`alarm`（闹钟式：响亮提示音 + 长震动，仅 APK 生效）；`enabled`: 默认 `true`。
+- `GET /api/reminders/:id` → `{ reminder, hubTime }`
+- `PATCH|PUT /api/reminders/:id` body 为上面的部分字段 → `{ reminder, hubTime }`；改 `dueAt` 只更新数据，不补发错过的提醒。
+- `DELETE /api/reminders/:id` → `{ deleted:true, reminderId, hubTime }`
+- `POST /api/reminders/:id/fire` body `{ firedAt?:ISO }` → `{ reminder, hubTime }`：手机 APK 到点回写；`lastFiredAt` 用 Hub 服务器时间 ISO 写入、`fireCount` +1；`repeat=none` 时 `enabled=false`，`daily/weekly` 时以 `max(firedAt, 当前时间)` 计算并把 `dueAt` 推进到下一次（保证 > 当前时间）且保持启用。`firedAt` 可选，只用于计算下一次（避免手机时钟偏差），Hub 不做提醒轮询、不补发，通知完全由 APK 原生闹钟负责。
 - `GET /api/records?q=&status=&limit=&offset=` → `{ records:[{ taskId,status,createdAt,durationMs,device,summary,error,hasFile,size,updatedAt,file,parentTaskId,isPlan,archived }], total, limit, offset, recordDir }`
 - `GET /api/records/:taskId` → `{ record:{ taskId, file, markdown, size, updatedAt, task? } }`；`?format=md` 直接返回 `text/markdown`（附件下载）。
 - `GET /api/devices` → `{ devices:[Device], hubTime }`
 - `GET /api/devices/:id` → `{ device:Device }`
-- `PATCH /api/devices/:id` body `{ name?, tags?, disabled? }` → `{ device }`
+- `PATCH /api/devices/:id` body `{ name?, nickname?, tags?, disabled? }` → `{ device }`
+  - `nickname`: 用户在 Hub 侧给设备起的用途昵称（≤40 字，保存在 Hub 的 state.json）；传空字符串可清除。设备重报 manifest 只更新 `name`，不会覆盖 `nickname`。控制台与任务展示优先用昵称，没有昵称时回退到 `name`。
 - `DELETE /api/devices/:id` → `{ ok:true }`
 - `POST /api/tasks` body `{ instruction, requirements?, priority?, timeoutSec?, maxAttempts? }` → `{ task }`
   - `requirements`: `{ model?, skills?:[], profile?, gateway?, tags?:[], deviceId? }`，全部可选；`deviceId` 显式指定设备（仍须在线）。
@@ -153,6 +170,11 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
   - 整套系统自重启：先向在线设备下发 `restart_agent`，`delayMs`（默认 12s，覆盖设备心跳周期）后 Hub 进程自行重启。
   - Hub 以自重启语义恢复：运行中/等待回答的任务自动重新排队，不占用重试次数；规划父任务保持 running 等待子任务收尾。
   - 重复调用幂等（返回 `alreadyRequested:true`）；未启用自重启时返回 409。
+- `GET /api/dsh/bridge` → `{ url }`；`POST /api/dsh/bridge` body `{ url }` → `{ url }`
+  - 桌面版 DSH 每次启动的 Web 端口可能变化（手机「开发页」经 Hub 代理 `/api/dsh/*` 到 DSH 插件），插件启动时把这个地址同步进来，并持久化到 `<dataDir>/dsh-bridge.json`，Hub 重启后继续复用。
+  - 读取优先级：内存 → `<dataDir>/dsh-bridge.json` → 环境变量 `DSH_BRIDGE_URL` → 历史默认 `http://127.0.0.1:50646/super-butler/api/dsh`。
+  - 代理失败时若磁盘上的地址已更新，Hub 会自动换新地址重试一次（无需重启）；仍失败则返回 502 `{ error: { code: 'dsh_unavailable', message } }`，message 里包含当前地址与「在插件面板点一次重启 Hub」的提示。
+  - `GET /api/snapshot` 响应额外带 `dshBridge: { url }`，便于排查手机开发页指向的地址。
 - `GET /api/health` 额外返回 `features:{ progressKeepalive, autoRetryOnTimeout, selfRestart, restartedFromSelf }`，便于客户端确认能力。
 
 ### 5.5 事件流
@@ -168,6 +190,8 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
 | `settings.updated` | `{ settings, at }` |
 | `goal.created` / `goal.updated` | `{ goal, at }` |
 | `goal.deleted` | `{ goalId, at }` |
+| `reminder.created` / `reminder.updated` / `reminder.fired` | `{ reminder, at }` |
+| `reminder.deleted` | `{ reminderId, at }` |
 | `log` | `{ level, message, at }` |
 | `ping` | `{ hubTime }`（每 15s，防代理断流） |
 
@@ -184,7 +208,7 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
 
 ```jsonc
 {
-  "id":"dev_ab12cd34", "name":"书房工作站", "platform":"windows", "kind":"dsh",
+  "id":"dev_ab12cd34", "name":"书房工作站", "nickname":"书房主力机（写代码）", "platform":"windows", "kind":"dsh",
   "agentVersion":"0.1.0", "endpoint":"http://192.168.1.20:7788",
   "tags":["书房"], "online":true, "status":"idle",
   "registeredAt":"2026-11-05T08:00:00.000Z", "lastSeenAt":"2026-11-05T08:00:10.000Z",
@@ -234,6 +258,28 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
   "createdAt":"...", "updatedAt":"...", "stoppedAt":null
 }
 ```
+
+### Reminder（提醒）
+
+```jsonc
+{
+  "id":"rem_a1b2c3",
+  "title":"吃药",
+  "note":"饭后",
+  "dueAt":1794186000000,                 // epoch 毫秒（整数），不用 ISO 字符串
+  "repeat":"daily",                      // none | daily | weekly
+  "notifyStyle":"gentle",                // gentle（普通通知，默认） | alarm（闹钟式，仅 APK 生效）
+  "enabled":true,
+  "createdAt":"...", "updatedAt":"...",
+  "lastFiredAt":null,                    // APK 回写后为 ISO 字符串
+  "fireCount":0
+}
+```
+
+- Hub 只持久化与广播提醒，不轮询调度；到点通知由 Android APK 的原生 `AlarmManager` + `BroadcastReceiver` 发送。
+- `notifyStyle` 只影响 APK 的通知方式：`gentle` 走通知渠道 `butler_reminders`（普通系统提示音），`alarm` 走 `butler_reminders_alarm`（`USAGE_ALARM` 闹钟音 + 长震动）；Web 控制台仅展示与编辑该字段，不弹通知。
+- 排序按 `dueAt` 升序；`enabled=false` 的提醒不排程。
+- `repeat=none` 的提醒触发后自动 `enabled=false`；`daily/weekly` 触发后 Hub 把 `dueAt` 推进到下一次。
 
 ### Command（下发给设备）
 
@@ -288,4 +334,5 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
 - [ ] 设备回报 result → 任务 `completed`，快照与 SSE 同步。
 - [ ] 无匹配设备 → `queued` + `route.excluded` 原因；设备上线后自动路由。
 - [ ] 手机 `/m?token=` 可查看状态、发指令、看进度。
+- [ ] 控制台「提醒」Tab 可增删改查提醒；APK 安装后到点弹系统通知，重复提醒触发后自动推进，`fire` 回写同步到 Hub。
 - [ ] APK 安装后可配置 Hub 地址与令牌并正常使用（见 docs/APK.md）。

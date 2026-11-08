@@ -9,7 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%E2%89%A518-339933)](package.json)
 [![DSH Plugin](https://img.shields.io/badge/DeepSeek%20Harness-plugin-4B67B4)](docs/DSH-PLUGIN.md)
-[![Android](https://img.shields.io/badge/Android-8.0%2B-3DDC84)](dist/BattleStar-0.1.0.apk)
+[![Android](https://img.shields.io/badge/Android-8.0%2B-3DDC84)](dist/BattleStar-0.1.2.apk)
 
 一个可私有部署的**多设备 AI 编排中枢**：
 
@@ -17,6 +17,7 @@
 - 🟢 **在线检测**：10s 心跳 + 30s TTL，离线自动重派任务，恢复后自动上线；
 - 🎯 **能力路由**：按模型 / 技能 / profile / gateway / 标签匹配，结合负载与新鲜度评分，并解释「为什么选它」；
 - 📋 **任务闭环**：`queued → assigned → running → completed`，支持进度、超时、取消、重试、改派；APK/网页可对失败/超时任务手动 **「标记成功」**；
+- 👀 **执行过程可见**：本机 CLI（Hermes）任务运行时会实时上报「正在执行：工具 / 子任务 / 执行步骤」，任务卡片与事件时间线显示最新步骤，不再只显示「进行中」直到完成（依赖 Hermes `--format stream-json`，旧版自动回退粗粒度进度）；
 - 🧩 **长任务拆分**：长指令 / 长超时任务先由母机 Agnes AI 拆成可独立路由的子任务，父任务下可展开查看每个子任务；支持归档、取消归档、删除任务；
   - 默认 `instruction ≥ 800 字符` 或 `timeoutSec ≥ 900` 自动拆分；也可在 API 传 `split: true` 强制拆分；
   - 拆分需要母机进程有 `AGNES_API_KEY` / `AGNES_MODEL`（插件启动 Hub 时自动注入；独立启动 Hub 时手动设置环境变量），失败会自动回退为普通任务；
@@ -25,12 +26,14 @@
 - 🛠️ **Developer Mode**：在 BattleStar 内新增「开发」Tab，通过 DSH Host 的 `sessionController` 直接对话 DeepSeek Harness 并按需求修改本仓库；仅本机/Hub 管理员可用，限制在 `super-butler` 仓库，提示 agent 不读取/提交私人密钥与个人信息；
   - 改动对象可选：全局 · 整套系统、DSH 插件、APK、Localhost 界面（`hub/web/**`）；
 - 📎 **任务附件**：手机/网页端可给小任务附带文件（最多 3 个，每个 ≤2 MB，总计 ≤4 MB）；设备会落盘到任务附件目录并让执行器直接读取；APK 内置原生文件选择器；
-- 📱 **任务列表优化**：APK/手机端任务列表内部滚动，底部导航栏固定，不再需要先滚到底才能切页；
+- 📱 **任务列表优化**：APK/手机端任务列表内部滚动，底部导航栏固定，不再需要先滚到底才能切页；任务页默认筛选「进行中」（可切换全部/已完成/失败/已归档）；
+- 📊 **任务输出表格**：任务卡片、任务详情与任务记录中的 Markdown 表格按 GFM 渲染（列对齐、表头、斑马纹、横向滚动，手机窄屏自动转卡片式），任务输出还可一键切换「渲染 / 原文」；任务详情中过长的指令默认折叠（右上角「展开指令 / 收起指令」），且指令含 Markdown 时同样按可视化渲染并可切「渲染 / 原文」，把视觉重点留给输出结果；
 - 🖥️ **多种工作机**：本机 CLI（Hermes / OpenCode / shell）、ComfyUI 图像生成、Ollama、HTTP 服务；
 - 📱 **手机工作机**：通过 [Mika](https://github.com/wangzan101/Mika) 指挥 Android 手机执行 App/网页任务；
 - 📲 **手机控制端**：Android APK（WebView + 本地配置页）加载 `/m`，看设备、发指令、看任务；它只是控制端，不执行 AI 任务；任务进度/完成/失败可在 Android 通知栏以进度条和提醒显示；
-- 🧩 **DSH 插件**：在 DeepSeek Harness 侧边栏打开原生控制台，统一管理 Hub、设备与私人 API 密钥；
-- 🪶 **零依赖**：Hub / 设备代理 / 前端全部零 npm 依赖，Node.js 单进程即可跑；APK 约 0.11 MB。
+- ⏰ **提醒（Reminders）**：控制台新增「提醒」Tab，可增删改查一次性 / 每天 / 每周提醒，并可选择**通知方式**（温和通知 / 闹钟）；提醒保存在 Hub 的 `state.json`，到点由 **Android APK 用原生通知**弹出（App 被杀死或手机重启后仍有效），浏览器只负责管理、不弹通知；
+- 🧩 **DSH 插件**：在 DeepSeek Harness 侧边栏查看只读仪表盘（母机状态、在线设备、任务统计、最近任务），一键在浏览器打开完整控制台，内置 PC / 手机工作机接入教程，并在插件里保存私人 API 密钥；
+- 🪶 **零依赖**：Hub / 设备代理 / 前端全部零 npm 依赖，Node.js 单进程即可跑；APK 约 0.12 MB。
 
 概念参考 [dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype)（目标—授权—执行—回报），
 手机控制台交互参考 [dsh-Go](https://github.com/ccch1mneyyy/dsh-Go)。许可证与完整 credits 见 [CREDITS.md](CREDITS.md)。
@@ -156,6 +159,7 @@ node device-agent/agent.js \
 | **演示** | `simulate` | — | 无需外部服务，用于联调 |
 
 工作机上线后，母机控制台会显示设备名、在线状态、models / profiles / gateways / skills chips 与负载。
+- 设备详情抽屉里可以给设备起**用途昵称**（≤40 字，保存在 Hub 的 `state.json`）：卡片、任务执行设备、路由结果都优先显示昵称；设备重新上报机器名不会覆盖昵称，清空昵称后回退显示机器名。昵称字段是后端新增功能，**升级代码后需要重启一次 Hub** 才会生效——旧版 Hub 上抽屉会提示「当前 Hub 还没加载昵称功能」并提供一键「重启 Hub」按钮。
 - 工作机会自动补连：配置的 Hub IP 失效时，代理会扫描本机 IPv4 `/24` 网段的 `7317` 端口，发现 BattleStar Hub 后自动重连；跨 VLAN/不同网段请使用 DHCP 固定 IP 或主机名。
 所有执行器都是可配置、可插拔的；设备主人决定允许执行什么。
 
@@ -194,21 +198,27 @@ node device-agent/agent.js \
 > APK 品牌名已改为 **BattleStar**（包名仍为 `com.superbutler.app`，可直接覆盖安装旧版）。
 
 - 浏览器直接打开 `http://<母机IP>:7317/m?token=<管理员令牌>`，可添加到主屏幕；
-- 或安装 [dist/BattleStar-0.1.0.apk](dist/BattleStar-0.1.0.apk)（Android 8+，测试签名；构建/安装见 [docs/APK.md](docs/APK.md)）。
+- 或安装 [dist/BattleStar-0.1.2.apk](dist/BattleStar-0.1.2.apk)（Android 8+，测试签名；构建/安装见 [docs/APK.md](docs/APK.md)）。
 - APK 首次打开会自动扫描同一 Wi-Fi 网段的 Hub（默认端口 7317），发现后只需填管理员令牌，不用记母机 IP；也可改端口手动扫描。
 - 首次打开自动发现母机（或手动填 Hub 地址），再填管理员令牌，点「测试连接」→「进入管家」。
 - 任务执行时通知栏显示**常驻进度条**，完成后推送完成/失败提醒；Android 13+ 首次启动需允许通知权限。
 - APK「设置 → 手机通知（APK）」可开启**常驻通知**：有任务时显示任务进度，没有任务时显示 `X 台在线 · Y 台待命`。
+- 「提醒」Tab 创建的提醒由 APK 原生 `AlarmManager` 在到点弹出系统通知（App 被杀死/手机重启后仍有效），每条提醒可选择温和通知或闹钟式提醒；浏览器可管理提醒但不会弹通知，详见下方「提醒（Reminders）」。
 
 ### DSH 插件（可选，推荐）
 
 `dsh-plugin/` 是一个 DeepSeek Harness bundle，安装后侧边栏出现「BattleStar」：
 
-- 原生面板显示 **母机状态与可编辑的母机昵称**、工作机连接方式/在线状态、任务流与指令发送；
-- 工作机卡片可直接重命名；母机昵称与 Hub 设置一起保存；
+- 原生面板是**只读仪表盘**：母机状态（运行中/已停止、Hub 地址、是否由插件托管）、在线设备概览（用途昵称、状态、负载、最近心跳）、任务统计（在线设备 / 运行中 / 排队 / 已完成 / 失败 / 超时）与最近任务，每 5 秒自动刷新；
+- 仪表盘的 **「重启 Hub」** 对插件托管和外部终端启动的 Hub 都可用：插件调用 Hub 自重启接口 `POST /api/system/restart`，进程原地 re-exec 并加载新代码（「停止 Hub」仍只对插件自己启动的进程生效）；
+- 「在浏览器打开控制台」按钮通过插件路由 `GET /super-butler/api/dsh/open` 302 到 Hub 控制台并自动带上管理员令牌，任务下发、设备管理（含改用途昵称）与任务详情都在浏览器控制台完成；
+- 工作机卡片直接显示**用途昵称**（昵称保存在 Hub，设备重报机器名不会覆盖），只读不提供修改入口；
+- 「教程」页给出把 PC / 手机接成工作机的分步命令：Hub 地址与设备加入码按当前 Hub 自动填好，命令块可一键复制，覆盖 PC 代理、Mika 手机工作机、手机控制端与常见排错；
 - 「设置」里统一保存 GitHub 账号/Token 与各模型 API Key，写入 **Harness credentials 服务**（不写项目文件、不回显）；
 - 每个已配置 Token 旁有 **「测试 Token」** 按钮：GitHub 调 `/user`，DeepSeek/Agnes/豆包/OpenCode 调各自只读 `/models` 接口，返回可用/无效/无法判定与延迟；
-- 插件自动检测/启动 Hub，通过 `/super-butler/api/*` 同源代理，页面不接触管理员令牌。
+- 「设置 → 开发工具」有 **Git Push** 按钮：点击后在母机项目仓库执行 `git push`，只推送**已经提交**的内容（不暂存、不改文件），面板显示仓库/分支/远端/上游与推送输出；分支还没有上游时自动改用 `git push --set-upstream <remote> <branch>`；路由为 `GET/POST /super-butler/api/dsh/git-push`，仅本机 loopback 可用；
+- 桌面版 DSH 每次启动的 Web 端口可能变化：插件启动时会把当前地址同步给 Hub（写入 `<dataDir>/dsh-bridge.json` 并 `POST /api/dsh/bridge`），Hub 代理失败时也会自动换新地址重试，所以手机「开发页」不会再因为 DSH 换端口报 `DSH bridge 不可用：fetch failed`；
+- 插件自动检测/启动 Hub，通过 `/super-butler/api/*` 同源代理，页面不接触管理员令牌；重定向路由只接受本机 loopback 调用。
 
 安装方式：
 
@@ -226,7 +236,7 @@ super-butler/
 │  ├─ server.js            # CLI 入口，打印令牌/加入码/手机 URL
 │  ├─ lib/                 # 注册表、路由、任务、HTTP、SSE、持久化、静态服务
 │  ├─ web/                 # 桌面 + 手机控制台（零构建）
-│  └─ test/                # 34 个 Hub 用例
+│  └─ test/                # 93 个 Hub 用例
 ├─ device-agent/           # 工作机代理
 │  ├─ agent.js             # 注册/心跳/长轮询/执行/回报
 │  ├─ cli-worker.js        # 本机 CLI 执行器（Hermes / OpenCode / shell）
@@ -236,7 +246,7 @@ super-butler/
 ├─ shared/                 # manifest 规范化 / 匹配 / 评分（Hub 与代理共用）
 ├─ dsh-plugin/             # DSH 插件：侧边栏控制台 + 私人密钥设置
 ├─ android/                # APK 工程 + 手工构建流水线
-├─ dist/                   # 构建产物：BattleStar-0.1.0.apk、icon-512.png
+├─ dist/                   # 构建产物：BattleStar-0.1.2.apk、icon-512.png
 ├─ scripts/                # demo.js / smoke-test.js / simulate-devices.js
 ├─ docs/                   # INSTALL / WORKER-SETUP / PROTOCOL / ARCHITECTURE / DEPLOY / APK / SECOND-MACHINE / MIKA-PHONE / DSH-PLUGIN
 ├─ CREDITS.md              # 第三方来源、许可证、商标与 AGPL 合规说明
@@ -271,6 +281,12 @@ curl -X POST http://<母机IP>:7317/api/goals \
 
 # 立即跟进一次（创建一条关联 goalId 的普通任务）
 curl -X POST -H "X-Butler-Token: <adminToken>" http://<母机IP>:7317/api/goals/<goalId>/check
+
+# 提醒：到点由手机 APK 弹系统通知（dueAt 为 epoch 毫秒，repeat 可为 none/daily/weekly，
+# notifyStyle 可选 gentle（温和通知，默认）或 alarm（闹钟式，响亮提示 + 震动））
+curl -X POST http://<母机IP>:7317/api/reminders \
+  -H "X-Butler-Token: <adminToken>" -H "Content-Type: application/json" \
+  -d '{"title":"吃药","note":"饭后","dueAt":1794186000000,"repeat":"daily","notifyStyle":"gentle"}'
 ```
 
 控制台也有同款入口：**设置 → 系统维护 → 重启整套系统**。任务运行超时会在 `maxAttempts` 内自动重试，不需要人工点「重试」。
@@ -280,13 +296,13 @@ curl -X POST -H "X-Butler-Token: <adminToken>" http://<母机IP>:7317/api/goals/
 ## 测试与验收
 
 ```bash
-# 单元测试：Hub 61 + 设备代理 61 + 共享协议 8（共 130）
+# 单元测试：Hub 93 + 设备代理 61 + 共享协议 8（共 162）
 node --test hub/test device-agent/test shared/test
 
 # 受限沙箱（Node 测试运行器无法 spawn 子进程）时：
 node --test --test-isolation=none hub/test device-agent/test shared/test
 
-# DSH 插件协议/渲染测试（26）
+# DSH 插件协议/渲染测试（44）
 node --test dsh-plugin/test
 
 # 端到端冒烟：Hub + 3 台真实代理进程 + 路由 + 离线/恢复
@@ -298,11 +314,11 @@ node scripts/demo.js
 
 **实测结果**
 
-- `hub/test` 61/61、`device-agent/test` 61/61、`shared/test` 8/8；`dsh-plugin/test` 26/26；
-- 关键回归覆盖：进度 keepalive 续期超时、超时自动重试（含关闭开关）、系统自重启（设备通知 + Hub re-exec + 自重启后任务自动重新排队）、并发满载时重启/取消指令优先、规划子任务超时兜底与旧数据迁移、Hermes 退出码 1 的可读诊断与沙箱提示、任务执行记录（Markdown + 索引 + 离线导出）、执行记录 API、系统语言设置持久化、长期目标（计划归一化/CRUD/立即跟进/定时扫描/持久化恢复）；
+- `hub/test` 93/93、`device-agent/test` 61/61、`shared/test` 8/8；`dsh-plugin/test` 44 项（43 通过 + 1 项真实 `git push` 集成测试在受限沙箱下跳过，沙箱外应全绿）；
+- 关键回归覆盖：进度 keepalive 续期超时、超时自动重试（含关闭开关）、系统自重启（设备通知 + Hub re-exec + 自重启后任务自动重新排队）、并发满载时重启/取消指令优先、规划子任务超时兜底与旧数据迁移、Hermes 退出码 1 的可读诊断与沙箱提示、任务执行记录（Markdown + 索引 + 离线导出）、执行记录 API、系统语言设置持久化、长期目标（计划归一化/CRUD/立即跟进/定时扫描/持久化恢复）、提醒（归一化/nextDueAt/CRUD/鉴权/SSE/持久化/到点回写与重复推进/通知方式 notifyStyle 默认与校验）、设备用途昵称（设置/清除/超长拒绝/设备重报 manifest 不覆盖/持久化恢复/任务展示名回退）、插件密钥存储（优先 Harness credentials，服务不可用时回退本机文件并标注来源）、插件 Git Push（非 loopback 拒绝/无仓库提示/仓库分支远端读取/推送已提交内容/自动设置上游）、DSH bridge 地址同步（插件写入 + POST 更新、无效地址 400、Hub 重启后复用、旧端口自愈重试）、插件重启 Hub（外部进程走自重启接口、旧 Hub 无自重启时给出原因）、DSH Host 服务惰性解析（credentials / sessionController 在挂载后才激活也能用）；
 - `scripts/smoke-test.js` 全绿：注册 → 按 skills/model 路由 → 杀掉设备后 TTL 离线 → 新任务 queued 且带 `route.excluded` → 新设备上线后自动完成 → SSE 首帧 snapshot；
 - `scripts/demo.js` 3 条示例任务分别路由到 3 台设备并 `completed`；
-- APK 静态校验：`com.superbutler.app` / minSdk 26 / targetSdk 36 / 0.1.0，`apksigner` v1+v2+v3、`zipalign` 通过。
+- APK 静态校验：`com.superbutler.app` / minSdk 26 / targetSdk 36 / versionCode 3 / versionName 0.1.2，`apksigner` v1+v2+v3、`zipalign` 通过。
 
 ## 长期目标（Goals）
 
@@ -314,6 +330,19 @@ node scripts/demo.js
 - 自动跟进：Hub 每 30s 扫描一次到期目标；同一目标已有跟进任务在跑时跳过，避免重复；Hub 停机期间错过的检查不补跑；
 - 跟进结果来自普通任务的输出（当前进度 / 风险与阻塞 / 下一步建议），可在任务列表、执行记录和 SSE 中照常追溯；
 - 目标与检查记录保存在 `hub/data/state.json`（私密数据，gitignore），API 见 [docs/PROTOCOL.md](docs/PROTOCOL.md#54-手机控制台管理员令牌)。
+
+## 提醒（Reminders）
+
+除了任务和长期目标，控制台还提供**提醒**：在指定时间让手机弹一条系统通知。
+
+- 进入方式：桌面端顶部「提醒」Tab / 手机端汉堡菜单 →「提醒」；深链 `/?open=reminders`；
+- 新建提醒：标题、备注（可选）、到期时间（本地时区日期时间）、重复方式（**不重复 / 每天 / 每周**）、**通知方式（温和通知 / 闹钟）**、启用开关；列表支持编辑、启用/停用、删除，按到期时间排序，过期未停用的会标注「已过期」；
+- 提醒保存在 Hub 的 `hub/data/state.json`（私密数据，gitignore），API 见 [docs/PROTOCOL.md](docs/PROTOCOL.md)；通知方式字段为 `notifyStyle`（`gentle` 温和通知，默认；`alarm` 闹钟式）；
+- **通知只在手机 APK 内发送**：
+  - APK 用原生 `AlarmManager` + `BroadcastReceiver` 排程，到点按 `notifyStyle` 走两条系统通知渠道：温和通知用 `butler_reminders`（普通系统提示音），闹钟用 `butler_reminders_alarm`（`USAGE_ALARM` 闹钟铃音 + 长震动）；App 被系统杀死、手机重启、App 升级后都会从本地缓存重新排程；
+  - 点击通知回到 APK 并切到「提醒」Tab；重复提醒到点后自动计算下一次，并把触发结果回写 Hub（`POST /api/reminders/:id/fire`），多台控制端看到的是同一份提醒；
+  - Android 13+ 需授予通知权限；Android 12+ 精确闹钟需要 `SCHEDULE_EXACT_ALARM` 权限，未授予时自动回退非精确闹钟（Doze 下可能延迟几分钟）；
+  - 闹钟方式受系统勿扰模式、闹钟音量、通知渠道设置影响（渠道创建后音效/震动不可改）；浏览器打开提醒页只做管理，不会弹通知（页面顶部有提示条）。
 
 ## 任务执行记录（Backtrace）
 
@@ -353,7 +382,7 @@ task-records/
 - 设备注册需要**加入码**；手机/控制台需要**管理员令牌**；设备令牌只能访问自己的路径。
 - Hub 不执行设备上报的代码；真实执行器命令模板由设备主人配置；可先用 `simulate` 联调。
 - 令牌保存于 `hub/data/state.json`（gitignore）；手机令牌存应用私有 SharedPreferences；前端用户数据按文本渲染避免 XSS。
-- DSH 插件中的私人密钥存入 Harness credentials 服务（非项目文件）；不要提交 `.env`、`hub/data`、设备状态或签名密钥。
+- DSH 插件中的私人密钥优先存入 Harness credentials 服务（非项目文件）；若该服务在插件运行期不可用（如 Harness 升级后 provider 尚未激活），插件会退回写入 `<dataDir>/plugin-secrets.json`（0600，位于已 gitignore 的 `hub/data/`），并在设置页标注「本机文件」；不要提交 `.env`、`hub/data`、设备状态或签名密钥。
 - 手机 Mika 的支付、验证码、登录与手机接管保留人工确认，远程任务不会自动批准。
 - 详细边界：[docs/PROTOCOL.md](docs/PROTOCOL.md)、[docs/DEPLOY.md](docs/DEPLOY.md)。
 
@@ -363,7 +392,8 @@ task-records/
 - 当前路由是**确定性能力评分**，不是 LLM 规划器；多设备子任务 DAG 在 Roadmap。
 - DSH/CLI 接口因版本而异；`dsh-cli` 与 `cli` 执行器使用可配置命令模板，需按实际环境调整。
 - ComfyUI 生成的图片保存在工作机本地，暂不回传 Web 控制台（任务结果含路径）。
-- APK 是 WebView 壳：自签名 HTTPS 会被拒绝（家庭内网建议 http）；无服务端推送/离线缓存/自适应图标；任务通知依赖页面保持运行，App 被系统彻底杀死后不再更新。
+- APK 是 WebView 壳：自签名 HTTPS 会被拒绝（家庭内网建议 http）；无服务端推送/离线缓存/自适应图标；任务通知依赖页面保持运行，App 被系统彻底杀死后不再更新（**提醒通知例外**：由原生 `AlarmManager` 发送，不依赖页面）。
+- 提醒的「闹钟」方式仍是普通高优先级通知加闹钟音与震动（不是系统级闹钟 App，不会全屏弹出）；受勿扰/音量/渠道设置影响，Android 12+ 精确闹钟权限被撤销时会退化为非精确排程。
 - 手机端 UI 截图未生成（浏览器沙箱限制）；功能已通过真实 Hub 的 DOM 级验证。
 - **设备代理必须运行在普通用户会话**：如果它在受限沙箱（例如 DSH 的 workspace-write 文件沙箱）里被拉起，Hermes CLI 无法访问 `%LOCALAPPDATA%\hermes`，任务会以「Hermes CLI 退出码 1（无输出）」在 1~2 秒内失败。此时用本机的 `worker-workspace\restart-butler.cmd`（等价于在普通 PowerShell 里运行 `worker-workspace\start-workers.ps1 -Restart`）一键重启；启动器会做沙箱自检，告警写入 `worker-workspace\logs\launcher.warnings.log`。
 

@@ -6,10 +6,16 @@ const http = require('node:http');
 
 const {
   createExecutor,
+  createCliExecutor,
+  createProgressFileTailer,
   makeProgressThrottle,
+  parseWorkerProgressLine,
   assertEndpointAllowed,
   ExecutorTimeoutError,
 } = require('../lib/executors');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 
 const TEST_DEVICE = {
   id: 'dev_test01',
@@ -333,4 +339,78 @@ test('ollama 执行器：调用 /api/generate 并返回模型输出', async () =
 
 test('未知执行器类型给出明确错误', () => {
   assert.throws(() => createExecutor({ type: 'no-such-executor', config: {} }), /未知执行器类型/);
+});
+
+// ---------------------------------------------------------------------------
+// cli 执行器：实时执行步骤（进度文件轮询）
+// ---------------------------------------------------------------------------
+
+test('parseWorkerProgressLine：只认魔法前缀，钳制百分比', () => {
+  assert.deepEqual(
+    parseWorkerProgressLine('@@BUTLER_PROGRESS@@ {"message":"子任务：调研竞品","percent":20}'),
+    { message: '子任务：调研竞品', percent: 20 },
+  );
+  assert.equal(
+    parseWorkerProgressLine('@@BUTLER_PROGRESS@@ {"message":"执行步骤","percent":120}').percent,
+    100,
+  );
+  assert.equal(parseWorkerProgressLine('@@BUTLER_PROGRESS@@ {"message":""}'), null);
+  assert.equal(parseWorkerProgressLine('@@BUTLER_PROGRESS@@ not-json'), null);
+  assert.equal(parseWorkerProgressLine('普通日志'), null);
+});
+
+test('createProgressFileTailer：追加行实时回调，stop 时补最后一行', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'butler-progress-'));
+  const file = path.join(dir, 'progress.log');
+  const seen = [];
+  const tailer = createProgressFileTailer(file, (message, percent) => seen.push([message, percent]), 20);
+  try {
+    fs.appendFileSync(file, '@@BUTLER_PROGRESS@@ {"message":"开始","percent":10}\n@@BUTLER_PROGRESS@@ {"message":"进行中","percent":30}\n');
+    tailer.start();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    // 最后一行没有换行：stop 时也要处理
+    fs.appendFileSync(file, '@@BUTLER_PROGRESS@@ {"message":"收尾","percent":50}');
+    await tailer.stop();
+    assert.deepEqual(seen, [['开始', 10], ['进行中', 30], ['收尾', 50]]);
+  } finally {
+    await tailer.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('cli 执行器：worker 的实时步骤转成 Hub 进度', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'butler-cli-stream-'));
+  const workerFile = path.join(dir, 'fake-worker.js');
+  fs.writeFileSync(
+    workerFile,
+    [
+      "'use strict';",
+      "const fs = require('node:fs');",
+      "const prefix = '@@BUTLER_PROGRESS@@ ';",
+      "const file = process.argv[process.argv.indexOf('--progress-file') + 1];",
+      "fs.appendFileSync(file, `${prefix}${JSON.stringify({ message: '子任务：调研竞品', percent: 20 })}\\n`);",
+      "fs.appendFileSync(file, `${prefix}${JSON.stringify({ message: '执行步骤：整理报告', percent: 45 })}\\n`);",
+      "setTimeout(() => {",
+      "  process.stdout.write(`${JSON.stringify({ ok: true, backend: 'hermes', model: 'fake', profile: '', text: '已完成', exitCode: 0, durationMs: 10, commandPreview: 'fake', fallbackFrom: null, fallbackReason: null, at: new Date().toISOString() })}\\n`);",
+      "}, 50);",
+    ].join('\n'),
+  );
+  const calls = [];
+  const executor = createCliExecutor({
+    executorCfg: { worker: workerFile, mode: 'auto', workdir: dir, timeoutMs: 8000 },
+    cwd: dir,
+    stateDir: dir,
+  });
+  try {
+    const outcome = await executor.run({
+      task: { id: 'task_x', instruction: '整理本周开销' },
+      progress: async (message, percent) => calls.push([message, percent]),
+    });
+    assert.equal(outcome.output.text, '已完成');
+    assert.ok(calls.some(([message]) => message.includes('子任务：调研竞品')));
+    assert.ok(calls.some(([message]) => message.includes('执行步骤：整理报告')));
+    assert.ok(calls.some(([message, percent]) => message.includes('执行完成') && percent === 92));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

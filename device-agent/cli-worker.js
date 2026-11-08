@@ -35,7 +35,18 @@ const DEFAULTS = {
   mode: 'auto',
   timeoutMs: 15 * 60 * 1000,
   opencodeModel: 'deepseek/deepseek-flash',
+  streamProgress: true,
 };
+
+/**
+ * 进度行前缀：cli-worker 把执行过程中的工具调用/步骤以该前缀写到 stderr，
+ * device-agent 的 cli 执行器逐行读取并转成 Hub 进度（见 device-agent/lib/executors.js）。
+ */
+const PROGRESS_PREFIX = '@@BUTLER_PROGRESS@@ ';
+const PROGRESS_MIN_PERCENT = 8;
+const PROGRESS_TOOL_STEP = 3;
+const PROGRESS_TOOL_MAX = 85;
+const STREAM_STDERR_TAIL = 20000;
 
 function stripAnsi(text) {
   return String(text == null ? '' : text).replace(ANSI_RE, '');
@@ -174,6 +185,189 @@ function buildHermesArgs({ instruction, model = '', provider = '', skills = '', 
   return args;
 }
 
+/**
+ * `hermes chat -q … --format stream-json`：stdout 每行一个 JSON 事件（system/text/tool_use/
+ * tool_result/result），可以实时看到 Agent 正在调用哪些工具、派发了哪些子任务。
+ */
+function buildHermesStreamArgs({ instruction, model = '', provider = '', skills = '', sessionId = '', workdir = '' }) {
+  const args = ['chat', '-q', String(instruction || ''), '--format', 'stream-json', '--yolo'];
+  if (model) args.push('-m', model);
+  if (provider) args.push('--provider', provider);
+  if (skills) args.push('--skills', skills);
+  if (sessionId) args.push('--resume', sessionId);
+  if (workdir) args.push('--in', workdir);
+  return args;
+}
+
+function shortenLine(text, max) {
+  const value = String(text == null ? '' : text).replace(/\s+/g, ' ').trim();
+  return value.length > max ? `${value.slice(0, Math.max(1, max - 1))}…` : value;
+}
+
+function firstStringField(data, keys) {
+  for (const key of keys) {
+    const value = data && typeof data === 'object' ? data[key] : null;
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
+}
+
+/** 把一次工具调用描述成人类可读的执行步骤（子代理/计划工具单独识别）。 */
+function describeHermesTool(name, input) {
+  const tool = nonEmptyString(name) || 'tool';
+  const data = input && typeof input === 'object' ? input : {};
+  if (/delegate|subagent/i.test(tool)) {
+    const tasks = Array.isArray(data.tasks) ? data.tasks : [];
+    const goals = tasks
+      .map((item) => (item && typeof item === 'object'
+        ? nonEmptyString(item.goal) || nonEmptyString(item.description) || nonEmptyString(item.prompt)
+        : ''))
+      .filter(Boolean);
+    const goal = goals[0]
+      || nonEmptyString(data.goal)
+      || nonEmptyString(data.description)
+      || nonEmptyString(data.prompt);
+    if (goal) return `子任务：${shortenLine(goal, 100)}${goals.length > 1 ? `（共 ${goals.length} 个）` : ''}`;
+    return `派发子任务（${tool}）`;
+  }
+  if (/todo/i.test(tool)) {
+    const todos = Array.isArray(data.todos) ? data.todos.filter((item) => item && typeof item === 'object') : [];
+    const active = todos.find((item) => String(item.status) === 'in_progress');
+    if (active && nonEmptyString(active.content)) return `执行步骤：${shortenLine(active.content, 100)}`;
+    const done = todos.filter((item) => String(item.status) === 'completed').length;
+    if (todos.length) return `更新执行计划：${done}/${todos.length} 步完成`;
+    return '查看执行计划';
+  }
+  const detail = firstStringField(data, ['command', 'file_path', 'path', 'query', 'pattern', 'url', 'description', 'prompt', 'name', 'code']);
+  return detail ? `正在执行：${tool} · ${shortenLine(detail, 90)}` : `正在执行：${tool}`;
+}
+
+/** 计划清单里已完成比例 → 进度百分比（让进度条跟 todo 推进）。 */
+function planPercentForTodos(todos) {
+  const list = Array.isArray(todos) ? todos.filter((item) => item && typeof item === 'object') : [];
+  if (!list.length) return null;
+  const done = list.filter((item) => String(item.status) === 'completed').length;
+  return Math.min(PROGRESS_TOOL_MAX, PROGRESS_MIN_PERCENT + 4 + Math.round(70 * (done / list.length)));
+}
+
+/** 把 JSONL 字节流切成完整行（容忍半行/CRLF/超长垃圾行）。 */
+function createJsonlSplitter(onLine) {
+  let buffer = '';
+  const emit = (rawLine) => {
+    const line = String(rawLine).replace(/\r$/, '').trim();
+    if (line) onLine(line);
+  };
+  return {
+    push(chunk) {
+      buffer += String(chunk == null ? '' : chunk);
+      let index;
+      while ((index = buffer.indexOf('\n')) >= 0) {
+        emit(buffer.slice(0, index));
+        buffer = buffer.slice(index + 1);
+      }
+      if (buffer.length > 1000000) buffer = '';
+    },
+    end() {
+      if (buffer) emit(buffer);
+      buffer = '';
+    },
+  };
+}
+
+function initialHermesStreamState() {
+  return {
+    text: '',
+    sessionId: '',
+    sawResult: false,
+    exitCode: null,
+    tools: 0,
+    lastPercent: PROGRESS_MIN_PERCENT,
+    result: null,
+  };
+}
+
+/** Hermes stream-json 事件 → 一条 Hub 进度（没有可展示步骤时返回 null）。 */
+function hermesEventProgress(event, state) {
+  if (!event || typeof event !== 'object' || !state) return null;
+  if (event.type === 'tool_use') {
+    state.tools += 1;
+    let percent = Math.min(PROGRESS_TOOL_MAX, PROGRESS_MIN_PERCENT + 4 + state.tools * PROGRESS_TOOL_STEP);
+    if (/todo/i.test(String(event.name || '')) && event.input && Array.isArray(event.input.todos)) {
+      const planPercent = planPercentForTodos(event.input.todos);
+      if (planPercent !== null) percent = planPercent;
+    }
+    return { message: describeHermesTool(event.name, event.input), percent };
+  }
+  if (event.type === 'tool_result' && event.is_error) {
+    const detail = shortenLine(event.output, 80);
+    return { message: `工具失败：${nonEmptyString(event.name) || 'tool'}${detail ? `：${detail}` : ''}` };
+  }
+  return null;
+}
+
+/** 进度百分比保持单调，避免计划更新时进度条回退。 */
+function normalizeProgressPayload(payload, state) {
+  const message = shortenLine(payload && payload.message, 200);
+  if (!message) return null;
+  let percent = state.lastPercent;
+  if (Number.isFinite(payload.percent)) {
+    const next = Math.max(1, Math.min(99, Math.round(payload.percent)));
+    percent = next > state.lastPercent ? next : state.lastPercent;
+    state.lastPercent = percent;
+  }
+  return { message, percent };
+}
+
+/**
+ * 增量解析 Hermes 的 JSONL 事件流。
+ * @returns {{push:(chunk:any)=>void, end:()=>void, result:()=>({text:string,sessionId:string,sawResult:boolean,exitCode:number|null,result:object|null})}}
+ */
+function createHermesStreamParser(handlers = {}) {
+  const state = initialHermesStreamState();
+  const splitter = createJsonlSplitter((line) => {
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      return; // 非 JSON 行（诊断输出）忽略
+    }
+    if (!event || typeof event !== 'object') return;
+    if (event.type === 'text' && typeof event.text === 'string') {
+      state.text += event.text;
+    } else if (event.type === 'system') {
+      if (event.session_id) state.sessionId = String(event.session_id);
+    } else if (event.type === 'result') {
+      state.sawResult = true;
+      state.result = event;
+      if (event.session_id) state.sessionId = String(event.session_id);
+      if (Number.isFinite(event.exit_code)) state.exitCode = event.exit_code;
+      if (typeof event.text === 'string' && event.text) state.text = event.text;
+    }
+    const progress = hermesEventProgress(event, state);
+    if (progress && typeof handlers.onProgress === 'function') {
+      const normalized = normalizeProgressPayload(progress, state);
+      if (normalized) handlers.onProgress(normalized);
+    }
+  });
+  return {
+    push(chunk) {
+      splitter.push(chunk);
+    },
+    end() {
+      splitter.end();
+    },
+    result() {
+      return {
+        text: state.text,
+        sessionId: state.sessionId,
+        sawResult: state.sawResult,
+        exitCode: state.exitCode,
+        result: state.result,
+      };
+    },
+  };
+}
+
 function readSessionMap() {
   const file = nonEmptyString(process.env.BUTLER_CLI_SESSION_FILE);
   if (!file) return {};
@@ -291,7 +485,14 @@ function extractOpencodeText(stdout) {
 }
 
 function parseCliArgs(argv) {
-  const out = { mode: DEFAULTS.mode, allowShell: false, fallbackHermes: false, json: true, modelProviders: {} };
+  const out = {
+    mode: DEFAULTS.mode,
+    allowShell: false,
+    fallbackHermes: false,
+    json: true,
+    modelProviders: {},
+    streamProgress: DEFAULTS.streamProgress,
+  };
   const take = (index, key) => {
     if (!argv[index + 1]) throw new Error(`${key} 缺少值`);
     return argv[index + 1];
@@ -347,6 +548,10 @@ function parseCliArgs(argv) {
         out.timeoutMs = Number(value());
         if (inline === undefined) i += 1;
         break;
+      case '--progress-file':
+        out.progressFile = value();
+        if (inline === undefined) i += 1;
+        break;
       case '--opencode-model':
         out.opencodeModel = value();
         if (inline === undefined) i += 1;
@@ -364,6 +569,12 @@ function parseCliArgs(argv) {
         break;
       case '--fallback-hermes':
         out.fallbackHermes = true;
+        break;
+      case '--stream-progress':
+        out.streamProgress = true;
+        break;
+      case '--no-stream-progress':
+        out.streamProgress = false;
         break;
       case '--help':
       case '-h':
@@ -481,7 +692,7 @@ function baseEnv(extra = {}) {
   };
 }
 
-async function runHermes(ctx) {
+async function runHermesLegacy(ctx) {
   const home = ctx.hermesHome;
   const exe = ctx.hermesExe;
   const profileHome = hermesProfileHome(home, ctx.profile);
@@ -531,6 +742,162 @@ async function runHermes(ctx) {
     durationMs: res.durationMs,
     commandPreview: `hermes --cli -z "${truncate(ctx.instruction, 80)}"`,
   };
+}
+
+/**
+ * 用 `chat -q … --format stream-json` 执行一次 Hermes，实时把工具调用转成进度回调。
+ * 返回可直接用于 saveSessionId / 组装的原始结果。
+ */
+function runHermesStreamAttempt(ctx, resumeId) {
+  const env = baseEnv({
+    HERMES_HOME: hermesProfileHome(ctx.hermesHome, ctx.profile),
+    HERMES_PROFILE: ctx.profile || '',
+  });
+  const args = buildHermesStreamArgs({
+    instruction: composePrompt(ctx.promptPrefix, ctx.instruction),
+    model: ctx.model || '',
+    provider: ctx.provider || '',
+    skills: ctx.skills || '',
+    sessionId: resumeId,
+    workdir: ctx.workdir,
+  });
+  return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
+    let child;
+    try {
+      child = spawn(ctx.hermesExe, args, {
+        cwd: ctx.workdir,
+        env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+        shell: false,
+      });
+    } catch (err) {
+      reject(new Error(`Hermes CLI启动失败：${err.message}`));
+      return;
+    }
+    const parser = createHermesStreamParser({
+      onProgress: (payload) => {
+        if (typeof ctx.onProgress !== 'function') return;
+        try {
+          ctx.onProgress(payload);
+        } catch {
+          /* 进度上报失败不影响任务 */
+        }
+      },
+    });
+    let stderrTail = '';
+    let settled = false;
+    let timer = null;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      try {
+        parser.end();
+      } catch {
+        /* ignore */
+      }
+      callback(value);
+    };
+    if (child.stdout && child.stdout.setEncoding) child.stdout.setEncoding('utf8');
+    if (child.stdout) child.stdout.on('data', (chunk) => parser.push(chunk));
+    if (child.stderr && child.stderr.setEncoding) child.stderr.setEncoding('utf8');
+    if (child.stderr) {
+      child.stderr.on('data', (chunk) => {
+        const text = String(chunk);
+        stderrTail = (stderrTail + text).slice(-STREAM_STDERR_TAIL);
+        try {
+          process.stderr.write(text);
+        } catch {
+          /* ignore */
+        }
+      });
+    }
+    child.once('error', (err) => {
+      finish(reject, new Error(`Hermes CLI启动失败：${err.message}`));
+    });
+    child.once('close', (code, signal) => {
+      const state = parser.result();
+      finish(resolve, {
+        code,
+        signal,
+        stderr: stripAnsi(stderrTail),
+        durationMs: Date.now() - startedAt,
+        args,
+        ...state,
+      });
+    });
+    if (ctx.timeoutMs > 0) {
+      timer = setTimeout(() => {
+        killTree(child);
+        finish(reject, new Error(`执行超时（${ctx.timeoutMs}ms），已终止`));
+      }, ctx.timeoutMs);
+      if (timer.unref) timer.unref();
+    }
+  });
+}
+
+async function runHermesStream(ctx) {
+  const home = ctx.hermesHome;
+  const exe = ctx.hermesExe;
+  if (!exe) throw new Error('Hermes CLI：找不到可执行文件');
+  const env = baseEnv({
+    HERMES_HOME: hermesProfileHome(home, ctx.profile),
+    HERMES_PROFILE: ctx.profile || '',
+  });
+  const sessionMap = readSessionMap();
+  const desiredSession = ctx.threadId ? sessionMap[ctx.threadId] || '' : '';
+  const beforeSessions = ctx.threadId ? listHermesSessionIds(exe, env, ctx.workdir) : new Set();
+
+  let res = await runHermesStreamAttempt(ctx, desiredSession);
+  if (desiredSession && !res.sawResult && res.code !== 0) {
+    // 会话失效时换新会话重试一次（与旧版 -z 行为一致）。
+    res = await runHermesStreamAttempt(ctx, '');
+  }
+  const text = String(res.text || '').trim() || String(res.stderr || '').trim();
+  // 有 result 事件时以事件里的 exit_code 为准（CLI 进程本身可能始终返回 0）。
+  const effectiveCode = res.sawResult && Number.isFinite(res.exitCode) ? res.exitCode : res.code;
+  const foundSession = res.sessionId
+    || extractHermesSessionId(`${res.text || ''}\n${res.stderr || ''}`);
+  if (foundSession && ctx.threadId) saveSessionId(ctx.threadId, foundSession);
+  if (!foundSession && ctx.threadId) {
+    const afterSessions = listHermesSessionIds(exe, env, ctx.workdir);
+    const created = [...afterSessions].find((id) => !beforeSessions.has(id));
+    if (created) saveSessionId(ctx.threadId, created);
+  }
+  if (effectiveCode !== 0 && !res.sawResult) {
+    const err = new Error(describeHermesExit(res.code, text, home));
+    if (res.code === 2 && /(unrecognized|invalid choice|--format|requires -q)/i.test(res.stderr || '')) {
+      err.streamUnsupported = true;
+    }
+    throw err;
+  }
+  if (effectiveCode !== 0) throw new Error(describeHermesExit(effectiveCode, text, home));
+  if (!text) throw new Error('Hermes CLI 未返回任何内容');
+  return {
+    backend: 'hermes',
+    model: ctx.model || 'hermes-default',
+    text: truncate(text, 200000),
+    stdout: res.text || '',
+    stderr: res.stderr,
+    exitCode: effectiveCode,
+    durationMs: res.durationMs,
+    commandPreview: `hermes chat -q "${truncate(ctx.instruction, 80)}" --format stream-json`,
+  };
+}
+
+/** 优先 stream-json（实时步骤），旧版 Hermes 不支持时回退旧的 -z 一次性调用。 */
+async function runHermes(ctx) {
+  if (ctx.streamProgress !== false) {
+    try {
+      return await runHermesStream(ctx);
+    } catch (err) {
+      if (!(err && err.streamUnsupported)) throw err;
+      // 旧版 Hermes 不认识 --format stream-json：回退到 -z，把执行过程看不到当作已知限制。
+    }
+  }
+  return runHermesLegacy(ctx);
 }
 
 async function runOpencode(ctx) {
@@ -618,6 +985,8 @@ async function runTask(options) {
     opencodeExe: nonEmptyString(options.opencodeExe) || defaultOpencodeExe(),
     opencodeModel: nonEmptyString(options.opencodeModel) || DEFAULTS.opencodeModel,
     allowShell: options.allowShell === true,
+    streamProgress: options.streamProgress !== false,
+    onProgress: typeof options.onProgress === 'function' ? options.onProgress : null,
   };
   const backend = chooseBackend({
     mode: options.mode,
@@ -647,7 +1016,7 @@ async function main(argv) {
     process.stdout.write(
       '用法：node cli-worker.js --instruction <指令> [--mode auto|hermes|opencode|shell] '
       + '[--profile <profile>] [--model <model>] [--skills <skills>] [--prompt-prefix <text>] '
-      + '[--workdir <dir>] [--allow-shell] [--fallback-hermes]\n',
+      + '[--workdir <dir>] [--allow-shell] [--fallback-hermes] [--no-stream-progress]\n',
     );
     return 0;
   }
@@ -666,9 +1035,31 @@ async function main(argv) {
   options.hermesHome = process.env.BUTLER_CLI_HERMES_HOME || options.hermesHome;
   options.hermesExe = process.env.BUTLER_CLI_HERMES_EXE || options.hermesExe;
   options.opencodeExe = process.env.BUTLER_CLI_OPENCODE_EXE || options.opencodeExe;
+  options.progressFile = process.env.BUTLER_CLI_PROGRESS_FILE || options.progressFile;
+  if (process.env.BUTLER_CLI_STREAM_PROGRESS === '0') options.streamProgress = false;
+
+  // 实时执行步骤写进度文件（魔法前缀行），由 executors.js 轮询解析后转成 Hub 进度。
+  const emitProgress = (payload) => {
+    if (!payload || !payload.message) return;
+    try {
+      const line = {
+        message: String(payload.message),
+        percent: Number.isFinite(payload.percent) ? payload.percent : undefined,
+        at: new Date().toISOString(),
+      };
+      const text = `${PROGRESS_PREFIX}${JSON.stringify(line)}\n`;
+      if (nonEmptyString(options.progressFile)) {
+        fs.appendFileSync(options.progressFile, text);
+      } else {
+        process.stderr.write(text);
+      }
+    } catch {
+      /* ignore */
+    }
+  };
 
   try {
-    const result = await runTask(options);
+    const result = await runTask({ ...options, onProgress: emitProgress });
     const payload = {
       ok: true,
       backend: result.backend,
@@ -708,14 +1099,23 @@ module.exports = {
   DEFAULTS,
   CODE_RE,
   SHELL_PREFIX_RE,
+  PROGRESS_PREFIX,
   parseCliArgs,
   chooseBackend,
   buildHermesArgs,
+  buildHermesStreamArgs,
   providerForModel,
   composePrompt,
   buildOpencodeArgs,
   extractOpencodeText,
   stripAnsi,
+  shortenLine,
+  describeHermesTool,
+  planPercentForTodos,
+  createJsonlSplitter,
+  hermesEventProgress,
+  normalizeProgressPayload,
+  createHermesStreamParser,
   hermesProfileHome,
   hermesHomeProblem,
   describeHermesExit,

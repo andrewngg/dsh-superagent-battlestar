@@ -6,6 +6,8 @@
  */
 
 const http = require('node:http');
+const fs = require('node:fs');
+const path = require('node:path');
 const { URL } = require('node:url');
 
 const protocol = require('../../shared/protocol.js');
@@ -22,16 +24,76 @@ const TASK_ADMIN_RE = /^\/api\/tasks\/([^/]+)(?:\/(cancel|retry|archive|unarchiv
 const TASK_FOLLOW_RE = /^\/api\/tasks\/([^/]+)\/follow-up$/;
 const TASK_ANSWER_RE = /^\/api\/tasks\/([^/]+)\/answer$/;
 const TASK_EXTERNAL_RE = /^\/api\/tasks\/([^/]+)\/external-result$/;
-const GOAL_ADMIN_RE = /^\/api\/goals\/([^/]+)(?:\/(check))?$/;
+const GOAL_ADMIN_RE = /^\/api\/goals\/([^/]+)(?:\/(check|link|approve|reject))?$/;
+const REMINDER_ADMIN_RE = /^\/api\/reminders\/([^/]+)(?:\/(fire))?$/;
 const RECORD_RE = /^\/api\/records\/([^/]+)$/;
 const DSH_JOB_RE = /^\/api\/dsh\/job\/([^/]+)$/;
-const DSH_BRIDGE_URL = (process.env.DSH_BRIDGE_URL || 'http://127.0.0.1:50646/super-butler/api/dsh').replace(/\/+$/, '');
+// DSH 的 Web 端口每次启动都可能变化（桌面版默认随机端口），因此 bridge 地址是可运行时
+// 更新的：优先用插件通过 POST /api/dsh/bridge 同步进来的值（同时落盘 <dataDir>/dsh-bridge.json），
+// 其次环境变量 DSH_BRIDGE_URL，最后才是历史默认端口。
+const DEFAULT_DSH_BRIDGE_URL = 'http://127.0.0.1:50646/super-butler/api/dsh';
+const DSH_BRIDGE_FILE = 'dsh-bridge.json';
 
-async function dshRequest(pathname, options = {}) {
+function normalizeBridgeUrl(value) {
+  const raw = String(value || '').trim().replace(/\/+$/, '');
+  if (!raw) return '';
+  let parsed = null;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return '';
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '';
+  return raw;
+}
+
+function dshBridgeFile(hub) {
+  return path.join(hub.dataDir, DSH_BRIDGE_FILE);
+}
+
+function readStoredBridgeUrl(hub) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(dshBridgeFile(hub), 'utf8'));
+    return normalizeBridgeUrl(raw && raw.url);
+  } catch {
+    return '';
+  }
+}
+
+function dshBridgeUrl(hub) {
+  if (!hub.dshBridgeUrl) {
+    hub.dshBridgeUrl =
+      readStoredBridgeUrl(hub) ||
+      normalizeBridgeUrl(process.env.DSH_BRIDGE_URL) ||
+      DEFAULT_DSH_BRIDGE_URL;
+  }
+  return hub.dshBridgeUrl;
+}
+
+/** 更新 bridge 地址并落盘；返回规范化后的地址（非法地址抛 400）。 */
+function setDshBridgeUrl(hub, value) {
+  const next = normalizeBridgeUrl(value);
+  if (!next) throw badRequest('DSH bridge 地址必须是 http(s) URL');
+  hub.dshBridgeUrl = next;
+  try {
+    fs.mkdirSync(hub.dataDir, { recursive: true });
+    const file = dshBridgeFile(hub);
+    const tmp = `${file}.tmp`;
+    fs.writeFileSync(tmp, `${JSON.stringify({ url: next, updatedAt: protocol.nowIso() }, null, 2)}\n`, {
+      mode: 0o600,
+    });
+    fs.renameSync(tmp, file);
+  } catch {
+    // 落盘失败不影响当前进程继续使用新地址
+  }
+  return next;
+}
+
+async function dshFetchOnce(hub, pathname, options = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), options.timeoutMs || 30000);
   try {
-    const res = await fetch(`${DSH_BRIDGE_URL}${pathname}`, {
+    const res = await fetch(`${dshBridgeUrl(hub)}${pathname}`, {
       method: options.method || 'GET',
       headers: { 'Content-Type': 'application/json' },
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
@@ -49,6 +111,27 @@ async function dshRequest(pathname, options = {}) {
     clearTimeout(timer);
   }
 }
+
+/**
+ * 请求 DSH bridge。DSH 换端口后插件会把新地址写进 <dataDir>/dsh-bridge.json；
+ * 所以 fetch 失败时重读一次该文件，地址确实变了就立刻用新地址重试一次，
+ * 这样即使 Hub 是在插件写入文件之前手工启动的，也会自愈而不必重启。
+ */
+async function dshRequest(hub, pathname, options = {}) {
+  try {
+    return await dshFetchOnce(hub, pathname, options);
+  } catch (err) {
+    const stored = readStoredBridgeUrl(hub);
+    if (!stored || stored === dshBridgeUrl(hub)) throw err;
+    hub.dshBridgeUrl = stored;
+    return dshFetchOnce(hub, pathname, options);
+  }
+}
+function dshUnavailableMessage(hub, err) {
+  const reason = err && err.message ? err.message : String(err);
+  return `DSH bridge 不可用（${dshBridgeUrl(hub)}）：${reason}；如果刚重启过 DSH，请稍等插件同步地址，或在 DSH 插件面板点一次「重启 Hub」`;
+}
+
 const TASK_BODY_BYTES = 8 * 1024 * 1024;
 const MAX_ATTACHMENT_COUNT = 3;
 const MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024;
@@ -278,7 +361,7 @@ async function handleRequest(hub, req, res) {
     requireAdmin(hub, req, url);
     if (method !== 'GET') throw notFound('接口不存在');
     const limit = util.clampInt(queryNumber(url, 'limit'), 50, 1, 200);
-    return sendJson(res, 200, hub.snapshot(limit));
+    return sendJson(res, 200, { ...hub.snapshot(limit), dshBridge: { url: dshBridgeUrl(hub) } });
   }
 
   if (pathname === '/api/settings') {
@@ -343,7 +426,105 @@ async function handleRequest(hub, req, res) {
         hubTime: protocol.nowIso(),
       });
     }
+    if (action === 'link' && method === 'POST') {
+      const body = await readJsonBody(req);
+      const taskId = body && typeof body.taskId === 'string' ? body.taskId.trim() : '';
+      if (!taskId) throw badRequest('taskId 必填');
+      const { goal, task } = hub.linkGoalTask(goalId, taskId);
+      return sendJson(res, 200, {
+        goal: hub.getGoal(goal.id),
+        task: hub.taskToJson(task),
+        hubTime: protocol.nowIso(),
+      });
+    }
+    if (action === 'approve' && method === 'POST') {
+      await readJsonBody(req);
+      const { goal, task } = hub.approveGoalCheck(goalId);
+      return sendJson(res, 200, {
+        goal: hub.getGoal(goal.id),
+        task: hub.taskToJson(task),
+        hubTime: protocol.nowIso(),
+      });
+    }
+    if (action === 'reject' && method === 'POST') {
+      await readJsonBody(req);
+      const goal = hub.rejectGoalCheck(goalId);
+      return sendJson(res, 200, { goal, hubTime: protocol.nowIso() });
+    }
     throw notFound('接口不存在');
+  }
+
+  if (pathname === '/api/reminders') {
+    requireAdmin(hub, req, url);
+    if (method === 'GET') {
+      return sendJson(res, 200, { reminders: hub.listReminders(), hubTime: protocol.nowIso() });
+    }
+    if (method === 'POST') {
+      const body = await readJsonBody(req);
+      const reminder = hub.createReminder(body);
+      return sendJson(res, 200, { reminder: hub.getReminder(reminder.id), hubTime: protocol.nowIso() });
+    }
+    throw notFound('接口不存在');
+  }
+
+  const reminderMatch = REMINDER_ADMIN_RE.exec(pathname);
+  if (reminderMatch) {
+    requireAdmin(hub, req, url);
+    let reminderId;
+    try {
+      reminderId = decodeURIComponent(reminderMatch[1]);
+    } catch {
+      throw notFound('提醒不存在');
+    }
+    const action = reminderMatch[2] || null;
+    if (!action && method === 'GET') {
+      return sendJson(res, 200, { reminder: hub.getReminder(reminderId), hubTime: protocol.nowIso() });
+    }
+    if (!action && (method === 'PATCH' || method === 'PUT')) {
+      const body = await readJsonBody(req);
+      const reminder = hub.updateReminder(reminderId, body);
+      return sendJson(res, 200, { reminder: hub.getReminder(reminder.id), hubTime: protocol.nowIso() });
+    }
+    if (!action && method === 'DELETE') {
+      const reminder = hub.deleteReminder(reminderId);
+      return sendJson(res, 200, {
+        deleted: true,
+        reminderId: reminder.id,
+        hubTime: protocol.nowIso(),
+      });
+    }
+    if (action === 'fire' && method === 'POST') {
+      const body = await readJsonBody(req);
+      const reminder = hub.fireReminder(reminderId, {
+        firedAt: body && typeof body.firedAt === 'string' ? body.firedAt : undefined,
+      });
+      return sendJson(res, 200, { reminder: hub.getReminder(reminder.id), hubTime: protocol.nowIso() });
+    }
+    throw notFound('接口不存在');
+  }
+
+  if (pathname === '/api/approvals') {
+    requireAdmin(hub, req, url);
+    if (method !== 'GET') throw notFound('接口不存在');
+    return sendJson(res, 200, { approvals: hub.listApprovals(), hubTime: protocol.nowIso() });
+  }
+
+  if (pathname === '/api/nightly-review') {
+    requireAdmin(hub, req, url);
+    if (method !== 'GET') throw notFound('接口不存在');
+    return sendJson(res, 200, { review: hub.getNightlyReview(), hubTime: protocol.nowIso() });
+  }
+
+  if (pathname === '/api/nightly-review/run') {
+    requireAdmin(hub, req, url);
+    if (method !== 'POST') throw notFound('接口不存在');
+    await readJsonBody(req);
+    const task = hub.runNightlyReview(Date.now(), { force: true });
+    return sendJson(res, 200, {
+      task: task ? hub.taskToJson(task) : null,
+      review: hub.getNightlyReview(),
+      hubTime: protocol.nowIso(),
+    });
   }
 
   if (pathname === '/api/records') {
@@ -390,13 +571,23 @@ async function handleRequest(hub, req, res) {
     return sendJson(res, 200, { devices, hubTime: protocol.nowIso() });
   }
 
+  if (pathname === '/api/dsh/bridge') {
+    requireAdmin(hub, req, url);
+    if (method === 'GET') return sendJson(res, 200, { url: dshBridgeUrl(hub) });
+    if (method === 'POST') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, { url: setDshBridgeUrl(hub, body.url) });
+    }
+    throw notFound('接口不存在');
+  }
+
   if (pathname === '/api/dsh/status') {
     requireAdmin(hub, req, url);
     try {
-      const out = await dshRequest('/status');
+      const out = await dshRequest(hub, '/status');
       return sendJson(res, out.status, out.data || {});
     } catch (err) {
-      return sendJson(res, 502, { error: { code: 'dsh_unavailable', message: `DSH bridge 不可用：${err.message}` } });
+      return sendJson(res, 502, { error: { code: 'dsh_unavailable', message: dshUnavailableMessage(hub, err) } });
     }
   }
 
@@ -405,10 +596,10 @@ async function handleRequest(hub, req, res) {
     if (method !== 'POST') throw notFound('接口不存在');
     const body = await readJsonBody(req);
     try {
-      const out = await dshRequest('/chat', { method: 'POST', body });
+      const out = await dshRequest(hub, '/chat', { method: 'POST', body });
       return sendJson(res, out.status, out.data || {});
     } catch (err) {
-      return sendJson(res, 502, { error: { code: 'dsh_unavailable', message: `DSH bridge 不可用：${err.message}` } });
+      return sendJson(res, 502, { error: { code: 'dsh_unavailable', message: dshUnavailableMessage(hub, err) } });
     }
   }
 
@@ -416,20 +607,20 @@ async function handleRequest(hub, req, res) {
     requireAdmin(hub, req, url);
     if (method !== 'POST') throw notFound('接口不存在');
     try {
-      const out = await dshRequest('/reset', { method: 'POST', body: {} });
+      const out = await dshRequest(hub, '/reset', { method: 'POST', body: {} });
       return sendJson(res, out.status, out.data || {});
     } catch (err) {
-      return sendJson(res, 502, { error: { code: 'dsh_unavailable', message: `DSH bridge 不可用：${err.message}` } });
+      return sendJson(res, 502, { error: { code: 'dsh_unavailable', message: dshUnavailableMessage(hub, err) } });
     }
   }
 
   if (pathname === '/api/dsh/jobs') {
     requireAdmin(hub, req, url);
     try {
-      const out = await dshRequest('/jobs');
+      const out = await dshRequest(hub, '/jobs');
       return sendJson(res, out.status, out.data || {});
     } catch (err) {
-      return sendJson(res, 502, { error: { code: 'dsh_unavailable', message: `DSH bridge 不可用：${err.message}` } });
+      return sendJson(res, 502, { error: { code: 'dsh_unavailable', message: dshUnavailableMessage(hub, err) } });
     }
   }
 
@@ -437,10 +628,10 @@ async function handleRequest(hub, req, res) {
   if (dshJobMatch) {
     requireAdmin(hub, req, url);
     try {
-      const out = await dshRequest(`/job/${encodeURIComponent(decodeURIComponent(dshJobMatch[1]))}`);
+      const out = await dshRequest(hub, `/job/${encodeURIComponent(decodeURIComponent(dshJobMatch[1]))}`);
       return sendJson(res, out.status, out.data || {});
     } catch (err) {
-      return sendJson(res, 502, { error: { code: 'dsh_unavailable', message: `DSH bridge 不可用：${err.message}` } });
+      return sendJson(res, 502, { error: { code: 'dsh_unavailable', message: dshUnavailableMessage(hub, err) } });
     }
   }
 

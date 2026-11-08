@@ -9,7 +9,7 @@
   <title>BattleStar · 控制台</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="assets/vendor/select2.min.css">
-  <link rel="stylesheet" href="assets/style.css?v=20261108f">
+  <link rel="stylesheet" href="assets/style.css?v=20261108o">
 </head>
 <body>
   <!-- 静态图标库（仅常量路径，不承载用户数据） -->
@@ -21,6 +21,8 @@
       <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
       <symbol id="i-send" viewBox="0 0 24 24"><path d="M21.5 2.5L11 13"/><path d="M21.5 2.5l-6.8 19-3.7-8.5-8.5-3.7 19-6.8z"/></symbol>
       <symbol id="i-devices" viewBox="0 0 24 24"><rect x="2.5" y="4" width="13" height="9.5" rx="1.6"/><path d="M7 20.5h4M9 13.5V20.5"/><rect x="17" y="9" width="4.5" height="11" rx="1.2"/></symbol>
+      <symbol id="i-computer" viewBox="0 0 24 24"><rect x="2.5" y="4" width="19" height="12.5" rx="2"/><path d="M8.5 20.5h7M12 16.5v4"/></symbol>
+      <symbol id="i-phone" viewBox="0 0 24 24"><rect x="6.5" y="2.5" width="11" height="19" rx="2.6"/><path d="M10.8 18.6h2.4"/></symbol>
       <symbol id="i-tasks" viewBox="0 0 24 24"><path d="M9 6h12M9 12h12M9 18h12"/><path d="M3.5 6l1.4 1.4L7 4.8M3.5 12l1.4 1.4L7 10.8M3.5 18l1.4 1.4L7 16.8"/></symbol>
       <symbol id="i-terminal" viewBox="0 0 24 24"><path d="M3.5 17.5l6.5-5.5-6.5-5.5"/><path d="M12.5 19.5H21"/></symbol>
       <symbol id="i-activity" viewBox="0 0 24 24"><path d="M2.5 12h4l2.8-7.5 4.4 15 2.8-7.5h5"/></symbol>
@@ -38,6 +40,7 @@
       <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/></symbol>
       <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.4"/></symbol>
       <symbol id="i-flag" viewBox="0 0 24 24"><path d="M5.5 21V3.5"/><path d="M5.5 4.5h12l-2.4 4 2.4 4h-12"/></symbol>
+      <symbol id="i-bell" viewBox="0 0 24 24"><path d="M18.2 9.6a6.2 6.2 0 1 0-12.4 0c0 5.1-2 6.4-2 6.4h16.4s-2-1.3-2-6.4z"/><path d="M10.1 19.4a2.1 2.1 0 0 0 3.8 0"/></symbol>
     </defs>
   </svg>
 
@@ -149,12 +152,18 @@
                 <h2>任务</h2>
                 <p class="panel-sub" id="tasks-sub">正在加载…</p>
               </div>
-              <div class="filter-row" id="task-filters" role="group" aria-label="任务筛选">
-                <button type="button" class="filter-chip is-active" data-filter="all">全部</button>
-                <button type="button" class="filter-chip" data-filter="active">进行中</button>
-                <button type="button" class="filter-chip" data-filter="completed">已完成</button>
-                <button type="button" class="filter-chip" data-filter="failed">失败</button>
-                <button type="button" class="filter-chip" data-filter="archived">已归档</button>
+              <div class="task-head-tools">
+                <div class="filter-row" id="task-filters" role="group" aria-label="任务筛选">
+                  <button type="button" class="filter-chip" data-filter="all">全部</button>
+                  <button type="button" class="filter-chip is-active" data-filter="active">进行中</button>
+                  <button type="button" class="filter-chip" data-filter="completed">已完成</button>
+                  <button type="button" class="filter-chip" data-filter="failed">失败</button>
+                  <button type="button" class="filter-chip" data-filter="archived">已归档</button>
+                </div>
+                <div class="panel-head-actions">
+                  <button type="button" class="btn btn-ghost btn-sm" id="tasks-collapse-all" title="收起所有任务，只显示指令和时间">全部收起</button>
+                  <button type="button" class="btn btn-ghost btn-sm" id="tasks-expand-all" title="展开所有任务，恢复完整卡片">全部展开</button>
+                </div>
               </div>
             </div>
             <div id="task-list" class="task-list" aria-live="polite"></div>
@@ -173,6 +182,23 @@
               </div>
             </div>
             <div id="goal-list" class="goal-list" aria-live="polite"></div>
+            <div id="nightly-review" class="nightly-review" hidden></div>
+          </section>
+
+          <section class="panel section-reminders" id="section-reminders" data-tab-panel="reminders">
+            <div class="panel-head">
+              <div>
+                <h2 id="reminders-title">提醒</h2>
+                <p class="panel-sub" id="reminders-sub">正在加载…</p>
+              </div>
+              <div class="panel-head-actions">
+                <button type="button" class="btn btn-ghost btn-sm" id="reminder-new">
+                  <svg class="icon"><use href="#i-bell"></use></svg><span id="reminder-new-label">新建提醒</span>
+                </button>
+              </div>
+            </div>
+            <div id="reminder-hint" class="reminder-hint" role="note" hidden></div>
+            <div id="reminder-list" class="reminder-list" aria-live="polite"></div>
           </section>
         </div>
 
@@ -325,6 +351,9 @@
     <button type="button" class="mobile-tab" data-tab="goals" aria-selected="false">
       <svg class="icon"><use href="#i-target"></use></svg><span>目标</span>
     </button>
+    <button type="button" class="mobile-tab" data-tab="reminders" aria-selected="false">
+      <svg class="icon"><use href="#i-bell"></use></svg><span>提醒</span>
+    </button>
     <button type="button" class="mobile-tab" data-tab="command" aria-selected="false">
       <svg class="icon"><use href="#i-terminal"></use></svg><span>指令</span>
     </button>
@@ -378,7 +407,7 @@
 
   <script src="assets/vendor/jquery.min.js" defer></script>
   <script src="assets/vendor/select2.min.js" defer></script>
-  <script src="assets/i18n.js?v=20261108g" defer></script>
-  <script src="assets/app.js?v=20261108h" defer></script>
+  <script src="assets/i18n.js?v=20261108o" defer></script>
+  <script src="assets/app.js?v=20261108s" defer></script>
 </body>
 </html>

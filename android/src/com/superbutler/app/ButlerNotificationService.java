@@ -126,6 +126,9 @@ public class ButlerNotificationService extends Service {
             return;
         }
 
+        // 每次 snapshot 轮询顺便把提醒同步到原生闹钟（App 停在后台也能排程）
+        syncReminders(snapshot);
+
         JSONArray tasks = snapshot.optJSONArray("tasks");
         JSONObject active = findActiveTask(tasks);
         if (active != null) {
@@ -158,6 +161,17 @@ public class ButlerNotificationService extends Service {
         String text = online + " 台在线 · " + idle + " 台待命";
         if (total > online) text += "（共 " + total + " 台）";
         publish("BattleStar · 待命中", text, "无进行中任务", -1);
+    }
+
+    /** snapshot 里的 reminders 数组交给 ReminderScheduler 全量同步（失败不影响常驻通知）。 */
+    private void syncReminders(JSONObject snapshot) {
+        try {
+            JSONArray reminders = snapshot == null ? null : snapshot.optJSONArray("reminders");
+            if (reminders == null) return;
+            ReminderScheduler.sync(this, reminders);
+        } catch (Exception e) {
+            Log.w(TAG, "sync reminders failed", e);
+        }
     }
 
     private JSONObject fetchSnapshot(String hub, String token) {

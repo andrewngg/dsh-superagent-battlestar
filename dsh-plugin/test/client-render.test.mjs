@@ -12,7 +12,7 @@ const source = fs.readFileSync(clientFile, 'utf8')
 // 测试内把内部组件暴露出来，做一次无 DOM 的渲染冒烟测试。
 const annotated = source.replace(
   '    return {\n      inject:',
-  '    globalThis.__dshClientInternals = { TaskRow, TaskDetail, Dialog, ConsoleTab, Panel }\n    return {\n      inject:',
+  '    globalThis.__dshClientInternals = { DeviceCard, ConsoleTab, GuideTab, Panel, SettingsTab }\n    return {\n      inject:',
 )
 
 function flatten(children, out = []) {
@@ -57,11 +57,26 @@ function createMiniReact() {
     return Array.isArray(children) ? children.map(renderNode).join('') : renderNode(children)
   }
 
-  return { React, effects, render: renderNode }
+  // 按类型收集元素树里的节点，用来断言 props（无 DOM 渲染时 props 不会出现在文本里）。
+  function collect(node, predicate, out = []) {
+    if (node === null || node === undefined || typeof node !== 'object') return out
+    if (Array.isArray(node)) {
+      for (const child of node) collect(child, predicate, out)
+      return out
+    }
+    if (typeof node.type === 'function') return collect(node.type({ ...node.props }), predicate, out)
+    if (predicate(node)) out.push(node)
+    const children = node.props && node.props.children
+    if (Array.isArray(children)) collect(children, predicate, out)
+    else collect(children, predicate, out)
+    return out
+  }
+
+  return { React, effects, render: renderNode, collect }
 }
 
 function loadInternals() {
-  const { React, render } = createMiniReact()
+  const { React, render, collect } = createMiniReact()
   let manifest = null
   const sandbox = {
     window: { __ModuleLoader__: { load: (value) => { manifest = value } } },
@@ -75,7 +90,7 @@ function loadInternals() {
   })
   const internals = sandbox.__dshClientInternals
   assert.ok(internals, 'test annotation must expose the client components')
-  return { React, render, plugin, internals }
+  return { React, render, collect, plugin, internals }
 }
 
 const t = (key) => String(key)
@@ -86,207 +101,184 @@ function makeTask(overrides = {}) {
   return {
     id: 'task_abc123',
     instruction: '运行测试并只回答结果',
-    requirements: { skills: ['cli-exec'], tags: [] },
-    priority: 5,
     status: 'running',
     assignedDeviceId: 'dev_1',
     assignedDeviceName: 'Mac mini',
     createdAt: now,
     updatedAt: now,
-    startedAt: now,
-    finishedAt: null,
-    attempts: 1,
-    maxAttempts: 2,
-    timeoutSec: 600,
-    output: { text: 'partial output', data: { backend: 'hermes' } },
-    error: null,
-    progress: { question: '需要我继续吗？', percent: 42 },
-    parentTaskId: null,
-    childTaskIds: ['task_child1'],
-    threadId: 'task_abc123',
-    replyToTaskId: null,
-    threadStep: 1,
-    context: null,
-    attachments: [],
-    isPlan: false,
-    archived: false,
-    archivedAt: null,
-    route: { reason: '最佳匹配', candidates: [], excluded: [] },
-    events: [
-      { at: now, type: 'created', message: '任务已创建' },
-      { at: now, type: 'progress', message: '进度 42%' },
-    ],
     ...overrides,
   }
 }
 
-const task = makeTask()
-const childTask = makeTask({ id: 'task_child1', status: 'completed', instruction: '子任务' })
-const threadTask = makeTask({ id: 'task_thread1', replyToTaskId: 'task_abc123', threadStep: 2 })
+const device = {
+  id: 'dev_1',
+  name: 'Mac mini',
+  nickname: '书房主力机',
+  online: true,
+  disabled: false,
+  platform: 'darwin',
+  kind: 'desktop',
+  status: 'busy',
+  load: { running: 1, max: 2 },
+  lastSeenAt: now,
+  capabilities: { models: [{ id: 'deepseek-chat' }], skills: [{ id: 'cli-exec' }] },
+}
 
-test('TaskRow renders the task id in both collapsed and expanded states', () => {
+function renderConsole(internals, overrides = {}) {
+  const { React, render, collect } = overrides.helpers
+  return {
+    html: render(React.createElement(internals.ConsoleTab, {
+      status: { hub: { running: true, origin: 'http://127.0.0.1:7317', owned: true, joinCode: 'join_x' } },
+      snapshot: {
+        stats: { devicesOnline: 1, devicesTotal: 1, tasksRunning: 1, tasksQueued: 2, tasksCompleted: 3, tasksFailed: 0 },
+        devices: [device],
+        tasks: [makeTask(), makeTask({ id: 'task_done', status: 'completed', instruction: '整理下载目录' })],
+      },
+      t,
+      busy: false,
+      message: '',
+      messageTone: '',
+      hubOrigin: 'http://127.0.0.1:7317',
+      onRefresh: noop,
+      onHub: noop,
+    })),
+    collect,
+  }
+}
+
+test('ConsoleTab renders a read-only dashboard with devices, stats and recent tasks', () => {
+  const internals = loadInternals().internals
+  const helpers = createMiniReact()
+  const { html } = renderConsole(internals, { helpers })
+  assert.match(html, /http:\/\/127\.0\.0\.1:7317/, 'dashboard shows the hub origin')
+  assert.match(html, /书房主力机/, 'dashboard shows the device nickname')
+  assert.match(html, /1\/1/, 'dashboard shows the online device count')
+  assert.match(html, /运行测试并只回答结果/, 'recent task list shows the instruction')
+  assert.match(html, /整理下载目录/, 'recent task list shows completed work')
+  // 面板已经简化：不再直接下发任务、也不再提供任务操作。
+  assert.doesNotMatch(html, /instructionPlaceholder/, 'no task composer on the dashboard')
+  assert.doesNotMatch(html, /manualStatus/, 'no manual status actions on the dashboard')
+  assert.doesNotMatch(html, /removeDevice|disableDevice/, 'no device management actions on the dashboard')
+})
+
+test('ConsoleTab links to the browser console through the plugin redirect route', () => {
+  const internals = loadInternals().internals
+  const helpers = createMiniReact()
+  const { html } = renderConsole(internals, { helpers })
+  assert.match(html, /openConsole/, 'the browser console entry is labelled')
+  const { React, collect } = helpers
+  const tree = React.createElement(internals.ConsoleTab, {
+    status: { hub: { running: true, origin: 'http://127.0.0.1:7317', owned: true } },
+    snapshot: { stats: {}, devices: [], tasks: [] },
+    t, busy: false, message: '', messageTone: '', hubOrigin: 'http://127.0.0.1:7317',
+    onRefresh: noop, onHub: noop,
+  })
+  const anchors = collect(tree, (node) => node.type === 'a')
+  assert.equal(anchors.length, 1, 'dashboard must render exactly one browser console link')
+  assert.equal(anchors[0].props.href, '/super-butler/api/dsh/open')
+  assert.equal(anchors[0].props.target, '_blank')
+  assert.equal(anchors[0].props.rel, 'noopener noreferrer')
+})
+
+test('the restart hub action works even when the Hub is an external process', () => {
+  const { React, collect, render, internals } = loadInternals()
+  const t = (key) => String(key)
+  const tree = React.createElement(internals.ConsoleTab, {
+    status: { hub: { running: true, origin: 'http://127.0.0.1:7317', owned: false } },
+    snapshot: { stats: {}, devices: [], tasks: [] },
+    t, busy: false, message: '', messageTone: '', hubOrigin: 'http://127.0.0.1:7317',
+    onRefresh: noop, onHub: noop,
+  })
+  const buttons = collect(tree, (node) => node.type === 'button')
+  const restart = buttons.find((node) => render(node.props.children) === 'restartHub')
+  assert.ok(restart, 'the dashboard exposes a restart action')
+  assert.equal(restart.props.disabled, false, 'restart stays clickable for an external Hub')
+  const stop = buttons.find((node) => render(node.props.children) === 'stop')
+  assert.ok(stop, 'stop is still shown')
+  assert.equal(stop.props.disabled, true, 'the plugin cannot stop an external Hub process')
+  assert.match(String(stop.props.title), /stopExternalHint/, 'the disabled stop button explains why')
+})
+
+test('DeviceCard is a read-only summary that shows the nickname and keeps the machine name', () => {
+  const { React, render, internals } = loadInternals()
+  const html = render(React.createElement(internals.DeviceCard, { device, t }))
+  assert.match(html, /书房主力机/)
+  assert.match(html, /machineName: Mac mini/)
+  assert.match(html, /deepseek-chat/)
+  assert.doesNotMatch(html, /saveName|disableDevice|removeDevice/, 'read-only card offers no editing actions')
+
+  const fallback = render(React.createElement(internals.DeviceCard, { device: { ...device, nickname: '' }, t }))
+  assert.match(fallback, /Mac mini/)
+  assert.doesNotMatch(fallback, /machineName/)
+})
+
+test('DeviceCard marks offline devices and hides capabilities when the device is bare', () => {
+  const { React, render, internals } = loadInternals()
+  const offline = render(React.createElement(internals.DeviceCard, {
+    device: { ...device, online: false, nickname: '', capabilities: {} }, t,
+  }))
+  assert.match(offline, /offline/)
+  assert.doesNotMatch(offline, /deepseek-chat/)
+})
+
+test('GuideTab teaches PC and phone worker setup with the live hub address and join code', () => {
+  const { React, render, collect, internals } = loadInternals()
+  const tree = React.createElement(internals.GuideTab, {
+    t, hubOrigin: 'http://127.0.0.1:7317', joinCode: 'join_demo',
+  })
+  const html = render(tree)
+  for (const key of ['guide', 'addPc', 'pcStep1', 'pcStep4', 'addPhoneWorker', 'phoneStep1', 'phoneStep5', 'phoneControl', 'ctrlStep1', 'guideTrouble', 'troubleOffline', 'guideDocs']) {
+    assert.match(html, new RegExp(key), `guide renders ${key}`)
+  }
+  assert.match(html, /http:\/\/127\.0\.0\.1:7317/, 'commands use the live hub address')
+  assert.match(html, /join_demo/, 'commands use the live join code')
+  assert.match(html, /\/m\?token=/, 'control client instructions point at the mobile console')
+  const pre = collect(tree, (node) => node.type === 'pre')
+  assert.ok(pre.length >= 4, 'commands are rendered as copyable code blocks')
+  assert.ok(pre.some((node) => /agent\.js --hub/.test(render(node.props.children))), 'agent start command is shown')
+})
+
+test('SettingsTab exposes the developer git push action', () => {
+  const { React, render, collect, internals } = loadInternals()
+  const tree = React.createElement(internals.SettingsTab, {
+    settings: {}, secrets: [], status: { hub: { running: true, joinCode: 'join_x' } },
+    t, onSave: async () => null, busy: false, message: '',
+  })
+  const html = render(tree)
+  assert.match(html, /devTools/, 'settings tab has a dev tools section')
+  assert.match(html, /gitPushHint/, 'the push button explains what it does')
+  const buttons = collect(tree, (node) => node.type === 'button')
+  const push = buttons.find((node) => node.props.children === 'gitPush')
+  assert.ok(push, 'settings tab renders the Git Push button')
+  assert.equal(push.props.disabled, false, 'the button is enabled when idle')
+})
+
+test('SettingsTab warns that keys fall back to the local file when credentials are unavailable', () => {
   const { React, render, internals } = loadInternals()
   const props = {
-    t,
-    tasks: [task, childTask, threadTask],
-    busy: false,
-    onAction: noop,
-    onToggle: noop,
-    onCopy: noop,
-    hostFeatures: ['task-status-cancel-first'],
+    settings: {}, secrets: [], status: { hub: { running: true, joinCode: 'join_x' } },
+    t, onSave: async () => null, busy: false, message: '',
   }
-
-  const collapsed = render(React.createElement(internals.TaskRow, { ...props, task, expanded: false }))
-  assert.match(collapsed, /task_abc123/, 'collapsed task row must show the task id')
-  assert.match(collapsed, /copy/, 'collapsed task row must offer a copy action')
-  assert.doesNotMatch(collapsed, /manualStatus/, 'detail actions stay hidden while collapsed')
-
-  const expanded = render(React.createElement(internals.TaskRow, { ...props, task, expanded: true }))
-  assert.match(expanded, /manualStatus/)
-  assert.match(expanded, /markCompleted/)
-  assert.match(expanded, /markFailed/)
-  assert.match(expanded, /events/)
-})
-
-test('TaskDetail renders metadata, manual status buttons and the event timeline', () => {
-  const { React, render, internals } = loadInternals()
-  const html = render(React.createElement(internals.TaskDetail, {
-    task, t, busy: false, onAction: noop, onCopy: noop, hostFeatures: ['task-status-cancel-first'],
+  const fallback = render(React.createElement(internals.SettingsTab, {
+    ...props, credentials: { available: false, storage: 'plugin-local' },
   }))
-  for (const expected of ['task_abc123', 'statusLabel', 'deviceLabel', 'attemptsLabel', 'manualStatus', 'markCompleted', 'markFailed', 'cancel', 'routeReason', 'created']) {
-    assert.match(html, new RegExp(expected))
-  }
-})
-
-test('TaskDetail hides completed/failed buttons that would be no-ops', () => {
-  const { React, render, internals } = loadInternals()
-  const completedTask = makeTask({ status: 'completed', output: { text: 'done' } })
-  const html = render(React.createElement(internals.TaskDetail, {
-    task: completedTask, t, busy: false, onAction: noop, onCopy: noop, hostFeatures: ['task-status-cancel-first'],
+  assert.match(fallback, /credentialsFallback/, 'local fallback is called out in the key section')
+  const harness = render(React.createElement(internals.SettingsTab, {
+    ...props, credentials: { available: true, storage: 'harness' },
   }))
-  assert.doesNotMatch(html, /markCompleted/)
-  assert.match(html, /markFailed/)
+  assert.doesNotMatch(harness, /credentialsFallback/, 'no warning while the credentials service is available')
 })
 
-test('TaskDetail disables forced finish until the host advertises cancel-first support', () => {
-  const { React, render, internals } = loadInternals()
-  const stale = render(React.createElement(internals.TaskDetail, { task, t, busy: false, onAction: noop, onCopy: noop }))
-  assert.match(stale, /statusRouteNeedsRestart/, 'stale host must show the restart hint')
-  assert.match(stale, /markCompleted/, 'the button still renders but is disabled')
-
-  const fresh = render(React.createElement(internals.TaskDetail, {
-    task, t, busy: false, onAction: noop, onCopy: noop, hostFeatures: ['task-status-cancel-first'],
-  }))
-  assert.doesNotMatch(fresh, /statusRouteNeedsRestart/)
-})
-
-test('TaskDetail does not offer manual status on Agnes plan parents', () => {
-  const { React, render, internals } = loadInternals()
-  const planTask = makeTask({ isPlan: true, status: 'running' })
-  const html = render(React.createElement(internals.TaskDetail, { task: planTask, t, busy: false, onAction: noop, onCopy: noop }))
-  assert.doesNotMatch(html, /markCompleted/)
-  assert.doesNotMatch(html, /markFailed/)
-  assert.doesNotMatch(html, /requeue/)
-  assert.match(html, /planStatusHint/)
-  assert.match(html, /cancel/)
-})
-
-test('Dialog renders message, input and confirm button', () => {
-  const { React, render, internals } = loadInternals()
-  const html = render(React.createElement(internals.Dialog, {
-    modal: {
-      title: '继续',
-      message: '继续会创建一个新任务',
-      input: { multiline: true, rows: 4, placeholder: '下一步', required: true },
-      value: '再跑一次',
-      confirmLabel: '继续',
-    },
-    busy: false,
-    t,
-    onChange: noop,
-    onCancel: noop,
-    onConfirm: noop,
-  }))
-  assert.match(html, /继续/)
-  assert.match(html, /dialogCancel/)
-  // textarea 的值是受控 prop，不会出现在无 DOM 渲染结果里，检查元素树本身。
-  const textareas = []
-  const walk = (node) => {
-    if (!node || typeof node !== 'object') return
-    if (node.props && node.props.value === '再跑一次') textareas.push(node)
-    const children = node.props && node.props.children
-    if (Array.isArray(children)) children.forEach(walk)
-    else walk(children)
-  }
-  walk(internals.Dialog({
-    modal: {
-      title: '继续',
-      message: '继续会创建一个新任务',
-      input: { multiline: true, rows: 4, placeholder: '下一步', required: true },
-      value: '再跑一次',
-      confirmLabel: '继续',
-    },
-    busy: false,
-    t,
-    onChange: noop,
-    onCancel: noop,
-    onConfirm: noop,
-  }))
-  assert.equal(textareas.length, 1, 'dialog must render a controlled textarea with the typed value')
-})
-
-test('Dialog shows the required-input error and labels its close button', () => {
-  const { React, render, internals } = loadInternals()
-  const html = render(React.createElement(internals.Dialog, {
-    modal: {
-      title: '继续',
-      message: '继续会创建一个新任务',
-      input: { multiline: true, rows: 4, placeholder: '下一步', required: true },
-      value: '',
-      error: 'inputRequired',
-      confirmLabel: '继续',
-    },
-    busy: false,
-    t,
-    onChange: noop,
-    onCancel: noop,
-    onConfirm: noop,
-  }))
-  assert.match(html, /inputRequired/)
-  assert.match(html, /dialogCancel/)
-})
-
-test('ConsoleTab renders devices and the task list without throwing', () => {
-  const { React, render, internals } = loadInternals()
+test('ConsoleTab reports the stopped hub and still exposes the browser console link', () => {
+  const internals = loadInternals().internals
+  const { React, render } = createMiniReact()
   const html = render(React.createElement(internals.ConsoleTab, {
-    status: { hub: { running: true, origin: 'http://127.0.0.1:7317', owned: true, joinCode: 'join_x' } },
-    snapshot: {
-      stats: { devicesOnline: 1, devicesTotal: 1, tasksRunning: 1, tasksQueued: 0, tasksCompleted: 0, tasksFailed: 0 },
-      devices: [{
-        id: 'dev_1', name: 'Mac mini', online: true, disabled: false, platform: 'darwin', kind: 'desktop',
-        status: 'busy', load: { running: 1, max: 2 }, lastSeenAt: now,
-        capabilities: { models: [{ id: 'deepseek-chat' }], skills: [{ id: 'cli-exec' }], profiles: [{ id: 'hermes' }] },
-      }],
-      tasks: [task, childTask, threadTask],
-    },
-    t,
-    onRefresh: noop,
-    onHub: noop,
-    onTaskAction: noop,
-    onSend: async () => {},
-    onRenameDevice: noop,
-    onRemoveDevice: noop,
-    onToggleDevice: noop,
-    onToggleTask: noop,
-    onCopyText: noop,
-    expandedTasks: { task_abc123: true },
-    hostFeatures: ['task-status-cancel-first'],
-    hubOrigin: 'http://127.0.0.1:7317',
-    busy: false,
-    message: '已创建任务',
-    messageTone: 'error',
+    status: { hub: { running: false, origin: 'http://127.0.0.1:7317', owned: false } },
+    snapshot: null,
+    t, busy: false, message: 'stopped', messageTone: '', hubOrigin: 'http://127.0.0.1:7317',
+    onRefresh: noop, onHub: noop,
   }))
-  assert.match(html, /Mac mini/)
-  assert.match(html, /task_abc123/)
-  assert.match(html, /manualStatus/)
+  assert.match(html, /stopped/)
+  assert.match(html, /noDevices/)
+  assert.match(html, /openConsole/)
 })

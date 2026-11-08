@@ -6,6 +6,7 @@
  */
 
 const path = require('node:path');
+const os = require('node:os');
 
 const protocol = require('../../shared/protocol.js');
 const { createHttpServer } = require('./http');
@@ -13,6 +14,7 @@ const { StateStore } = require('./store');
 const { badRequest, notFound, conflict } = require('./errors');
 const { createPlan } = require('./planner');
 const { writeTaskRecord, writeTaskIndex } = require('./task-record');
+const preflight = require('./preflight');
 const {
   DEFAULT_SETTINGS,
   SUPPORTED_LANGUAGES,
@@ -26,10 +28,19 @@ const {
   MAX_CHECKS,
   buildGoalCheckInstruction,
   computeNextCheckAt,
+  goalDisplayName,
   goalToJson,
   normalizeGoalRequest,
   restoreGoal,
 } = require('./goals');
+const {
+  DEFAULT_NOTIFY_STYLE,
+  nextDueAt,
+  normalizeReminderRequest,
+  reminderDisplayName,
+  reminderToJson,
+  restoreReminder,
+} = require('./reminders');
 const util = require('./util');
 
 const { LIMITS, TASK_STATUS } = protocol;
@@ -41,6 +52,15 @@ const TERMINAL_TASK_STATUSES = new Set([
   TASK_STATUS.TIMEOUT,
 ]);
 const DEVICE_STATUSES = new Set(['idle', 'busy', 'degraded', 'offline']);
+
+/** 设备昵称是用户在本机设置的用途标签，与设备自报的 name 分开保存（重报 manifest 不会覆盖）。 */
+const MAX_DEVICE_NICKNAME_LENGTH = 40;
+
+/** 设备展示名：用户昵称优先，其次设备自报名称，最后回退设备 id。 */
+function deviceDisplayName(device) {
+  if (!device) return '';
+  return device.nickname || device.name || device.id || '';
+}
 const TASK_MESSAGES = {
   completed: '任务完成',
   failed: '任务失败',
@@ -65,6 +85,29 @@ function normalizeOutput(input) {
   }
   if (input.data !== undefined) out.data = input.data;
   return Object.keys(out).length ? out : null;
+}
+
+/** 归一化 HH:mm（非法值回退到 fallback）。 */
+function normalizeClockTime(value, fallback) {
+  const text = util.str(value, 10).trim();
+  const match = /^([01]?\d|2[0-3]):([0-5]\d)$/.exec(text);
+  if (!match) return fallback;
+  return `${String(Number(match[1])).padStart(2, '0')}:${match[2]}`;
+}
+
+/** 本地时区（用于每日总结的日期键与说明）。 */
+function localTimeZone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'local';
+  } catch {
+    return 'local';
+  }
+}
+
+/** 本地日期键 YYYY-MM-DD。 */
+function localDateKey(date = new Date()) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
 class Hub {
@@ -122,6 +165,22 @@ class Hub {
         : path.join(this.dataDir, 'task-records'),
     );
     this.recordEnabled = options.recordEnabled !== false;
+    // 本地文件预检（A 方案）：任务提到本机文件时，自动把任务固定到「本机」设备执行。
+    // 设置 options.preflight = false 或环境变量 BUTLER_PREFLIGHT=0 可关闭。
+    const preflightOptions = util.isPlainObject(options.preflight) ? options.preflight : {};
+    this.preflightEnabled =
+      options.preflight !== false &&
+      preflightOptions.enabled !== false &&
+      process.env.BUTLER_PREFLIGHT !== '0';
+    this.preflightRoots = Array.isArray(preflightOptions.roots)
+      ? preflightOptions.roots.filter((root) => typeof root === 'string' && root.trim())
+      : null;
+    this.preflightMaxDepth = util.clampInt(preflightOptions.maxDepth, 3, 1, 8);
+    this.preflightTimeoutMs = util.clampInt(preflightOptions.timeoutMs, 250, 10, 5000);
+    this.preflightMaxMatches = util.clampInt(preflightOptions.maxMatches, 3, 1, 10);
+    this.localDeviceId =
+      util.str(options.localDeviceId, 80) || util.str(process.env.BUTLER_LOCAL_DEVICE_ID, 80) || null;
+    this._preflightCache = new Map();
     this._recordTimers = new Map();
     this._recordIndexTimer = null;
     this._recordWarned = false;
@@ -131,6 +190,25 @@ class Hub {
     this.goalTickMs = util.clampInt(options.goalTickMs, 30000, 1000, 3600 * 1000);
     this.goals = new Map();
     this._goalTimer = null;
+    // 提醒：数据存 Hub，到点通知由 APK 原生 AlarmManager 负责，Hub 不做轮询调度。
+    this.reminders = new Map();
+    // 每晚总结：每天 nightlyReviewTime 自动创建一次「每日总结」任务，复盘目标/任务进度并规划次日方向。
+    this.nightlyReviewEnabled =
+      options.nightlyReview !== false && String(process.env.BUTLER_NIGHTLY_REVIEW || '') !== '0';
+    this.nightlyReviewTime = normalizeClockTime(
+      util.str(options.nightlyReviewTime, 10) || process.env.BUTLER_NIGHTLY_REVIEW_TIME,
+      '22:00',
+    );
+    this.nightlyReview = {
+      date: null,
+      taskId: null,
+      status: null,
+      startedAt: null,
+      finishedAt: null,
+      summary: '',
+      error: null,
+      lastSkipReason: '',
+    };
 
     this.adminToken =
       util.str(options.adminToken, 300) || util.str(process.env.BUTLER_ADMIN_TOKEN, 300) || null;
@@ -185,6 +263,12 @@ class Hub {
       const goal = restoreGoal(raw);
       if (goal) this.goals.set(goal.id, goal);
     }
+    // 提醒只做容错恢复；到点通知由 APK 负责，Hub 启动时不补发、不轮询。
+    for (const raw of util.arr(savedObj.reminders)) {
+      const reminder = restoreReminder(raw);
+      if (reminder) this.reminders.set(reminder.id, reminder);
+    }
+    this.nightlyReview = this._restoreNightlyReview(savedObj.nightlyReview);
     for (const raw of util.arr(savedObj.devices)) {
       const device = this._restoreDevice(raw);
       if (device) this.devices.set(device.id, device);
@@ -258,7 +342,10 @@ class Hub {
     if (this._sweepTimer.unref) this._sweepTimer.unref();
     this._pingTimer = setInterval(() => this._pingClients(), this.pingIntervalMs);
     if (this._pingTimer.unref) this._pingTimer.unref();
-    this._goalTimer = setInterval(() => this.runDueGoalChecks(), this.goalTickMs);
+    this._goalTimer = setInterval(() => {
+      this.runDueGoalChecks();
+      this.runNightlyReview();
+    }, this.goalTickMs);
     if (this._goalTimer.unref) this._goalTimer.unref();
 
     // 兼容旧数据：历史规划子任务可能只有 60/90/180s 的超时，按新规则抬高（终态任务保持原样）。
@@ -398,6 +485,7 @@ class Hub {
         id: device.id,
         deviceToken: device.deviceToken,
         name: device.name,
+        nickname: device.nickname || '',
         platform: device.platform,
         kind: device.kind,
         agentVersion: device.agentVersion,
@@ -413,6 +501,8 @@ class Hub {
         attachments: (task.attachments || []).map((file) => ({ ...file })),
       })),
       goals: [...this.goals.values()].map((goal) => goalToJson(goal)),
+      reminders: [...this.reminders.values()].map((reminder) => reminderToJson(reminder)),
+      nightlyReview: { ...this.nightlyReview },
       events: this.events.slice(-this.eventLimit),
     };
   }
@@ -433,6 +523,7 @@ class Hub {
       id,
       deviceToken: util.str(raw.deviceToken, 300),
       name: util.str(raw.name, LIMITS.MAX_NAME_LENGTH) || id,
+      nickname: util.str(raw.nickname, MAX_DEVICE_NICKNAME_LENGTH),
       platform: util.str(raw.platform, 20) || 'other',
       kind: util.str(raw.kind, 30) || 'custom',
       agentVersion: util.str(raw.agentVersion, 40),
@@ -512,6 +603,7 @@ class Hub {
       isPlan: raw.isPlan === true,
       archived: raw.archived === true,
       archivedAt: util.str(raw.archivedAt, 40) || null,
+      routingAdvice: this.normalizeRoutingAdvice(raw.routingAdvice),
       _avoidDeviceIds: [],
     };
   }
@@ -522,6 +614,7 @@ class Hub {
     return {
       id: device.id,
       name: device.name,
+      nickname: device.nickname || '',
       platform: device.platform,
       kind: device.kind,
       agentVersion: device.agentVersion,
@@ -574,6 +667,7 @@ class Hub {
       goalId: task.goalId || null,
       archived: Boolean(task.archived),
       archivedAt: task.archivedAt || null,
+      routingAdvice: task.routingAdvice ? JSON.parse(JSON.stringify(task.routingAdvice)) : null,
       route: {
         reason: task.route.reason,
         candidates: task.route.candidates.map((c) => ({ ...c })),
@@ -628,6 +722,8 @@ class Hub {
       devices,
       tasks,
       goals: this.listGoals(),
+      reminders: this.listReminders(),
+      nightlyReview: this.getNightlyReview(),
       events: this.events.slice(-safeLimit).map((event) => ({ ...event })),
     };
   }
@@ -707,6 +803,7 @@ class Hub {
     const goal = {
       id: protocol.randomId('goal'),
       title: value.title,
+      nickname: value.nickname || '',
       description: value.description || '',
       status,
       schedule: value.schedule,
@@ -717,6 +814,7 @@ class Hub {
       lastSummary: '',
       lastTaskId: null,
       runningTaskId: null,
+      pendingApproval: null,
       taskIds: [],
       checks: [],
       createdAt: now,
@@ -725,7 +823,7 @@ class Hub {
     };
     this.goals.set(goal.id, goal);
     this.broadcast('goal.created', { goal: goalToJson(goal), at: now });
-    this.log('info', `长期目标创建：${goal.id}「${util.truncate(goal.title, 40)}」`);
+    this.log('info', `长期目标创建：${goal.id}「${util.truncate(goalDisplayName(goal), 40)}」`);
     this.schedulePersist();
     return goal;
   }
@@ -738,6 +836,7 @@ class Hub {
     const now = protocol.nowIso();
     const previousStatus = goal.status;
     if (value.title !== undefined) goal.title = value.title;
+    if (value.nickname !== undefined) goal.nickname = value.nickname;
     if (value.description !== undefined) goal.description = value.description;
     if (value.requirements !== undefined) goal.requirements = value.requirements;
     let scheduleChanged = false;
@@ -758,6 +857,8 @@ class Hub {
     } else if (scheduleChanged && goal.status === 'active') {
       goal.nextCheckAt = computeNextCheckAt(goal.schedule);
     }
+    // 状态变化后旧的「待确认跟进」提案失效，避免恢复 active 时误批。
+    if (value.status !== undefined) goal.pendingApproval = null;
     goal.updatedAt = now;
     this.broadcast('goal.updated', { goal: goalToJson(goal), at: now });
     if (previousStatus !== goal.status) this.log('info', `长期目标状态：${goal.id} ${previousStatus} → ${goal.status}`);
@@ -774,6 +875,120 @@ class Hub {
     this.log('info', `长期目标删除：${goal.id}`);
     this.schedulePersist();
     return goal;
+  }
+
+  // ---------------------------------------------------------------- 提醒
+
+  _requireReminder(reminderId) {
+    const id = util.str(reminderId, 80);
+    const reminder = id ? this.reminders.get(id) : null;
+    if (!reminder) throw notFound('提醒不存在');
+    return reminder;
+  }
+
+  /** 列出提醒（dueAt 升序；同一到期时间按 createdAt 升序，APK 与 Web 共用）。 */
+  listReminders() {
+    return [...this.reminders.values()]
+      .sort((a, b) => {
+        const byDue = a.dueAt - b.dueAt;
+        if (byDue) return byDue;
+        return String(a.createdAt).localeCompare(String(b.createdAt));
+      })
+      .map((reminder) => reminderToJson(reminder));
+  }
+
+  getReminder(reminderId) {
+    return reminderToJson(this._requireReminder(reminderId));
+  }
+
+  createReminder(input) {
+    const normalized = normalizeReminderRequest(input, { partial: false });
+    if (!normalized.ok) throw badRequest(normalized.errors.join('；'));
+    const value = normalized.value;
+    const now = protocol.nowIso();
+    const reminder = {
+      id: protocol.randomId('rem'),
+      title: value.title,
+      note: value.note || '',
+      dueAt: value.dueAt,
+      repeat: value.repeat || 'none',
+      notifyStyle: value.notifyStyle || DEFAULT_NOTIFY_STYLE,
+      enabled: value.enabled !== false,
+      createdAt: now,
+      updatedAt: now,
+      lastFiredAt: null,
+      fireCount: 0,
+    };
+    this.reminders.set(reminder.id, reminder);
+    this.broadcast('reminder.created', { reminder: reminderToJson(reminder), at: now });
+    this.log('info', `提醒创建：${reminder.id}「${util.truncate(reminderDisplayName(reminder), 40)}」`);
+    this.schedulePersist();
+    return reminder;
+  }
+
+  updateReminder(reminderId, patch) {
+    const reminder = this._requireReminder(reminderId);
+    const normalized = normalizeReminderRequest(patch, { partial: true, base: reminder });
+    if (!normalized.ok) throw badRequest(normalized.errors.join('；'));
+    const value = normalized.value;
+    if (value.title !== undefined) reminder.title = value.title;
+    if (value.note !== undefined) reminder.note = value.note;
+    if (value.dueAt !== undefined) reminder.dueAt = value.dueAt;
+    if (value.repeat !== undefined) reminder.repeat = value.repeat;
+    if (value.notifyStyle !== undefined) reminder.notifyStyle = value.notifyStyle;
+    if (value.enabled !== undefined) reminder.enabled = value.enabled;
+    // 显式 enabled:true 且 dueAt 已过期时不自动改 dueAt：过期由客户端表单处理，避免 Hub 擅自跳期。
+    const now = protocol.nowIso();
+    reminder.updatedAt = now;
+    this.broadcast('reminder.updated', { reminder: reminderToJson(reminder), at: now });
+    this.log('info', `提醒更新：${reminder.id}`);
+    this.schedulePersist();
+    return reminder;
+  }
+
+  deleteReminder(reminderId) {
+    const reminder = this._requireReminder(reminderId);
+    this.reminders.delete(reminder.id);
+    const now = protocol.nowIso();
+    this.broadcast('reminder.deleted', { reminderId: reminder.id, at: now });
+    this.log('info', `提醒删除：${reminder.id}`);
+    this.schedulePersist();
+    return reminder;
+  }
+
+  /**
+   * APK 回写到点事件（通知由 APK 原生层弹出，Hub 只更新数据并广播）。
+   *
+   * one-shot：enabled=false，dueAt 保留原值。
+   * daily/weekly：dueAt 推进到下一次（> firedAt 且 > 当前时间），enabled=true，fireCount+1。
+   *
+   * @param {string} reminderId
+   * @param {{firedAt?: string}} [options] firedAt 为 ISO 字符串，缺省/非法时用当前时间
+   * @returns {object} 内部提醒对象
+   */
+  fireReminder(reminderId, { firedAt } = {}) {
+    const reminder = this._requireReminder(reminderId);
+    let firedAtMs = Date.now();
+    if (typeof firedAt === 'string' && firedAt.trim()) {
+      const parsed = Date.parse(firedAt);
+      if (Number.isFinite(parsed)) firedAtMs = parsed;
+    }
+    const now = protocol.nowIso();
+    reminder.lastFiredAt = now;
+    reminder.fireCount = (Number.isFinite(reminder.fireCount) ? reminder.fireCount : 0) + 1;
+    if (reminder.repeat === 'none' || !reminder.repeat) {
+      reminder.enabled = false;
+    } else {
+      const from = Math.max(firedAtMs, Date.now());
+      const next = nextDueAt(reminder.dueAt, reminder.repeat, from);
+      if (next !== null) reminder.dueAt = next;
+      reminder.enabled = true;
+    }
+    reminder.updatedAt = now;
+    this.broadcast('reminder.fired', { reminder: reminderToJson(reminder), at: now });
+    this.log('info', `提醒触发：${reminder.id}（${reminder.repeat}，下一次 ${new Date(reminder.dueAt).toISOString()}）`);
+    this.schedulePersist();
+    return reminder;
   }
 
   /**
@@ -793,6 +1008,8 @@ class Hub {
       }
       goal.runningTaskId = null;
     }
+    // 手动/已批准的跟进视为用户已同意，清掉旧的待确认提案。
+    goal.pendingApproval = null;
     const manual = options.manual !== false;
     const task = this.createTask({
       instruction: buildGoalCheckInstruction(goal),
@@ -805,7 +1022,7 @@ class Hub {
       context: {
         goalId: goal.id,
         goalCheck: true,
-        goalTitle: goal.title,
+        goalTitle: goalDisplayName(goal),
         trigger: manual ? 'manual' : 'schedule',
       },
     });
@@ -818,6 +1035,308 @@ class Hub {
     this.log('info', `长期目标跟进任务：${goal.id} → ${task.id}（${manual ? '手动' : '定时'}）`);
     this.schedulePersist();
     return { goal, task };
+  }
+
+  /**
+   * 把一个已有任务关联到长期目标。
+   * - 任务 goalId 指向目标，并加入 goal.taskIds；
+   * - 任务已结束时，把它的结论写入目标（lastSummary / lastTaskId / checks），
+   *   这样下一次跟进任务会带着这段结论继续。
+   * @param {string} goalId
+   * @param {string} taskId
+   * @returns {{goal: object, task: object}}
+   */
+  linkGoalTask(goalId, taskId) {
+    const goal = this._requireGoal(goalId);
+    const task = this._requireTask(util.str(taskId, 80));
+    const now = protocol.nowIso();
+    if (!goal.taskIds.includes(task.id)) {
+      goal.taskIds.push(task.id);
+      if (goal.taskIds.length > 50) goal.taskIds.splice(0, goal.taskIds.length - 50);
+    }
+    task.goalId = goal.id;
+    task.updatedAt = now;
+    if (TERMINAL_TASK_STATUSES.has(task.status)) {
+      const output = util.isPlainObject(task.output) ? task.output : null;
+      const summary = util.str(
+        (output && (output.text || output.markdown)) || (task.error ? `执行失败：${task.error}` : ''),
+        4000,
+      );
+      const at = task.finishedAt || now;
+      if (!goal.checks.some((check) => check && check.taskId === task.id)) {
+        goal.checks.push({
+          at,
+          taskId: task.id,
+          status: task.status,
+          summary,
+          error: task.error || null,
+        });
+        if (goal.checks.length > MAX_CHECKS) goal.checks.splice(0, goal.checks.length - MAX_CHECKS);
+      }
+      goal.lastCheckAt = at;
+      goal.lastCheckStatus = task.status;
+      goal.lastTaskId = task.id;
+      goal.lastSummary = summary;
+      if (goal.status === 'active') {
+        goal.nextCheckAt = computeNextCheckAt(goal.schedule, Date.now());
+      }
+    } else {
+      goal.runningTaskId = task.id;
+    }
+    goal.updatedAt = now;
+    this.broadcast('goal.updated', { goal: goalToJson(goal), at: now });
+    this.broadcast('task.updated', { task: this.taskToJson(task) });
+    this.log('info', `长期目标关联任务：${goal.id} ← ${task.id}`);
+    this.schedulePersist();
+    return { goal, task };
+  }
+
+  /**
+   * 为一个到点的目标创建「待确认」提案：用户同意后才创建跟进任务。
+   * @param {object} goal
+   * @param {{source?: string}} [options]
+   * @returns {{id:string, at:string, reason:string, instruction:string, source:string}}
+   */
+  requestGoalApproval(goal, { source = 'schedule' } = {}) {
+    const now = protocol.nowIso();
+    const scheduleText =
+      goal.schedule && goal.schedule.type === 'interval'
+        ? `每 ${goal.schedule.minutes} 分钟`
+        : `每天 ${goal.schedule && goal.schedule.time ? goal.schedule.time : '09:00'}`;
+    goal.pendingApproval = {
+      id: protocol.randomId('appr'),
+      at: now,
+      reason: source === 'schedule' ? `到点跟进（${scheduleText}）` : '手动发起',
+      instruction: buildGoalCheckInstruction(goal),
+      source,
+    };
+    goal.updatedAt = now;
+    this.broadcast('goal.updated', { goal: goalToJson(goal), at: now });
+    this.broadcast('goal.approval', {
+      goalId: goal.id,
+      approval: { ...goal.pendingApproval },
+      at: now,
+    });
+    this.log('info', `目标跟进待确认：${goal.id}「${util.truncate(goalDisplayName(goal), 40)}」`);
+    this.schedulePersist();
+    return goal.pendingApproval;
+  }
+
+  /** 列出所有等待用户确认的目标跟进。 */
+  listApprovals() {
+    return [...this.goals.values()]
+      .filter((goal) => goal.pendingApproval)
+      .map((goal) => ({
+        goalId: goal.id,
+        goalTitle: goalDisplayName(goal),
+        createdAt: goal.pendingApproval.at,
+        approval: { ...goal.pendingApproval },
+      }))
+      .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+  }
+
+  /** 用户同意目标跟进：创建跟进任务。 */
+  approveGoalCheck(goalId) {
+    const goal = this._requireGoal(goalId);
+    if (!goal.pendingApproval) throw conflict('该目标没有待确认的跟进');
+    goal.pendingApproval = null;
+    return this.requestGoalCheck(goalId, { manual: true });
+  }
+
+  /** 用户否决目标跟进：清掉提案并暂缓目标，等用户下一步指令。 */
+  rejectGoalCheck(goalId) {
+    const goal = this._requireGoal(goalId);
+    if (!goal.pendingApproval) throw conflict('该目标没有待确认的跟进');
+    goal.pendingApproval = null;
+    goal.status = 'paused';
+    goal.nextCheckAt = null;
+    goal.updatedAt = protocol.nowIso();
+    this.broadcast('goal.updated', { goal: goalToJson(goal), at: goal.updatedAt });
+    this.log('info', `目标跟进被否决，已暂缓：${goal.id}「${util.truncate(goalDisplayName(goal), 40)}」`);
+    this.schedulePersist();
+    return goalToJson(goal);
+  }
+
+  // ---------------------------------------------------------------- 每晚总结
+
+  /** 生成「每日总结」任务指令：复盘所有目标与任务/子任务进度，规划明天的方向。 */
+  _buildNightlyReviewInstruction(dateKey) {
+    const goals = this.listGoals();
+    const lines = [
+      `【每日夜间总结】日期：${dateKey}（${localTimeZone()}）`,
+      '现在是晚间复盘时间：请只做分析与规划，不要执行任务、不要修改文件、不要访问外部网站。',
+      '',
+      `## 长期目标（${goals.length} 个）`,
+    ];
+    goals.forEach((goal, index) => {
+      const scheduleText =
+        goal.schedule && goal.schedule.type === 'interval'
+          ? `每 ${goal.schedule.minutes} 分钟`
+          : `每天 ${goal.schedule && goal.schedule.time ? goal.schedule.time : '09:00'}`;
+      const name = goalDisplayName(goal);
+      const titleNote = goal.nickname && goal.nickname !== goal.title ? `（标题：${goal.title}）` : '';
+      lines.push(
+        `${index + 1}. ${name}${titleNote}（${goal.id}）｜状态 ${goal.status}｜计划 ${scheduleText}｜上次检查 ${goal.lastCheckAt || '无'}（${goal.lastCheckStatus || '无'}）`,
+      );
+      if (goal.description) lines.push(`   描述：${util.truncate(goal.description, 300)}`);
+      if (goal.lastSummary) lines.push(`   上次结论：${util.truncate(goal.lastSummary, 800)}`);
+      const recent = goal.checks
+        .slice(-2)
+        .map((check) => `   - ${check.at}（${check.status}）：${util.truncate(check.summary || check.error || '', 160)}`);
+      if (recent.length) lines.push('   最近检查记录：', ...recent);
+      if (goal.pendingApproval) {
+        lines.push(`   待确认跟进：${util.truncate(goal.pendingApproval.reason || '', 120)}`);
+      }
+    });
+
+    const cutoff = Date.now() - 24 * 3600 * 1000;
+    const tasks = [...this.tasks.values()]
+      .filter((task) => {
+        if (task.archived) return false;
+        if (ACTIVE_TASK_STATUSES.has(task.status)) return true;
+        const created = Date.parse(task.createdAt);
+        return Number.isFinite(created) && created >= cutoff;
+      })
+      .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
+      .slice(-40);
+    lines.push('', `## 今天的任务与子任务（${tasks.length} 个）`);
+    for (const task of tasks) {
+      const parent = task.parentTaskId ? `｜父任务 ${task.parentTaskId}` : '';
+      lines.push(
+        `- ${task.id}｜${task.status}｜${task.assignedDeviceName || '未分配'}${parent}｜${util.truncate(task.instruction, 120)}`,
+      );
+      const output = util.isPlainObject(task.output) ? task.output.text || task.output.markdown : '';
+      if (output) lines.push(`  结果摘要：${util.truncate(output, 200)}`);
+      if (task.error) lines.push(`  错误：${util.truncate(task.error, 160)}`);
+      if (task.progress && task.progress.message) {
+        lines.push(`  最新进度：${util.truncate(task.progress.message, 120)}`);
+      }
+    }
+
+    const approvals = this.listApprovals();
+    lines.push('', `## 等待老板确认的目标跟进（${approvals.length} 个）`);
+    for (const item of approvals) {
+      lines.push(`- ${item.goalTitle}（${item.goalId}）：${util.truncate(item.approval.reason || '', 120)}`);
+    }
+
+    lines.push(
+      '',
+      '请输出一份中文 Markdown，结构如下：',
+      `# 每日总结 ${dateKey}`,
+      '## 1. 目标进度（逐个目标：已完成 / 进行中 / 受阻，并给出依据）',
+      '## 2. 任务与子任务复盘（今天的完成 / 失败 / 取消 / 滞留，瓶颈与原因）',
+      '## 3. 明天的工作方向（按目标分组，具体动作、优先级、预计产出）',
+      '## 4. 需要老板确认的事项（明天每个目标执行前的批准点）',
+      '## 5. 目标下一步细节（每个目标 1-3 条可执行动作 + 验收标准）',
+      '不要执行任何操作，只输出总结。',
+    );
+    return lines.join('\n').slice(0, 16000);
+  }
+
+  getNightlyReview() {
+    const review = this.nightlyReview || {};
+    const task = review.taskId ? this.tasks.get(review.taskId) : null;
+    return {
+      enabled: this.nightlyReviewEnabled,
+      time: this.nightlyReviewTime,
+      date: review.date || null,
+      taskId: review.taskId || null,
+      status: review.status || null,
+      startedAt: review.startedAt || null,
+      finishedAt: review.finishedAt || null,
+      summary: review.summary || '',
+      error: review.error || null,
+      task: task ? this.taskToJson(task) : null,
+    };
+  }
+
+  _restoreNightlyReview(raw) {
+    const empty = {
+      date: null,
+      taskId: null,
+      status: null,
+      startedAt: null,
+      finishedAt: null,
+      summary: '',
+      error: null,
+      lastSkipReason: '',
+    };
+    if (!util.isPlainObject(raw)) return empty;
+    return {
+      date: util.str(raw.date, 20) || null,
+      taskId: util.str(raw.taskId, 80) || null,
+      status: util.str(raw.status, 40) || null,
+      startedAt: util.str(raw.startedAt, 40) || null,
+      finishedAt: util.str(raw.finishedAt, 40) || null,
+      summary: util.str(raw.summary, 20000) || '',
+      error: raw.error ? util.str(raw.error, 4000) : null,
+      lastSkipReason: util.str(raw.lastSkipReason, 200) || '',
+    };
+  }
+
+  /**
+   * 到点创建「每日总结」任务（每晚一次）。
+   * @param {number} [now]
+   * @param {{force?: boolean}} [options] force=true 时忽略「今天已总结/未到点」，供手动触发。
+   * @returns {object|null} 新建的任务；未触发时返回 null。
+   */
+  runNightlyReview(now = Date.now(), options = {}) {
+    if (this._closed) return null;
+    const force = options.force === true;
+    if (!this.nightlyReviewEnabled && !force) return null;
+    const at = new Date(Number(now) || Date.now());
+    const dateKey = localDateKey(at);
+    const review = this.nightlyReview || {};
+    const activeTask = review.taskId ? this.tasks.get(review.taskId) : null;
+    if (activeTask && ACTIVE_TASK_STATUSES.has(activeTask.status)) return null;
+    if (!force) {
+      if (review.date === dateKey) return null;
+      const [hour, minute] = this.nightlyReviewTime.split(':').map(Number);
+      const due = new Date(at);
+      due.setHours(hour, minute, 0, 0);
+      if (at.getTime() < due.getTime()) return null;
+    }
+    const task = this.createTask({
+      instruction: this._buildNightlyReviewInstruction(dateKey),
+      requirements: {},
+      priority: 6,
+      timeoutSec: 900,
+      maxAttempts: 2,
+      autoRetry: true,
+      context: { nightlyReview: true, date: dateKey },
+    });
+    this.nightlyReview = {
+      date: dateKey,
+      taskId: task.id,
+      status: task.status,
+      startedAt: task.createdAt,
+      finishedAt: null,
+      summary: '',
+      error: null,
+      lastSkipReason: '',
+    };
+    this.broadcast('nightly.review.updated', { review: this.getNightlyReview() });
+    this.log('info', `每日总结任务已创建：${task.id}（${dateKey}）`);
+    this.schedulePersist();
+    return task;
+  }
+
+  _nightlyReviewFinished(task) {
+    if (!this.nightlyReview || this.nightlyReview.taskId !== task.id) return;
+    const output = util.isPlainObject(task.output) ? task.output : null;
+    this.nightlyReview.status = task.status;
+    this.nightlyReview.finishedAt = task.finishedAt || protocol.nowIso();
+    this.nightlyReview.summary = util.str(
+      (output && (output.text || output.markdown)) || '',
+      20000,
+    );
+    this.nightlyReview.error = task.error || null;
+    this.broadcast('nightly.review.updated', { review: this.getNightlyReview() });
+    this.log(
+      task.status === 'completed' ? 'info' : 'warn',
+      `每日总结${task.status === 'completed' ? '完成' : '未完成'}：${task.id}`,
+    );
+    this.schedulePersist();
   }
 
   /** 调度器：扫描到点的 active 目标并创建跟进任务；返回本次触发的目标 id。 */
@@ -834,8 +1353,10 @@ class Hub {
         if (running && !TERMINAL_TASK_STATUSES.has(running.status)) continue;
         goal.runningTaskId = null;
       }
+      // 目标每次执行前都要老板确认：已有待确认提案时保持不动，等用户批准/否决。
+      if (goal.pendingApproval) continue;
       try {
-        this.requestGoalCheck(goal.id, { manual: false });
+        this.requestGoalApproval(goal, { source: 'schedule' });
         triggered.push(goal.id);
       } catch (err) {
         this.log('warn', `长期目标自动跟进失败：${goal.id}：${err && err.message ? err.message : err}`);
@@ -879,6 +1400,7 @@ class Hub {
     });
     if (goal.checks.length > MAX_CHECKS) goal.checks.splice(0, goal.checks.length - MAX_CHECKS);
     goal.runningTaskId = null;
+    goal.pendingApproval = null;
     goal.lastCheckAt = at;
     goal.lastCheckStatus = task.status;
     goal.lastTaskId = task.id;
@@ -1084,6 +1606,7 @@ class Hub {
   }
 
   _applyManifest(device, manifest) {
+    // name 是设备自报的机器名，随 manifest 刷新；nickname 是用户在 Hub 侧设置的用途标签，不在这里改动。
     device.name = manifest.name;
     device.platform = manifest.platform;
     device.kind = manifest.kind;
@@ -1113,6 +1636,7 @@ class Hub {
       id: protocol.randomId('dev'),
       deviceToken: util.generateToken('dtok'),
       name: manifest.name,
+      nickname: '',
       platform: manifest.platform,
       kind: manifest.kind,
       agentVersion: manifest.agentVersion,
@@ -1139,7 +1663,7 @@ class Hub {
     };
     this.devices.set(device.id, device);
     this.broadcast('device.updated', { device: this.deviceToJson(device) });
-    this.log('info', `设备注册：${device.name}（${device.id}，${device.platform}/${device.kind}）`);
+    this.log('info', `设备注册：${deviceDisplayName(device)}（${device.id}，${device.platform}/${device.kind}）`);
     this.retryQueuedTasks('device registered');
     this.schedulePersist();
     return device;
@@ -1153,7 +1677,7 @@ class Hub {
     const wasOffline = this.touch(device);
     // touch() 在离线→在线时已广播 device.updated，避免重复
     if (!wasOffline) this.broadcast('device.updated', { device: this.deviceToJson(device) });
-    this.log('info', `设备能力更新：${device.name}（${device.id}）`);
+    this.log('info', `设备能力更新：${deviceDisplayName(device)}（${device.id}）`);
     this.retryQueuedTasks('device manifest updated');
     this.schedulePersist();
     return device;
@@ -1168,11 +1692,11 @@ class Hub {
     if (wasOffline) {
       this.broadcast('device.online', {
         deviceId: device.id,
-        name: device.name,
+        name: deviceDisplayName(device),
         at: device.lastSeenAt,
       });
       this.broadcast('device.updated', { device: this.deviceToJson(device) });
-      this.log('info', `设备上线：${device.name}（${device.id}）`);
+      this.log('info', `设备上线：${deviceDisplayName(device)}（${device.id}）`);
       this.retryQueuedTasks('device online');
     }
     return wasOffline;
@@ -1270,11 +1794,11 @@ class Hub {
     device.reportedRunning = 0;
     this.broadcast('device.offline', {
       deviceId: device.id,
-      name: device.name,
+      name: deviceDisplayName(device),
       at: protocol.nowIso(),
     });
     this.broadcast('device.updated', { device: this.deviceToJson(device) });
-    this.log('info', `设备离线：${device.name}（${device.id}，${reason}）`);
+    this.log('info', `设备离线：${deviceDisplayName(device)}（${device.id}，${reason}）`);
     this.handleDeviceLost(device, reason);
     this.schedulePersist();
   }
@@ -1302,16 +1826,24 @@ class Hub {
     this.handleDeviceLost(device, reason);
     this.broadcast('device.offline', {
       deviceId: device.id,
-      name: device.name,
+      name: deviceDisplayName(device),
       at: protocol.nowIso(),
     });
-    this.log('info', `设备移除：${device.name}（${device.id}，${reason}）`);
+    this.log('info', `设备移除：${deviceDisplayName(device)}（${device.id}，${reason}）`);
     this.schedulePersist();
   }
 
   patchDevice(device, body) {
     const input = util.isPlainObject(body) ? body : {};
     let changed = false;
+    if (typeof input.nickname === 'string') {
+      const nickname = input.nickname.trim();
+      if (nickname.length > MAX_DEVICE_NICKNAME_LENGTH) {
+        throw badRequest(`nickname 最多 ${MAX_DEVICE_NICKNAME_LENGTH} 字符`);
+      }
+      device.nickname = nickname;
+      changed = true;
+    }
     if (typeof input.name === 'string') {
       const name = util.str(input.name, LIMITS.MAX_NAME_LENGTH);
       if (!name) throw badRequest('name 必须为 1-64 字符');
@@ -1360,7 +1892,126 @@ class Hub {
     return tasks.slice(0, safeLimit).map((task) => this.taskToJson(task));
   }
 
-  createTask(input) {
+  // ---------------------------------------------------------------- 路由提示（A 方案）
+
+  /** 找到「本机」设备：显式 localDeviceId > tags 含「本机」> 名称含主机名。 */
+  _localDevice() {
+    if (this.localDeviceId) {
+      const configured = this.devices.get(this.localDeviceId);
+      if (configured && !configured.disabled) return configured;
+    }
+    for (const device of this.devices.values()) {
+      if (device.disabled) continue;
+      if ((device.tags || []).includes('本机')) return device;
+    }
+    const host = String(os.hostname() || '').toLowerCase();
+    if (host) {
+      for (const device of this.devices.values()) {
+        if (device.disabled) continue;
+        if (device.name && device.name.toLowerCase().includes(host)) return device;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * 只读预检：指令里提到的本地文件若存在，返回「固定到本机」建议；结果按指令缓存。
+   * @returns {null|{deviceId:string, deviceName:string, reason:string, matches:Array}}
+   */
+  _preflightAdvice(instruction) {
+    if (!this.preflightEnabled) return null;
+    const key = String(instruction || '');
+    if (this._preflightCache.has(key)) return this._preflightCache.get(key);
+    const device = this._localDevice();
+    let advice = null;
+    if (device) {
+      const result = preflight.preflightInstruction(key, {
+        roots: this.preflightRoots || undefined,
+        maxDepth: this.preflightMaxDepth,
+        timeoutMs: this.preflightTimeoutMs,
+        maxMatches: this.preflightMaxMatches,
+      });
+      if (result.hit) {
+        advice = {
+          deviceId: device.id,
+          deviceName: deviceDisplayName(device),
+          reason: `本地文件预检：${result.reason}`,
+          matches: result.matches.slice(0, this.preflightMaxMatches),
+        };
+      }
+    }
+    if (this._preflightCache.size >= 100) this._preflightCache.clear();
+    this._preflightCache.set(key, advice);
+    return advice;
+  }
+
+  /** 校验/规范化路由提示（预检 pin 与规划指派），防止脏数据进入状态与任务记录。 */
+  normalizeRoutingAdvice(raw) {
+    if (!util.isPlainObject(raw)) return null;
+    const take = (value) => {
+      if (!util.isPlainObject(value)) return null;
+      const deviceId = util.str(value.deviceId, 80);
+      if (!deviceId) return null;
+      const matches = util
+        .arr(value.matches)
+        .filter(util.isPlainObject)
+        .slice(0, 10)
+        .map((item) => ({
+          ref: util.str(item.ref, 260) || '',
+          path: util.str(item.path, 500) || '',
+        }));
+      return {
+        deviceId,
+        deviceName: util.str(value.deviceName, LIMITS.MAX_NAME_LENGTH) || '',
+        reason: util.str(value.reason, 500) || '',
+        matches,
+      };
+    };
+    const out = {};
+    const pre = take(raw.preflight);
+    if (pre) out.preflight = pre;
+    const planner = take(raw.planner);
+    if (planner) out.planner = planner;
+    return Object.keys(out).length ? out : null;
+  }
+
+  _routingAdviceText(advice) {
+    if (!advice) return '';
+    const parts = [];
+    if (advice.preflight && advice.preflight.reason) parts.push(advice.preflight.reason);
+    if (advice.planner && advice.planner.reason) parts.push(advice.planner.reason);
+    return parts.join('；');
+  }
+
+  _withAdvice(adviceText, reason) {
+    return adviceText ? `${adviceText}；${reason}` : reason;
+  }
+
+  /** 设备能力清单：交给 Agnes 规划器做指派决策，只暴露路由需要的信息。 */
+  deviceInventory() {
+    const ids = (value) =>
+      util
+        .arr(value)
+        .map((item) => (typeof item === 'string' ? item : item && item.id))
+        .filter((id) => typeof id === 'string' && id)
+        .slice(0, 30);
+    return [...this.devices.values()]
+      .filter((device) => !device.disabled)
+      .map((device) => ({
+        id: device.id,
+        name: device.name,
+        nickname: device.nickname || '',
+        platform: device.platform,
+        kind: device.kind,
+        online: Boolean(device.online),
+        local: (device.tags || []).includes('本机'),
+        tags: [...(device.tags || [])].slice(0, 20),
+        skills: ids(device.capabilities && device.capabilities.skills),
+        models: ids(device.capabilities && device.capabilities.models),
+      }));
+  }
+
+  createTask(input, internal = {}) {
     const { ok, errors, value } = protocol.normalizeTaskRequest(input);
     if (!ok) throw badRequest(errors.join('；'));
     const now = protocol.nowIso();
@@ -1399,6 +2050,20 @@ class Hub {
       events: [{ at: now, type: 'created', message: '任务已创建' }],
       _avoidDeviceIds: [],
     };
+    // 本地文件预检（A）：指令提到的本机文件存在时，固定到「本机」设备执行。
+    // internal.routingAdvice 只由 Hub 内部（拆分/跟进）传入，外部请求无法伪造。
+    let routingAdvice = this.normalizeRoutingAdvice(internal.routingAdvice);
+    if (!routingAdvice && !task.requirements.deviceId) {
+      const advice = this._preflightAdvice(task.instruction);
+      if (advice) {
+        routingAdvice = { preflight: advice };
+        task.requirements = { ...task.requirements, deviceId: advice.deviceId };
+      }
+    }
+    task.routingAdvice = routingAdvice;
+    if (routingAdvice && routingAdvice.preflight && routingAdvice.preflight.reason) {
+      task.events.push({ at: protocol.nowIso(), type: 'preflight', message: routingAdvice.preflight.reason });
+    }
     // 规划子任务兜底：太短的 timeoutSec（如 60/90/180s）会让长任务必然超时。
     const planFloor = this._planSubtaskTimeoutFloor(task);
     if (planFloor) task.timeoutSec = Math.max(task.timeoutSec, planFloor);
@@ -1451,18 +2116,24 @@ class Hub {
     if (value.requirements.profile) mergedRequirements.profile = value.requirements.profile;
     if (value.requirements.gateway) mergedRequirements.gateway = value.requirements.gateway;
     if (value.requirements.deviceId) mergedRequirements.deviceId = value.requirements.deviceId;
-    return this.createTask({
-      instruction: value.instruction,
-      requirements: mergedRequirements,
-      priority: input.priority !== undefined ? value.priority : source.priority,
-      timeoutSec: input.timeoutSec !== undefined ? value.timeoutSec : source.timeoutSec,
-      maxAttempts: input.maxAttempts !== undefined ? value.maxAttempts : source.maxAttempts,
-      threadId: source.threadId || source.id,
-      replyToTaskId: source.id,
-      threadStep: context.step,
-      context,
-      attachments: Array.isArray(input.attachments) ? input.attachments : [],
-    });
+    return this.createTask(
+      {
+        instruction: value.instruction,
+        requirements: mergedRequirements,
+        priority: input.priority !== undefined ? value.priority : source.priority,
+        timeoutSec: input.timeoutSec !== undefined ? value.timeoutSec : source.timeoutSec,
+        maxAttempts: input.maxAttempts !== undefined ? value.maxAttempts : source.maxAttempts,
+        threadId: source.threadId || source.id,
+        replyToTaskId: source.id,
+        threadStep: context.step,
+        context,
+        attachments: Array.isArray(input.attachments) ? input.attachments : [],
+      },
+      {
+        // 用户没有在跟进里显式改设备时，继承源任务的预检/指派依据（已 pin 的 deviceId 也一并继承）。
+        routingAdvice: value.requirements.deviceId ? null : source.routingAdvice,
+      },
+    );
   }
 
   shouldAutoSplit(input) {
@@ -1479,30 +2150,46 @@ class Hub {
    * 规划失败时退化为普通任务，避免因为规划服务不可用而丢任务。
    */
   async createPlanTask(input) {
-    let plan;
-    try {
-      plan = await this.planner({
-        instruction: input.instruction,
-        requirements: input.requirements || {},
-        timeoutSec: input.timeoutSec,
-      });
-    } catch (err) {
-      this.log('warn', `Agnes 长任务拆分失败，按普通任务执行：${err && err.message ? err.message : err}`);
-      return this.createTask(input);
-    }
-    if (!plan || !Array.isArray(plan.subtasks) || plan.subtasks.length < 2) {
-      this.log('warn', 'Agnes 没有返回有效子任务，按普通任务执行');
-      return this.createTask(input);
-    }
     const normalized = protocol.normalizeTaskRequest(input);
     if (!normalized.ok) throw badRequest(normalized.errors.join('；'));
     const value = normalized.value;
+    // 路由提示优先级：用户显式 deviceId > Agnes 指派 > 本地文件预检 pin。
+    const userDeviceId = value.requirements.deviceId || null;
+    let routingAdvice = this.normalizeRoutingAdvice(input.routingAdvice);
+    let pinnedDeviceId = userDeviceId;
+    if (!routingAdvice && !pinnedDeviceId) {
+      const advice = this._preflightAdvice(value.instruction);
+      if (advice) {
+        routingAdvice = { preflight: advice };
+        pinnedDeviceId = advice.deviceId;
+      }
+    }
+    const planRequirements = pinnedDeviceId
+      ? { ...value.requirements, deviceId: pinnedDeviceId }
+      : { ...value.requirements };
+
+    let plan;
+    try {
+      plan = await this.planner({
+        instruction: value.instruction,
+        requirements: planRequirements,
+        timeoutSec: value.timeoutSec,
+        devices: this.deviceInventory(),
+      });
+    } catch (err) {
+      this.log('warn', `Agnes 长任务拆分失败，按普通任务执行：${err && err.message ? err.message : err}`);
+      return this.createTask({ ...input, requirements: planRequirements }, { routingAdvice });
+    }
+    if (!plan || !Array.isArray(plan.subtasks) || plan.subtasks.length < 2) {
+      this.log('warn', 'Agnes 没有返回有效子任务，按普通任务执行');
+      return this.createTask({ ...input, requirements: planRequirements }, { routingAdvice });
+    }
     const now = protocol.nowIso();
     const parentThreadId = protocol.randomId('thread');
     const parent = {
       id: protocol.randomId('task'),
       instruction: value.instruction,
-      requirements: value.requirements,
+      requirements: planRequirements,
       priority: value.priority,
       status: TASK_STATUS.RUNNING,
       assignedDeviceId: null,
@@ -1532,29 +2219,97 @@ class Hub {
         candidates: [],
         excluded: [],
       },
+      routingAdvice,
       events: [
         { at: now, type: 'created', message: '长任务已创建' },
         { at: now, type: 'plan', message: `Agnes 拆分为 ${plan.subtasks.length} 个子任务` },
       ],
       _avoidDeviceIds: [],
     };
+    if (routingAdvice && routingAdvice.preflight && routingAdvice.preflight.reason) {
+      parent.events.push({ at: now, type: 'preflight', message: routingAdvice.preflight.reason });
+    }
     this.tasks.set(parent.id, parent);
     this.broadcast('task.created', { task: this.taskToJson(parent) });
     this.log('info', `Agnes 拆分任务：${parent.id} → ${plan.subtasks.length} 个子任务`);
     // 子任务超时不超过父任务预算；过短的值由 createTask 里的 _planSubtaskTimeoutFloor 兜底。
     const planTimeoutSec = Math.max(LIMITS.MIN_TASK_TIMEOUT_SEC, value.timeoutSec);
+    const allowedTags = new Set();
+    for (const device of this.devices.values()) {
+      if (device.disabled) continue;
+      for (const tag of device.tags || []) allowedTags.add(tag);
+    }
+    const plannerDeviceIds = new Set(
+      [...this.devices.values()].filter((device) => !device.disabled).map((device) => device.id),
+    );
     for (const subtask of plan.subtasks) {
-      const child = this.createTask({
-        instruction: subtask.instruction,
-        requirements: value.requirements,
-        priority: parent.priority,
-        timeoutSec: Math.min(planTimeoutSec, subtask.timeoutSec),
-        maxAttempts: parent.maxAttempts,
-        parentTaskId: parent.id,
-        threadId: parent.threadId,
-        threadStep: 1,
-        attachments: parent.attachments || [],
-      });
+      const subtaskInstruction = String(subtask.instruction || '');
+      const plannerDeviceId = util.str(subtask.deviceId, 80);
+      const plannerTags = util
+        .arr(subtask.tags)
+        .map((tag) => util.str(tag, 40))
+        .filter((tag) => tag && allowedTags.has(tag))
+        .slice(0, 5);
+      const childRequirements = { ...planRequirements };
+      const childAdvice = {};
+      // 子任务指令自身提到本机文件时，文件存在性证据优先于规划器的设备猜测。
+      const childPreflight = userDeviceId ? null : this._preflightAdvice(subtaskInstruction);
+      const inheritedPreflight = routingAdvice && routingAdvice.preflight;
+      if (childPreflight) {
+        childRequirements.deviceId = childPreflight.deviceId;
+        childAdvice.preflight = childPreflight;
+      } else if (inheritedPreflight) {
+        childAdvice.preflight = inheritedPreflight;
+      }
+      if (plannerDeviceId && !plannerDeviceIds.has(plannerDeviceId)) {
+        this.log('warn', `Agnes 指派的设备不存在或已禁用，已忽略：${plannerDeviceId}`);
+      } else if (plannerDeviceId && !userDeviceId) {
+        if (childPreflight) {
+          if (plannerDeviceId !== childPreflight.deviceId) {
+            this.log(
+              'warn',
+              `Agnes 指派的设备与本地文件预检冲突，按预检固定到 ${childPreflight.deviceId}：${plannerDeviceId}`,
+            );
+          }
+        } else {
+          const plannerDevice = this.devices.get(plannerDeviceId);
+          // 规划器指派不能覆盖用户的其他要求（model/skills/tags 等）。
+          const matched = protocol.matchRequirements(
+            this._capabilitiesForMatch(plannerDevice),
+            { ...planRequirements, deviceId: null },
+          );
+          if (!matched.ok) {
+            this.log(
+              'warn',
+              `Agnes 指派的设备不满足用户要求（缺少 ${matched.missing.join(', ')}），已忽略：${plannerDeviceId}`,
+            );
+          } else {
+            childRequirements.deviceId = plannerDeviceId;
+            childAdvice.planner = {
+              deviceId: plannerDeviceId,
+              deviceName: deviceDisplayName(plannerDevice),
+              reason: `Agnes 指派：${util.truncate(subtaskInstruction, 60)}`,
+            };
+          }
+        }
+      }
+      if (plannerTags.length && !childRequirements.deviceId && !childRequirements.tags.length) {
+        childRequirements.tags = [...new Set(plannerTags)];
+      }
+      const child = this.createTask(
+        {
+          instruction: subtask.instruction,
+          requirements: childRequirements,
+          priority: parent.priority,
+          timeoutSec: Math.min(planTimeoutSec, subtask.timeoutSec),
+          maxAttempts: parent.maxAttempts,
+          parentTaskId: parent.id,
+          threadId: parent.threadId,
+          threadStep: 1,
+          attachments: parent.attachments || [],
+        },
+        { routingAdvice: Object.keys(childAdvice).length ? childAdvice : null },
+      );
       parent.childTaskIds.push(child.id);
     }
     parent.updatedAt = protocol.nowIso();
@@ -1731,7 +2486,10 @@ class Hub {
       task.updatedAt = protocol.nowIso();
       const firstReason = excluded.length ? excluded[0].reason : 'no devices registered';
       task.route = {
-        reason: `no matching device (${excluded.length} excluded): ${firstReason}`,
+        reason: this._withAdvice(
+          this._routingAdviceText(task.routingAdvice),
+          `no matching device (${excluded.length} excluded): ${firstReason}`,
+        ),
         candidates: [],
         excluded: excluded.slice(0, 10),
       };
@@ -1749,11 +2507,14 @@ class Hub {
     task.attempts += 1;
     task.status = TASK_STATUS.ASSIGNED;
     task.assignedDeviceId = device.id;
-    task.assignedDeviceName = device.name;
+    task.assignedDeviceName = deviceDisplayName(device);
     task.updatedAt = now;
     task.error = null;
     task.route = {
-      reason: `matched ${candidates.length} candidate${candidates.length === 1 ? '' : 's'}; picked ${device.id} (score ${pickedCandidate.score})`,
+      reason: this._withAdvice(
+        this._routingAdviceText(task.routingAdvice),
+        `matched ${candidates.length} candidate${candidates.length === 1 ? '' : 's'}; picked ${device.id} (score ${pickedCandidate.score})`,
+      ),
       candidates: candidates.slice(0, 5).map((c) => ({
         deviceId: c.deviceId,
         score: c.score,
@@ -1764,7 +2525,7 @@ class Hub {
     this._pushTaskEvent(
       task,
       'assigned',
-      `派发到 ${device.name}（第 ${task.attempts}/${task.maxAttempts} 次尝试）`,
+      `派发到 ${deviceDisplayName(device)}（第 ${task.attempts}/${task.maxAttempts} 次尝试）`,
     );
     this.enqueueCommand(device, this._buildRunCommand(task, device));
     this._setTaskTimer(task.id, 'ack', () => {
@@ -1773,7 +2534,7 @@ class Hub {
     }, this.ackTimeoutMs);
     this._refreshTaskTimeout(task);
     this.broadcast('task.updated', { task: this.taskToJson(task) });
-    this.log('info', `任务派发：${task.id} → ${device.name}（score ${pickedCandidate.score}）`);
+    this.log('info', `任务派发：${task.id} → ${deviceDisplayName(device)}（score ${pickedCandidate.score}）`);
     this.schedulePersist();
     return task;
   }
@@ -1802,7 +2563,7 @@ class Hub {
         replyToTaskId: task.replyToTaskId || null,
         threadStep: task.threadStep || 1,
         context: {
-          deviceName: device.name,
+          deviceName: deviceDisplayName(device),
           requestedAt: protocol.nowIso(),
           ...(task.context || {}),
         },
@@ -2001,6 +2762,8 @@ class Hub {
     this._updateParentTask(task);
     // 长期目标的跟进任务结束后，把结果回写到目标（进度/建议/下次跟进）。
     this._goalTaskFinished(task);
+    // 每日总结任务结束后，记录结论供前端展示。
+    if (task.context && task.context.nightlyReview) this._nightlyReviewFinished(task);
     this.schedulePersist();
     // 任务结束腾出了设备槽位：立刻消化排队任务，否则因并发已满而重排队的任务可能一直滞留。
     if (wasActive) this.retryQueuedTasks('device slot free');

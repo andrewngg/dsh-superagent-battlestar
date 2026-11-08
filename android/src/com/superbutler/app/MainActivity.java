@@ -32,6 +32,7 @@ import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
 import android.widget.Toast;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
@@ -53,7 +54,7 @@ import java.util.Locale;
 public class MainActivity extends Activity {
 
     private static final String TAG = "SuperButler";
-    private static final String APP_VERSION = "0.1.0";
+    private static final String APP_VERSION = "0.1.3";
     private static final String SETUP_URL = "file:///android_asset/setup.html";
     private static final String ERROR_BASE = "file:///android_asset/error.html";
     private static final String ASSET_BASE = "file:///android_asset/";
@@ -70,6 +71,18 @@ public class MainActivity extends Activity {
     private static final int REQ_FILE_CHOOSER = 7302;
     private static final int TASK_NOTIFY_BASE = 7300;
 
+    /** APK 兜底：任务页默认「进行中」——Web 控制台默认已是「进行中」，注入仅用于兼容旧版 Hub 页面。 */
+    private static final String TASK_FILTER_DEFAULT_JS =
+            "(function(){try{"
+                    + "var chip=document.querySelector('#task-filters .filter-chip[data-filter=\"active\"]');"
+                    + "if(!chip)return 'missing';"
+                    + "if(chip.classList.contains('is-active'))return 'active';"
+                    + "chip.click();"
+                    + "return 'ok';"
+                    + "}catch(e){return 'error';}})()";
+    private static final int TASK_FILTER_RETRY_MAX = 8;
+    private static final long TASK_FILTER_RETRY_MS = 400L;
+
     private static final int BRAND_BG = Color.parseColor("#141026");
     private static final int BRAND_DARK = Color.parseColor("#0B0818");
 
@@ -82,6 +95,8 @@ public class MainActivity extends Activity {
     private boolean showingError = false;
     private boolean pendingClearHistory = false;
     private ValueCallback<Uri[]> pendingFileCallback;
+    /** 通知点击带来的待切换 tab（ReminderReceiver 的 open_tab=reminders）。 */
+    private String pendingOpenTab;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -110,7 +125,153 @@ public class MainActivity extends Activity {
         if (prefs.getBoolean(KEY_PERSISTENT_NOTIFY, false)) {
             startPersistentNotificationService();
         }
+        handleOpenTabIntent(getIntent());
         loadInitial();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // 首页/前台也主动拉一次提醒并重排闹钟（即使页面暂未调用 Bridge、或常驻服务未开启）
+        syncRemindersFromHubAsync();
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleOpenTabIntent(intent);
+        applyPendingOpenTab();
+    }
+
+    // ------------------------------------------------------------------
+    // 提醒：通知点击后切到「提醒」tab
+    // ------------------------------------------------------------------
+
+    private void handleOpenTabIntent(Intent intent) {
+        if (intent == null) return;
+        String tab = intent.getStringExtra("open_tab");
+        if (tab != null && !tab.trim().isEmpty()) pendingOpenTab = tab.trim();
+    }
+
+    /** 页面加载完成后（或已有实例收到 onNewIntent 时）切到提醒 tab。 */
+    private void applyPendingOpenTab() {
+        String tab = pendingOpenTab;
+        if (tab == null || webView == null || showingError) return;
+        String url = webView.getUrl();
+        // 页面尚未加载出实际内容（本地配置页/错误页/加载中）：保留待处理标记，等 onPageFinished
+        if (url == null || url.startsWith(ASSET_BASE) || webView.getProgress() < 100) return;
+        if ("reminders".equals(tab)) {
+            try {
+                webView.evaluateJavascript("try{window.location.hash='#reminders';}catch(e){}", null);
+            } catch (Exception e) {
+                Log.w(TAG, "switch to reminders tab failed", e);
+            }
+        }
+        pendingOpenTab = null;
+    }
+
+    // ------------------------------------------------------------------
+    // 任务页：默认「进行中」（Web 控制台默认已一致；此注入为旧版 Hub 页面的兜底）
+    // ------------------------------------------------------------------
+
+    /**
+     * 兜底：若任务页打开时「进行中」筛选 chip 未选中（如旧版 Hub 页面仍默认「全部」），就点一下。
+     * 新版控制台默认已是「进行中」，此时仅确认状态；用户手动切到其它筛选仍照常生效。
+     */
+    private void applyTaskFilterDefault() {
+        final WebView view = webView;
+        if (view == null || showingError) return;
+        String url;
+        try {
+            url = view.getUrl();
+        } catch (Exception e) {
+            return;
+        }
+        if (url == null || url.startsWith(ASSET_BASE) || !isTrustedUrl(url)) return;
+        attemptTaskFilterDefault(view, url, 0);
+    }
+
+    private void attemptTaskFilterDefault(final WebView view, final String startedUrl, final int attempt) {
+        if (view != webView || showingError) return;
+        String current;
+        try {
+            current = view.getUrl();
+        } catch (Exception e) {
+            return;
+        }
+        // 页面已跳走（重定向/错误页）就停止，避免在别的页面误点
+        if (current == null || !current.equals(startedUrl)) return;
+        try {
+            view.evaluateJavascript(TASK_FILTER_DEFAULT_JS, new ValueCallback<String>() {
+                @Override
+                public void onReceiveValue(String value) {
+                    if (attempt >= TASK_FILTER_RETRY_MAX) return;
+                    if (value == null || value.contains("missing") || value.contains("error")) {
+                        view.postDelayed(new Runnable() {
+                            @Override
+                            public void run() {
+                                attemptTaskFilterDefault(view, startedUrl, attempt + 1);
+                            }
+                        }, TASK_FILTER_RETRY_MS);
+                    }
+                }
+            });
+        } catch (Exception e) {
+            Log.w(TAG, "apply default task filter failed", e);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 提醒：App 前台时从 Hub 拉取并同步（Bridge 同步之外的兜底）
+    // ------------------------------------------------------------------
+
+    private void syncRemindersFromHubAsync() {
+        final String hub = normalizeHubUrl(prefs.getString(KEY_HUB, ""));
+        final String token = prefs.getString(KEY_TOKEN, "");
+        if (hub == null || token == null || token.trim().isEmpty()) return;
+        final String trimmedToken = token.trim();
+        Thread thread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                JSONArray reminders = fetchReminders(hub, trimmedToken);
+                if (reminders != null) {
+                    ReminderScheduler.sync(MainActivity.this, reminders);
+                }
+            }
+        }, "butler-reminders-sync");
+        thread.setDaemon(true);
+        try {
+            thread.start();
+        } catch (Exception e) {
+            Log.w(TAG, "start reminder sync failed", e);
+        }
+    }
+
+    /** GET /api/reminders（失败返回 null，静默等待下次同步）。 */
+    private JSONArray fetchReminders(String hub, String token) {
+        HttpURLConnection conn = null;
+        try {
+            URL url = new URL(hub + "/api/reminders");
+            conn = (HttpURLConnection) url.openConnection();
+            conn.setConnectTimeout(5000);
+            conn.setReadTimeout(6000);
+            conn.setRequestMethod("GET");
+            conn.setRequestProperty("Accept", "application/json");
+            conn.setRequestProperty("X-Butler-Token", token);
+            int code = conn.getResponseCode();
+            if (code < 200 || code >= 300) {
+                Log.w(TAG, "fetch reminders HTTP " + code);
+                return null;
+            }
+            JSONObject body = new JSONObject(readStream(conn.getInputStream()));
+            return body.optJSONArray("reminders");
+        } catch (Exception e) {
+            Log.w(TAG, "fetch reminders failed", e);
+            return null;
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
     }
 
     private void configureSettings(WebSettings s) {
@@ -386,6 +547,11 @@ public class MainActivity extends Activity {
                 pendingClearHistory = false;
                 view.clearHistory();
             }
+            // 从提醒通知打开：等管家页面加载完成后再切到提醒 tab（本地配置页/错误页不切）
+            if (!showingError && url != null && !url.startsWith(ASSET_BASE)) {
+                applyPendingOpenTab();
+                applyTaskFilterDefault();
+            }
         }
 
         @Override
@@ -443,6 +609,9 @@ public class MainActivity extends Activity {
         done.setDescription("任务完成、失败或超时提醒");
         nm.createNotificationChannel(progress);
         nm.createNotificationChannel(done);
+        // 提醒事项渠道：gentle（butler_reminders）+ alarm（butler_reminders_alarm），
+        // Receiver/开机重排里也会确保创建（进程被杀后 Receiver 可能先于 Activity 运行）
+        ReminderScheduler.ensureChannels(this);
     }
 
     private void requestNotificationPermissionIfNeeded() {
@@ -753,6 +922,60 @@ public class MainActivity extends Activity {
             } catch (Exception e) {
                 return errorJson("internal", "设置常驻通知失败");
             }
+        }
+
+        /**
+         * 页面把提醒全量同步给原生层：参数为 {@code {"reminders":[...]}}（也接受裸数组）。
+         * 每项可带 {@code notifyStyle}（{@code gentle}/{@code alarm}，缺省 gentle）；未知字段原样保留在缓存里。
+         * 原生层写入 SharedPreferences 缓存并重排 AlarmManager 闹钟；
+         * 返回 {@code {ok,scheduled,total,permissionGranted,exact,channel,channels}}。
+         */
+        @JavascriptInterface
+        public String syncReminders(String json) {
+            if (!bridgeAllowed) return errorJson("forbidden", "仅允许在管家页面调用");
+            JSONArray reminders;
+            try {
+                String raw = json == null ? "" : json.trim();
+                if (raw.isEmpty()) {
+                    reminders = new JSONArray();
+                } else if (raw.startsWith("[")) {
+                    reminders = new JSONArray(raw);
+                } else {
+                    JSONObject payload = new JSONObject(raw);
+                    reminders = payload.optJSONArray("reminders");
+                    if (reminders == null) reminders = payload.optJSONArray("items");
+                    if (reminders == null) reminders = new JSONArray();
+                }
+            } catch (Exception e) {
+                return errorJson("bad_json", "提醒数据格式错误");
+            }
+            // 页面首次同步提醒时顺便申请通知权限（必须回到 UI 线程）
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    requestNotificationPermissionIfNeeded();
+                }
+            });
+            return ReminderScheduler.sync(MainActivity.this, reminders).toString();
+        }
+
+        /** 提醒能力状态：已排程数量、通知权限、精确闹钟是否可用、两个通知渠道。 */
+        @JavascriptInterface
+        public String getReminderStatus() {
+            JSONObject o = new JSONObject();
+            try {
+                o.put("ok", true);
+                o.put("scheduled", ReminderScheduler.countEnabled(MainActivity.this));
+                o.put("permissionGranted", notificationPermissionGranted());
+                o.put("exact", ReminderScheduler.exactAlarmsAvailable(MainActivity.this));
+                o.put("channel", ReminderScheduler.CHANNEL_ID);
+                o.put("alarmChannel", ReminderScheduler.CHANNEL_ID_ALARM);
+                o.put("channels", ReminderScheduler.channelsJson());
+                o.put("appVersion", APP_VERSION);
+            } catch (Exception e) {
+                return errorJson("internal", "读取提醒状态失败");
+            }
+            return o.toString();
         }
     }
 

@@ -87,7 +87,7 @@ test('module factory and apply register dictionaries, main panel and sidebar ent
   assert.equal(localeRegistrations.length, 1)
   assert.equal(localeRegistrations[0].namespace, 'superButler')
   const { zh, en } = localeRegistrations[0].dictionaries
-  for (const key of ['taskId', 'manualStatus', 'markCompleted', 'markFailed', 'statusUpdated', 'followUpHint', 'statusRouteNeedsRestart', 'overwriteHint', 'planStatusHint', 'inputRequired']) {
+  for (const key of ['taskId', 'manualStatus', 'markCompleted', 'markFailed', 'statusUpdated', 'followUpHint', 'statusRouteNeedsRestart', 'overwriteHint', 'planStatusHint', 'inputRequired', 'dashboard', 'openConsole', 'openConsoleHint', 'recentTasks', 'guide', 'addPc', 'addPhoneWorker', 'phoneControl', 'guideTrouble', 'devTools', 'gitPush', 'gitPushing', 'gitPushOk', 'gitPushFailed', 'gitPushNeedsRestart', 'restartNeedsRestart', 'gitRepo', 'gitUpstream', 'gitNoUpstream', 'credentialsFallback', 'credentialsLocalBadge']) {
     assert.ok(zh[key], `zh dictionary is missing ${key}`)
     assert.ok(en[key], `en dictionary is missing ${key}`)
   }
@@ -100,9 +100,17 @@ test('module factory and apply register dictionaries, main panel and sidebar ent
   assert.equal(sidebar.options.order, 5)
 })
 
-test('task UI uses in-panel dialogs instead of window.prompt (Electron has no prompt)', () => {
+test('client.js stays a read-only dashboard that opens the browser console', () => {
   assert.equal(source.includes('window.prompt('), false, 'window.prompt is unavailable in the DSH desktop shell')
-  assert.ok(source.includes('function Dialog('), 'client must render an in-panel dialog')
-  assert.ok(source.includes('function TaskDetail('), 'client must render a task detail section')
-  assert.ok(source.includes('/status'), 'client must call the manual status endpoint')
+  assert.ok(source.includes('function ConsoleTab('), 'client must render the dashboard tab')
+  assert.ok(source.includes('function DeviceCard('), 'client must render the device summary card')
+  assert.ok(source.includes('/api/dsh/open'), 'client must link to the browser console redirect route')
+  assert.equal(source.includes('function TaskRow('), false, 'task actions live in the browser console only')
+  assert.equal(source.includes('function TaskDetail('), false, 'task details live in the browser console only')
+  assert.equal(source.includes('function Dialog('), false, 'the dashboard needs no in-panel dialogs')
+  assert.equal(source.includes("call('/tasks'"), false, 'the dashboard no longer dispatches tasks')
+  assert.ok(source.includes('function GuideTab('), 'client must render the worker setup guide tab')
+  assert.ok(source.includes('--join-code'), 'the guide shows the worker start command')
+  assert.ok(source.includes("call('/dsh/git-push'"), 'the settings tab triggers git push through the host route')
+  assert.ok(source.includes("credentials.available === false"), 'settings must warn when keys fall back to the local file')
 })

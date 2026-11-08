@@ -43,8 +43,9 @@ function extractJson(text) {
   }
 }
 
-function buildPrompt(instruction, requirements, maxSubtasks, parentTimeoutSec) {
+function buildPrompt(instruction, requirements, maxSubtasks, parentTimeoutSec, devices) {
   const req = requirements && typeof requirements === 'object' ? requirements : {};
+  const list = Array.isArray(devices) ? devices.filter((device) => device && device.id) : [];
   const lines = [
     '你是 BattleStar 长任务规划器。把用户的一条长任务拆成 2-' + maxSubtasks + ' 个可独立执行的子任务。',
     '要求：',
@@ -54,10 +55,32 @@ function buildPrompt(instruction, requirements, maxSubtasks, parentTimeoutSec) {
     '4. 每个子任务给出合理的 timeoutSec（30-3600 秒）；',
     '5. 网页检索/多平台搜索/登录后操作类子任务要留足时间，建议 600-1800 秒，不要低于 300 秒；',
     '6. 只输出严格 JSON，不要 Markdown、解释或代码块。',
-    'JSON 格式：',
-    '{"title":"简短标题","subtasks":[{"instruction":"完整可执行的子任务指令","timeoutSec":300}]}',
-    '原任务要求（可能为空）：' + JSON.stringify(req),
   ];
+  if (list.length) {
+    lines.push('7. 如果某个子任务必须在本机（Hub 宿主）的文件/环境上执行（例如修改本机代码、读取本机文件），给该子任务 deviceId 填标记为「本机」的设备；');
+    lines.push('8. tags 只能从工作机清单里的 tags 选取（用于需要特定能力的任务，如 ComfyUI/GPU、手机 Mika）；不需要时不要输出 tags；');
+    lines.push('9. deviceId 必须来自工作机清单；不需要指定设备时不要输出 deviceId，由 Hub 自动路由。');
+  }
+  lines.push('JSON 格式：');
+  lines.push('{"title":"简短标题","subtasks":[{"instruction":"完整可执行的子任务指令","timeoutSec":300,"deviceId":"可选，必须来自清单","tags":["可选，必须来自清单"]}]}');
+  if (list.length) {
+    lines.push('可用工作机清单（deviceId 只能取这里的值）：');
+    for (const device of list.slice(0, 20)) {
+      const bits = [
+        `id=${device.id}`,
+        device.nickname ? `用途昵称=${device.nickname}` : '',
+        device.name ? `机器名=${device.name}` : '',
+        device.platform ? `平台=${device.platform}` : '',
+        device.online === false ? '离线' : '在线',
+        device.local ? '本机（Hub 宿主）' : '',
+      ].filter(Boolean);
+      if (Array.isArray(device.tags) && device.tags.length) bits.push(`tags=${device.tags.join(',')}`);
+      if (Array.isArray(device.skills) && device.skills.length) bits.push(`skills=${device.skills.join(',')}`);
+      if (Array.isArray(device.models) && device.models.length) bits.push(`models=${device.models.join(',')}`);
+      lines.push('- ' + bits.join(' | '));
+    }
+  }
+  lines.push('原任务要求（可能为空）：' + JSON.stringify(req));
   if (Number.isFinite(Number(parentTimeoutSec)) && Number(parentTimeoutSec) > 0) {
     lines.push(`父任务超时预算：${Math.round(Number(parentTimeoutSec))} 秒；子任务 timeoutSec 不要超过该预算。`);
   }
@@ -79,7 +102,7 @@ async function createPlan(options = {}) {
     model: cfg.model,
     messages: [
       { role: 'system', content: '你是严格输出 JSON 的任务规划器。' },
-      { role: 'user', content: buildPrompt(instruction, options.requirements, cfg.maxSubtasks, options.timeoutSec) },
+      { role: 'user', content: buildPrompt(instruction, options.requirements, cfg.maxSubtasks, options.timeoutSec, options.devices) },
     ],
     temperature: 0.2,
     max_tokens: 3000,
@@ -119,6 +142,13 @@ async function createPlan(options = {}) {
     .map((item) => ({
       instruction: item.instruction.trim().slice(0, 12_000),
       timeoutSec: Math.min(3600, Math.max(30, Number.isFinite(Number(item.timeoutSec)) ? Math.round(Number(item.timeoutSec)) : 600)),
+      deviceId: typeof item.deviceId === 'string' ? item.deviceId.trim().slice(0, 80) : '',
+      tags: Array.isArray(item.tags)
+        ? item.tags
+            .filter((tag) => typeof tag === 'string' && tag.trim())
+            .map((tag) => tag.trim().slice(0, 40))
+            .slice(0, 5)
+        : [],
     }));
   if (subtasks.length < 2) throw new PlannerError('Agnes 只返回了少于 2 个有效子任务');
   return {
@@ -127,4 +157,4 @@ async function createPlan(options = {}) {
   };
 }
 
-module.exports = { PlannerError, createPlan, plannerConfig, extractJson };
+module.exports = { PlannerError, createPlan, plannerConfig, extractJson, buildPrompt };
