@@ -63,6 +63,18 @@ public class ButlerNotificationService extends Service {
         return START_STICKY;
     }
 
+    /**
+     * Android 15+：前台服务超时回调（例如 dataSync 的 6 小时/24 小时上限）。
+     * 主动 stopSelf()，避免系统在宽限期后抛 RemoteServiceException 直接杀进程。
+     * 正常路径（Android 14+ 用 specialUse）没有该超时限制，此回调只作兜底。
+     */
+    @Override
+    public void onTimeout(int startId, int fgsType) {
+        Log.w(TAG, "foreground service timeout, stopping (fgsType=" + fgsType + ")");
+        running = false;
+        stopSelf();
+    }
+
     @Override
     public IBinder onBind(Intent intent) {
         return null;
@@ -88,8 +100,15 @@ public class ButlerNotificationService extends Service {
     }
 
     private void startForegroundCompat(Notification notification) {
-        if (Build.VERSION.SDK_INT >= 29) {
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
+        if (Build.VERSION.SDK_INT >= 34) {
+            // Android 14+：常驻状态通知用 specialUse —— dataSync 在 Android 15 有
+            // 6 小时/24 小时硬上限，超时未停会被系统抛异常杀死整个 App 进程。
+            startForeground(NOTIFICATION_ID, notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+        } else if (Build.VERSION.SDK_INT >= 29) {
+            // Android 10-13：没有 specialUse 常量，且旧系统没有前台服务超时限制，回退 dataSync。
+            startForeground(NOTIFICATION_ID, notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
         } else {
             startForeground(NOTIFICATION_ID, notification);
         }

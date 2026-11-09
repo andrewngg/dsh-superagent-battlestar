@@ -11,6 +11,8 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Android 14+ 常驻通知改用 specialUse 类型（dataSync 在 Android 15 有 6 小时/24 小时上限，超时会崩溃） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <!-- 重启/应用更新后重排提醒闹钟 -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- 精确闹钟：Android 12+ 为特殊权限，可能被用户撤销；代码里会 canScheduleExactAlarms() 判断并回退 non-exact -->
@@ -39,10 +41,20 @@
             </intent-filter>
         </activity>
 
+        <!--
+            specialUse：常驻状态通知需要长期运行（展示任务进度/在线设备），
+            不适合 dataSync —— Android 15 会对 dataSync 前台服务强制 6 小时/24 小时超时，
+            超时后未 stopSelf 会被系统以 RemoteServiceException 杀死进程（0.1.2 崩溃即此原因）。
+            Android 29-33 没有 specialUse 常量，运行时回退 dataSync（旧系统无此超时限制）。
+        -->
         <service
             android:name=".ButlerNotificationService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="dataSync|specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="BattleStar 常驻状态通知：本地轮询家庭 Hub 快照，展示任务进度与在线/待命设备数" />
+        </service>
 
         <!-- 提醒闹钟接收器：只由应用内 AlarmManager 的显式 PendingIntent 触发 -->
         <receiver
