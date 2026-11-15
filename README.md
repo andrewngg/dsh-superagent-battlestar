@@ -59,6 +59,17 @@ node scripts/demo.js
 浏览器打开桌面或手机控制台即可看到设备能力、任务进度与路由解释；`Ctrl+C` 全部退出。
 接真实设备见下方「安装」或 [docs/INSTALL.md](docs/INSTALL.md)。
 
+## 界面预览
+
+![设备仪表盘](screenshots/1-device-dashboard.jpg)
+*设备管理面板 — 母机 / 手机工作机 / 图像处理机，实时在线状态一目了然。*
+
+![任务历史](screenshots/2-task-history.jpg)
+*任务列表 — Agnes 规划器拆分的子任务执行闭环，可展开查看每一步详情。*
+
+![开发者模式](screenshots/3-developer-mode.jpg)
+*Developer Mode — 通过 DeepSeek Harness 直接与代码仓库对话，按需求修改 BattleStar 系统。*
+
 ## 架构
 
 ```mermaid
@@ -394,7 +405,7 @@ task-records/
 - ComfyUI 生成的图片保存在工作机本地，暂不回传 Web 控制台（任务结果含路径）。
 - APK 是 WebView 壳：自签名 HTTPS 会被拒绝（家庭内网建议 http）；无服务端推送/离线缓存/自适应图标；任务通知依赖页面保持运行，App 被系统彻底杀死后不再更新（**提醒通知例外**：由原生 `AlarmManager` 发送，不依赖页面）。
 - 提醒的「闹钟」方式仍是普通高优先级通知加闹钟音与震动（不是系统级闹钟 App，不会全屏弹出）；受勿扰/音量/渠道设置影响，Android 12+ 精确闹钟权限被撤销时会退化为非精确排程。
-- 手机端 UI 截图未生成（浏览器沙箱限制）；功能已通过真实 Hub 的 DOM 级验证。
+- 手机端 UI 已通过真实 Hub DOM 级验证；近期已更新 README 补充正式截图（见上方「界面预览」）。
 - **设备代理必须运行在普通用户会话**：如果它在受限沙箱（例如 DSH 的 workspace-write 文件沙箱）里被拉起，Hermes CLI 无法访问 `%LOCALAPPDATA%\hermes`，任务会以「Hermes CLI 退出码 1（无输出）」在 1~2 秒内失败。此时用本机的 `worker-workspace\restart-butler.cmd`（等价于在普通 PowerShell 里运行 `worker-workspace\start-workers.ps1 -Restart`）一键重启；启动器会做沙箱自检，告警写入 `worker-workspace\logs\launcher.warnings.log`。
 
 ## Roadmap
