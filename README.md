@@ -25,6 +25,7 @@
   - 拆分时规划器同时判断并行/串行与依赖：可并行的子任务同时派发，有依赖的等前序完成才派发；前序失败/超时/取消时暂停并显示「卡点」，等你重试失败子任务或取消计划后再自动继续（可用 `blockerPolicy` 改自动继续）；
   - 单并发设备（如 Mika 手机，`limits.maxConcurrentTasks=1`）按排队逐条执行；规划器会看到每台设备的并发上限，需要 Mika 的子任务超过 2 个时建议用 `dependsOn` 串行排队；
   - 拆分需要母机进程有 `AGNES_API_KEY` / `AGNES_MODEL`（插件启动 Hub 时自动注入；独立启动 Hub 时手动设置环境变量），失败会自动回退为普通任务；
+- 🗑️ **任务回收站**：已结束的任务可移入回收站（按任务线程 + 计划子任务一起回收），常规任务列表、统计与大脑思考自动忽略它们；控制台任务筛选新增「垃圾桶」视图，可一键恢复或彻底删除，失败视图支持「回收全部失败任务」；彻底删除会清理长期目标引用与对应执行记录；
 - 🧵 **任务线程**：完成/失败的任务可以「继续此任务」，新任务自动带上一步指令、输出和错误作为上下文；APK/网页/插件按线程显示每一步；Hermes CLI 任务会尽量复用同一会话（`--resume`），上下文也会随任务传给其他执行器；
 - 💬 **等待回答**：Mika 在手机上需要用户补充信息时，任务进入「等待回答」而不是直接失败；APK/网页/插件任务卡片会显示问题并可直接回答，回答后 Mika 继续执行；
 - 🛠️ **Developer Mode**：在 BattleStar 内新增「开发」Tab，通过 DSH Host 的 `sessionController` 直接对话 DeepSeek Harness 并按需求修改本仓库；仅本机/Hub 管理员可用，限制在 `super-butler` 仓库，提示 agent 不读取/提交私人密钥与个人信息；DSH 的回复按 Markdown 渲染（标题 / 列表 / 代码块 / GFM 表格），手机端阅读更舒适；
@@ -257,7 +258,7 @@ super-butler/
 │  ├─ server.js            # CLI 入口，打印令牌/加入码/手机 URL
 │  ├─ lib/                 # 注册表、路由、任务、HTTP、SSE、持久化、静态服务
 │  ├─ web/                 # 桌面 + 手机控制台（零构建）
-│  └─ test/                # 240 个 Hub 用例
+│  └─ test/                # 257 个 Hub 用例
 ├─ device-agent/           # 工作机代理
 │  ├─ agent.js             # 注册/心跳/长轮询/执行/回报
 │  ├─ cli-worker.js        # 本机 CLI 执行器（Hermes / OpenCode / shell）
@@ -288,6 +289,13 @@ curl -H "X-Butler-Token: <adminToken>" http://<母机IP>:7317/api/devices
 curl -X POST http://<母机IP>:7317/api/tasks \
   -H "X-Butler-Token: <adminToken>" -H "Content-Type: application/json" \
   -d '{"instruction":"把本周家庭开销整理成 Word 报告","requirements":{"skills":["office-docx"]},"priority":7}'
+
+# 任务回收站：把已结束任务移入回收站 / 恢复 / 彻底删除（均需管理员令牌）
+curl -X POST -H "X-Butler-Token: <adminToken>" http://<母机IP>:7317/api/tasks/<taskId>/trash
+curl -X POST -H "X-Butler-Token: <adminToken>" http://<母机IP>:7317/api/tasks/<taskId>/restore
+curl -X POST -H "X-Butler-Token: <adminToken>" http://<母机IP>:7317/api/tasks/<taskId>/purge
+# 默认任务列表 / 统计不含回收站任务，加 includeTrashed=1 查看（控制台「垃圾桶」同源）
+curl -H "X-Butler-Token: <adminToken>" "http://<母机IP>:7317/api/tasks?includeTrashed=1"
 
 # 实时事件（SSE）
 curl -N "http://<母机IP>:7317/api/events?token=<adminToken>"
@@ -353,7 +361,7 @@ curl -X POST http://<母机IP>:7317/api/reminders \
 ## 测试与验收
 
 ```bash
-# 单元测试：Hub 240 + 设备代理 90 + 共享协议 9（共 339）
+# 单元测试：Hub 257 + 设备代理 90 + 共享协议 9（共 356）
 node --test hub/test device-agent/test shared/test
 
 # 受限沙箱（Node 测试运行器无法 spawn 子进程）时：
@@ -373,7 +381,7 @@ node scripts/demo.js
 
 **实测结果**
 
-- `hub/test` 240/240、`device-agent/test` 90/90、`shared/test` 9/9（合计 339/339）；`dsh-plugin/test` 44 项（43 通过 + 1 项真实 `git push` 集成测试在受限沙箱下跳过，沙箱外应全绿）；
+- `hub/test` 257/257、`device-agent/test` 90/90、`shared/test` 9/9（合计 356/356）；`dsh-plugin/test` 44 项（43 通过 + 1 项真实 `git push` 集成测试在受限沙箱下跳过，沙箱外应全绿）；
 - 关键回归覆盖：进度 keepalive 续期超时、超时自动重试（含关闭开关）、系统自重启（设备通知 + Hub re-exec + 自重启后任务自动重新排队）、并发满载时重启/取消指令优先、**重复派发防护（设备忙碌时 ack 超时不重派并重投同一 command id、派发预算 guard、重复/旧 attempt 结果 200 ignored 收敛、设备收到即 ack、taskId 去重、队列上限与排队 keepalive）**、自主大脑自适应节律（空闲跳过与指数退避封顶、有活/执行动作/失败重置节律、手动思考不受跳过影响、六步 assessment 与 ownerAsk 持久化及回执、心路六步摘要、HTTP PATCH adaptive/ownerAskAck）、计划子任务上下文（parentTaskId/主任务目标/计划步骤/兄弟子任务、planner 自包含要求）与子任务按 taskId 隔离 Hermes 会话、规划子任务超时兜底与旧数据迁移、Agnes 执行计划（并行组同时派发 / 依赖闸门 / 失败卡点暂停与重试恢复 / Mika 单并发排队 / 取消级联 / 计划元数据持久化）、Hermes 退出码 1 的可读诊断与沙箱提示、任务执行记录（Markdown + 索引 + 离线导出）、执行记录 API、系统语言设置持久化、长期目标（计划归一化/CRUD/立即跟进/定时扫描/持久化恢复/暂停止（跳过下一次、暂停到点自动恢复）/新的指导指令（校验、追加、注入跟进任务、提案刷新）/恢复自动跟进（paused 与 stopped））、管家心路（思考/工作/里程碑条目、每日总结模型生成与降级、设置与周期、持久化、HTTP 接口、历史回填）、头脑风暴（对话落盘与多轮历史、模型失败降级、空回复、to-task 生成任务与目标关联、会话创建/删除与 activeId、持久化、HTTP 接口、SSE 不写常规事件）、心智（默认灵魂/工作方法与上限、PATCH 合并语义与 resetSoul/resetSkill、显式文本优先、提示词注入且保留六步、持久化重启恢复、HTTP 接口与 SSE 不写常规事件）、提醒（归一化/nextDueAt/CRUD/鉴权/SSE/持久化/到点回写与重复推进/通知方式 notifyStyle 默认与校验）、设备用途昵称（设置/清除/超长拒绝/设备重报 manifest 不覆盖/持久化恢复/任务展示名回退）、插件密钥存储（优先 Harness credentials，服务不可用时回退本机文件并标注来源）、插件 Git Push（非 loopback 拒绝/无仓库提示/仓库分支远端读取/推送已提交内容/自动设置上游）、DSH bridge 地址同步（插件写入 + POST 更新、无效地址 400、Hub 重启后复用、旧端口自愈重试）、插件重启 Hub（外部进程走自重启接口、旧 Hub 无自重启时给出原因）、DSH Host 服务惰性解析（credentials / sessionController 在挂载后才激活也能用）；
 - `scripts/smoke-test.js` 全绿：注册 → 按 skills/model 路由 → 杀掉设备后 TTL 离线 → 新任务 queued 且带 `route.excluded` → 新设备上线后自动完成 → SSE 首帧 snapshot；
 - `scripts/demo.js` 3 条示例任务分别路由到 3 台设备并 `completed`；
@@ -383,7 +391,7 @@ node scripts/demo.js
 
 除了「发一条指令→等结果」的一次性任务，控制台还可以建立**长期目标**：Hub 会按计划自动派一条跟进任务，检查目标当前进度、风险和下一步建议，把结论写回目标时间线。
 
-- 进入方式：桌面端顶部「目标」标签 / 手机端汉堡菜单 →「目标」；
+- 进入方式：桌面端「目标」区块 / 手机端底部导航 →「目标」；
 - 新建目标：标题、描述（要跟进什么、期望什么）、计划（**每天 HH:mm** 或 **每 N 分钟/小时**）、可选任务要求（模型/技能，与发指令一致）；
 - 每个目标支持：**立即跟进**（马上创建一条关联任务）、**暂停止**（跳过下一次 / 暂停 1 天 / 暂停到指定时间自动恢复 / 一直暂停手动恢复）、**恢复自动跟进**（暂停或已停止的目标都可恢复）、**新的指导指令**（追加式，之后每次自动跟进都会带上）、**停止**（终态，不再自动检查）、**删除**、查看历史检查与上次建议；
 - 暂停止细节：暂停中的目标仍可「立即跟进」；选择「暂停到指定时间」后，Hub 到点自动恢复为进行中并按计划重排下一次跟进（暂停期间不补跑）；「跳过下一次」把下一次自动跟进推进一个计划周期，若已有待确认提案会一并取消；
@@ -410,7 +418,7 @@ node scripts/demo.js
 
 除了任务、目标和管家心路，控制台还提供**头脑风暴**：与管家大脑进行多轮对话，把模糊想法梳理成可执行的方向。
 
-- 入口：桌面端顶部「头脑风暴」Tab / 手机端汉堡菜单 →「头脑风暴」；
+- 入口：桌面端「头脑风暴」区块 / 手机端底部导航 →「对话」（头脑风暴）；
 - 上下文：每一轮都会带上长期目标（活跃/暂停）、进行中与失败任务、最近 3 天「管家心路」总结和待确认提案；system 提示词要求先给结论、区分事实与假设、给 2–3 个方案并推荐一个、结尾给出「下一步」，不要输出 JSON；
 - 会话：首条用户消息自动生成标题；Hub 最多保留 30 个会话、每个会话 200 条消息、单条正文 8000 字；可新建、切换、删除会话；
 - 模型与降级：复用自主大脑的模型配置（`BRAIN_API_KEY` / `AGNES_API_KEY` 等）；未配置 Key 或调用失败时，回复会带错误提示但对话仍然保存，可继续追问；
@@ -433,7 +441,7 @@ node scripts/demo.js
 
 除了任务和长期目标，控制台还提供**提醒**：在指定时间让手机弹一条系统通知。
 
-- 进入方式：桌面端顶部「提醒」Tab / 手机端汉堡菜单 →「提醒」；深链 `/?open=reminders`；
+- 进入方式：桌面端「提醒」区块 / 手机端底部导航 →「提醒」；深链 `/?open=reminders`；
 - 新建提醒：标题、备注（可选）、到期时间（本地时区日期时间）、重复方式（**不重复 / 每天 / 每周**）、**通知方式（温和通知 / 闹钟）**、启用开关；列表支持编辑、启用/停用、删除，按到期时间排序，过期未停用的会标注「已过期」；
 - 提醒保存在 Hub 的 `hub/data/state.json`（私密数据，gitignore），API 见 [docs/PROTOCOL.md](docs/PROTOCOL.md)；通知方式字段为 `notifyStyle`（`gentle` 温和通知，默认；`alarm` 闹钟式）；
 - **通知只在手机 APK 内发送**：
@@ -461,11 +469,20 @@ task-records/
 
 ### 控制台查看执行记录
 
-- 手机端：**汉堡菜单（左上角三条线）→ 执行记录**；桌面端：设置 → 系统维护 → 浏览执行记录；
-- 汉堡菜单用 fixed 定位跟随当前视口，并锚定在按钮下方（不会固定在页面顶部）；
+- 手机端：**底部导航（可左右滑动）→ 执行记录**；桌面端：设置 → 系统维护 → 浏览执行记录；
+- 手机端底部导航常显且可横向滑动（状态/任务/目标/心路/对话/心智/提醒/指令/开发/设置/执行记录），桌面端直接滚动页面查看各区块；
 - 支持搜索（任务 ID / 指令 / 设备 / 错误）、按状态筛选、点击查看；
 - 记录以 Markdown 渲染（标题/表格/代码块/时间线），可**复制**或**下载 .md**，父子任务可直接互跳；
 - 深链：`/?open=records` 直接打开执行记录；`/?open=settings` 直接打开设置。
+
+### 回收站（Task Trash）
+
+已结束（完成 / 失败 / 超时 / 取消）的任务可以回收进垃圾桶，保留完整数据与执行记录，只从日常视图里隐藏：
+
+- 控制台任务页筛选新增「垃圾桶」chip（计数为回收站根任务数）：任务卡操作可「回收」，垃圾桶视图内可「恢复」或「彻底删除」（danger 二次确认）；失败视图提供「回收全部失败任务」；
+- 回收按线程生效：同任务线程的后续任务、计划父任务与其子任务会一起进回收站；已归档任务回收时自动取消归档（两者互斥）；
+- 默认任务列表、统计与自主大脑思考都忽略回收站任务；`GET /api/tasks?includeTrashed=1` 或 `/api/snapshot` 可看到它们（前者是列表，后者供控制台垃圾桶视图）；
+- 彻底删除（`POST /api/tasks/:id/purge`）会删除任务、同线程任务与计划子任务，清理长期目标里的任务引用（`taskIds` / `runningTaskId` / `lastTaskId`），并删除对应执行记录 Markdown，操作不可撤销。
 
 ### 多语言（简体中文 / English）
 

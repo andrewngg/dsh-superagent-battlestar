@@ -102,13 +102,18 @@
 { now, stats, devices:[{id,name,kind,online,tags,load}],
   goals:[{id,title,nickname,status,schedule,nextCheckAt,lastCheckStatus,lastSummary(400),
           guidance(最近3条),taskIds,runningTaskId,pendingApproval,linkedStats}],
-  tasks: 最近 24h + 全部活动任务，最多 40 条:
+  tasks: 可行动任务（assigned/running/waiting/queued/failed/timeout）最多 24 条
+         + 最近完成（24h 内，按 finishedAt 倒序）最多 8 条:
           [{id,instruction(300),status,goalId,isPlan,parentTaskId,threadId,attempts,maxAttempts,
             createdAt,updatedAt,finishedAt,error(300),progress,planStep,planTotal,
-            childProgress,assignedDeviceName,lastEvent}],
+            childProgress,assignedDeviceName,lastEvent,dependsOn(最近6个前置)}],
+  decisions: 最近 3 条决策（供模型避免重复无效动作）:
+          [{at,summary(160),actions:[{action,taskId,goalId,executed,skippedReason,error(80)}]}],
   approvals: [{goalId,goalTitle,createdAt,reason}] }
 ```
-任务只保留与“可能值得行动”相关：failed/timeout/cancelled、waiting、queued/running、最近完成。已归档任务不进入。
+- 只喂“可能值得行动”的任务：`cancelled` 与已归档任务**不进入**快照，避免 40 条历史把可行动任务挤掉；排序优先级 failed/timeout → waiting → running/assigned → queued，同级按 `updatedAt` 倒序。
+- 每条任务渲染相对时间（`完成/排队/更新 N 分钟前`），让模型能判断“卡了多久”。
+- 决策记忆最多 3 条，帮助模型看到上一轮被拒的动作与原因，减少重复无效调用。
 
 ### 2.5 HTTP（hub/lib/http.js）
 - `GET /api/brain` → `{ brain, decisions, hubTime }`（decisions 默认 20 条，`?decisions=` 可调，范围 1..30）。
@@ -276,32 +281,36 @@
 ### 8.2 大脑状态新增字段（`brain.js` / `state.json.brain`）
 - `adaptive`（布尔，默认 true）：是否启用自适应节律；关闭后一律用 `intervalSec`。
 - `idleStreak`：连续空闲轮数（0 = 有活）。
-- `effectiveIntervalSec`：下一次实际使用的间隔（`adaptive` 时 = `min(intervalSec * 2^idleStreak, MAX_IDLE_SEC=1800)`）。
-- `nextThinkAt`：显式排期；存在时优先于 `lastThinkAt + intervalSec`。
+- `effectiveIntervalSec`：下一次实际使用的间隔；`adaptive` 时退避上限为 `idleIntervalCapSec(intervalSec) = min(max(MAX_IDLE_SEC, 4×intervalSec), 6h)`（基准 1800s → 封顶 7200s，基准 3600s → 14400s）。
+- `nextThinkAt`：显式排期；存在时优先于 `lastThinkAt + effectiveIntervalSec`。
 - `skippedCycles`：自上次真实思考以来跳过的轮数（没有新信号时直接跳过模型调用）。
+- `consecutiveFailures`：连续思考失败次数（0–6）；失败时按 `max(idleStreak, consecutiveFailures)` 指数退避，避免模型故障时按基准间隔反复重试；一次成功即清零。
 - `lastAssessment`：最近一次六步思考结论 `{goals, progress, betterWay, improvement, myMove, ownerAsk}`（各 ≤400 字）。
 - `ownerAsk`：需要主人参与的事项 `{text, at, goalId?}`；PATCH `/api/brain {ownerAskAck:true}` 清除。
 - `restoreBrain` 容错恢复以上字段；PATCH 支持 `adaptive`、`ownerAskAck`。
 
 ### 8.3 节律规则（Hub）
-- `_brainWorkload()` 统计「有活」信号：执行中任务、可重试失败（attempts < maxAttempts）、待确认提案、近期到期的目标检查、有在线设备时的排队任务。
-- `_brainHasNewSignalsSince(lastThinkAt)`：上次思考后任务/目标/审批/心路/头脑风暴是否有变化，或目标检查已到期。
-- `runBrainCycle()`：到期后若 `busy=false` 且无新信号且已思考过 → **跳过模型调用**（`skippedCycles++`、间隔按 2 倍退避、广播 brain.updated、写 debug 日志），否则正常思考。
-- `_runBrainThink()` 结束（finally）：`busy` 或执行了动作为 → `idleStreak=0`、`effectiveIntervalSec=intervalSec`；否则 `idleStreak++`、按 2 倍退避，封顶 1800s；`nextThinkAt = now + effectiveIntervalSec`；错误时重置为基准间隔并重排（配置错误尽快暴露）。
+- `_brainWorkload()` 统计「有活」信号：执行中任务、可重试失败（failed/timeout 且 attempts < maxAttempts）、待确认提案、近期到期的目标检查、有在线设备时的排队任务。**cancelled 不算可重试**（否则取消一次任务会让大脑一整天保持“忙”、无法降频）。
+- `_brainHasNewSignalsSince(lastThinkAt)`：上次思考后任务/目标/审批/心路/头脑风暴是否有变化，或目标检查已到期（心路排除大脑自己写的 `thought` 条目，避免自唤醒）。
+- `runBrainCycle()`：到期后若 `busy=false` 且无新信号且已真实思考过 → **跳过模型调用**（`skippedCycles++`、`idleStreak++`、按 2 倍退避、广播 brain.updated、写 debug 日志），否则正常思考；每轮只评估一次 workload（同一结果传给 `requestBrainThink → _runBrainThink → _brainUpdateCadence`）。
+- `_runBrainThink()` 结束（finally）：失败 → `consecutiveFailures++`（封顶 6）、`idleStreak=0`；成功且 `busy` 或执行了动作 → `idleStreak=0`；成功但依旧空闲 → `idleStreak++`；`effectiveIntervalSec` 与 `nextThinkAt` 按 `_brainApplyInterval()` 重排。
+- 有新的失败信号后（如新的 failed 任务），`busy=true` 会立刻回到基准间隔，保证故障恢复及时。
 - 手动思考（`POST /api/brain/think`）不受跳过规则影响，但同样更新节律。
 
 ### 8.4 六步思考协议（提示词 + 解析）
-- `buildBrainPrompt`：系统提示要求严格 JSON：
-  `{"assessment":{"goals":"现在有什么目标","progress":"进度在哪里","betterWay":"有什么更好的工作方式","improvement":"我需要改进哪里","myMove":"我可以做什么推进进度","ownerAsk":"需要主人做什么（无则空字符串）"},"summary":"一句话结论","actions":[{...同现有}]}`
-  并要求：先完成六步再给动作；`actions` 为空是合法且常见的；`ownerAsk` 只在确实需要主人决策/授权/提供信息时填写。
+- `buildBrainPrompt(snapshot, { mind, maxActions })`：系统提示要求严格 JSON：
+  `{"assessment":{"goals":"现在有什么目标","progress":"进度在哪里","betterWay":"有什么更好的工作方式","improvement":"我需要改进哪里","myMove":"我可以做什么推进进度","ownerAsk":"需要主人做什么（无则留空字符串）"},"summary":"一句话结论","actions":[{...同现有}]}`
+  并要求：先完成六步再给动作；`actions` 为空是合法且常见的；`ownerAsk` 只在确实需要主人决策/授权/提供信息时填写；本轮动作上限取配置 `maxActions`（1–3）。
+- 用户提示包含**最近 3 条决策**（时间、摘要、每个动作的执行/跳过原因），并明确“重复以下无效动作会被再次拒绝”；任务行带相对时间（完成/排队/更新 N 分钟前）；示例 JSON 使用通用目标，不含个人场景。
 - `parseBrainReply` 返回 `{ summary, actions, assessment, ownerAsk }`；`assessment` 逐字段截断，`ownerAsk` 非空时归一化为 `{text, goalId?}`。
 - 决策记录新增 `assessment`、`ownerAsk` 字段；`brain.lastAssessment`、`brain.ownerAsk` 同步，SSE `brain.updated` 携带。
-- 心路：思考条目的正文包含六步摘要（有 `ownerAsk` 时写「需要主人：…」）。
+- 心路：思考条目的正文包含六步摘要（有 `ownerAsk` 时写「需要主人：…」）；低价值思考（摘要属于「无需/暂不/无动作/保持观察/没有需要」一类，且无执行动作、无错误、无 `ownerAsk`）不写心路；连续失败只在第一次记录。
 - 控制台：自主大脑卡片/抽屉展示最近一次六步思考、需要主人的事项（可「知道了」清除）、当前节律（基准间隔 / 实际间隔 / 空闲连续轮数 / 跳过轮数 / 下次思考时间）。
 
 ### 8.5 测试
-- `brain.test.js`：`normalizeAssessment`、`parseBrainReply`（含/不含 assessment、ownerAsk 归一化）、`restoreBrain` 新字段、`computeNextThinkAt` 优先 `nextThinkAt`、`brainToJson` 新字段、`normalizeBrainPatch`（adaptive/ownerAskAck）、提示词包含六步。
+- `brain.test.js`：`normalizeAssessment`、`parseBrainReply`（含/不含 assessment、ownerAsk 归一化）、`restoreBrain` 新字段（含 `consecutiveFailures`）、`computeNextThinkAt` 优先 `nextThinkAt`、`brainToJson` 新字段、`normalizeBrainPatch`（adaptive/ownerAskAck）、提示词包含六步。
 - `brain-hub.test.js`：空闲时 `runBrainCycle` 跳过模型调用且退避；有活时重置节律；执行动作后 `nextThinkAt` 按基准间隔；ownerAsk 落库与 ack 清除；心路包含六步。
+- `brain-optimize.test.js`（prompt 体积与噪音优化回归）：`idleIntervalCapSec`/`effectiveIntervalSec` 上限、`formatAge` 渲染、提示词含最近决策与任务相对时间且动作上限来自配置、快照过滤 cancelled/completed 且 cancelled 不再算 busy、空闲退避可突破 1800s（1800→3600→7200）、失败退避 600→1200→2400 且心路只记一次失败、纯 `none` 决策不写心路。
 
 ### 8.6 与心智（Soul / Skill）的关系
 - 每轮思考的系统提示由 `buildBrainPrompt(snapshot, { mind })` 组装：自主管家身份 + 六步要求 + **灵魂（Soul）** + **工作流程（Skill）** + 动作白名单/保守原则。

@@ -20,7 +20,7 @@ const { toHttpError, unauthorized, forbidden, notFound, badRequest } = errors;
 const { LIMITS } = protocol;
 
 const TASK_ACTION_RE = /^tasks\/([^/]+)\/(ack|progress|result)$/;
-const TASK_ADMIN_RE = /^\/api\/tasks\/([^/]+)(?:\/(cancel|retry|archive|unarchive))?$/;
+const TASK_ADMIN_RE = /^\/api\/tasks\/([^/]+)(?:\/(cancel|retry|archive|unarchive|trash|restore|purge))?$/;
 const TASK_FOLLOW_RE = /^\/api\/tasks\/([^/]+)\/follow-up$/;
 const TASK_ANSWER_RE = /^\/api\/tasks\/([^/]+)\/answer$/;
 const TASK_EXTERNAL_RE = /^\/api\/tasks\/([^/]+)\/external-result$/;
@@ -844,6 +844,7 @@ async function handleRequest(hub, req, res) {
         status: queryString(url, 'status'),
         deviceId: queryString(url, 'deviceId'),
         includeArchived: queryString(url, 'includeArchived') === '1',
+        includeTrashed: queryString(url, 'includeTrashed') === '1',
         limit: queryNumber(url, 'limit'),
       });
       return sendJson(res, 200, { tasks });
@@ -935,6 +936,21 @@ async function handleRequest(hub, req, res) {
       await readJsonBody(req);
       const task = hub.archiveTask(hub._requireTask(taskId), false);
       return sendJson(res, 200, { task: hub.taskToJson(task) });
+    }
+    if (action === 'trash' && method === 'POST') {
+      await readJsonBody(req);
+      const task = hub.trashTask(hub._requireTask(taskId));
+      return sendJson(res, 200, { ok: true, task: hub.taskToJson(task) });
+    }
+    if (action === 'restore' && method === 'POST') {
+      await readJsonBody(req);
+      const task = hub.restoreTask(hub._requireTask(taskId));
+      return sendJson(res, 200, { ok: true, task: hub.taskToJson(task) });
+    }
+    if (action === 'purge' && method === 'POST') {
+      await readJsonBody(req);
+      const result = hub.purgeTask(hub._requireTask(taskId));
+      return sendJson(res, 200, { ok: true, deleted: result.deleted });
     }
     throw notFound('接口不存在');
   }

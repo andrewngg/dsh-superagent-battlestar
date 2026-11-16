@@ -207,7 +207,7 @@ flowchart TD
 ### 3.8 自主大脑（Brain）
 
 - 模块 `hub/lib/brain.js` + Hub 内置定时器：`brainTickMs`（默认 30s）检查是否到点，`brain.intervalSec`（默认 180s）是模型思考间隔；两者互不代替，思考间隔可在 60–3600s 之间调整。
-- 每次思考读取当前快照（长期目标、最近任务、待确认提案、设备负载），要求模型输出严格 JSON：`{summary, actions:[{action,taskId?,goalId?,instruction?,reason,confidence}]}`，无效/越界的动作会被归一化或丢弃。
+- 每次思考读取当前快照（长期目标、可行动任务 + 最近完成、最近 3 条决策、待确认提案、设备负载），要求模型输出严格 JSON：`{assessment, summary, actions:[{action,taskId?,goalId?,instruction?,reason,confidence}]}`，无效/越界的动作会被归一化或丢弃。快照只喂 `assigned/running/waiting/queued/failed/timeout`（最多 24 条）与 24h 内最近完成（最多 8 条），`cancelled` 与已归档任务不进入；任务行带相对时间（完成/排队/更新 N 分钟前），最近 3 条决策带执行/跳过原因，避免模型重复无效动作。
 - 动作白名单：`retry_task`（重试失败/超时/已取消任务，受 `maxAttempts` 限制）、`resume_thread`（对已结束任务开新线程继续）、`create_task`（新建普通任务，可选挂到目标）、`link_task`（把已有任务关联到目标）、`none`；大脑只能调用白名单动作，不执行设备命令或任意代码。
 - 两种模式：`auto`（默认）自动执行动作，单轮最多 `maxActions` 个（默认 2，最多 3），置信度低于 `0.6` 的动作只记录为 `low-confidence` 不执行；`suggest` 只记录建议（`executed:false`），不改任务。
 - 决策与错误持久化在 `state.json` 的 `brain` 字段，`decisions` 保留最近 30 条（触发方式 manual/schedule、耗时、动作、执行结果/跳过原因/错误，以及六步 `assessment` 与 `ownerAsk`）；`lastError` 只在下一次成功思考后清空，思考失败不会向调用方抛错，也不阻断目标跟进。
@@ -217,16 +217,16 @@ flowchart TD
 #### 自适应节律（`adaptive`，省 token）
 
 - 目标：没有实质工作时降低思考频次，减少模型调用与 token 消耗；一旦有活，自动回到基准间隔。
-- 新字段：`adaptive`（默认 `true`）、`idleStreak`（连续空闲思考次数，0–20）、`effectiveIntervalSec`、`nextThinkAt`、`skippedCycles`。adaptive 开启时有效间隔按 `min(intervalSec × 2^idleStreak, MAX_IDLE_SEC)` 指数退避，`MAX_IDLE_SEC = 1800s`；`nextThinkAt` 显式保存时优先于推导值。
-- `runBrainCycle()` 只在同时满足「adaptive 开启、已真实思考过（decisions 非空）、当前无繁忙工作、`lastThinkAt` 之后无新信号」时跳过模型调用：`skippedCycles+1`、`idleStreak+1`（封顶 20）、按新间隔重排、广播 `brain.updated`（payload 带 `skipped:true`），本轮不产生决策。
-- 工作判定 `_brainWorkload()`：存在进行中/等待任务、可重试的失败任务、待用户确认的提案、临近到期的目标跟进，或「有排队任务且设备在线」即视为 busy。新信号 `_brainHasNewSignalsSince(lastThinkAt)`：任务、目标、提案、非 `thought` 心路条目、头脑风暴会话的更新时间。
-- 真实思考结束后 `_brainUpdateCadence()` 更新节律：失败、busy 或实际执行了动作 → `idleStreak=0`（回到基准间隔）；否则 `idleStreak+1`；每次真实思考都会清零 `skippedCycles`。手动思考（`POST /api/brain/think`）不受跳过规则限制，但同样更新节律；`PATCH /api/brain` 修改 `adaptive/intervalSec` 后从当前时间重新排期（`_rescheduleBrainFromNow`）。
+- 新字段：`adaptive`（默认 `true`）、`idleStreak`（连续空闲思考次数，0–20）、`effectiveIntervalSec`、`nextThinkAt`、`skippedCycles`、`consecutiveFailures`（0–6）。adaptive 开启时有效间隔按 `min(intervalSec × 2^max(idleStreak,consecutiveFailures), idleIntervalCapSec(intervalSec))` 退避，`idleIntervalCapSec = min(max(1800, 4×intervalSec), 6h)`（基准 1800s → 封顶 7200s）；`nextThinkAt` 显式保存时优先于推导值。
+- `runBrainCycle()` 只在同时满足「adaptive 开启、已真实思考过（decisions 非空）、当前无繁忙工作、`lastThinkAt` 之后无新信号」时跳过模型调用：`skippedCycles+1`、`idleStreak+1`（封顶 20）、按新间隔重排、广播 `brain.updated`（payload 带 `skipped:true`），本轮不产生决策。每轮只计算一次 workload 并透传给后续步骤。
+- 工作判定 `_brainWorkload()`：存在进行中/等待任务、可重试的失败任务（failed/timeout 且 attempts < maxAttempts；`cancelled` 不算，避免取消一次就让大脑整天保持 busy）、待用户确认的提案、临近到期的目标跟进，或「有排队任务且设备在线」即视为 busy。新信号 `_brainHasNewSignalsSince(lastThinkAt)`：任务、目标、提案、非 `thought` 心路条目、头脑风暴会话的更新时间。
+- 真实思考结束后 `_brainUpdateCadence()` 更新节律：失败 → `consecutiveFailures+1`（封顶 6）且 `idleStreak=0`；成功且 busy 或实际执行了动作 → `idleStreak=0`（回到基准间隔）；成功但依旧空闲 → `idleStreak+1`；每次真实思考都会清零 `skippedCycles`。连续失败按指数退避重试（封顶 6h），成功一次即清零。手动思考（`POST /api/brain/think`）不受跳过规则限制，但同样更新节律；`PATCH /api/brain` 修改 `adaptive/intervalSec` 后从当前时间重新排期（`_rescheduleBrainFromNow`）。
 
 #### 六步思考协议
 
 - 提示词要求模型按「目标 → 进度 → 更好的工作方式 → 要改进哪里 → 我能做什么 → 是否提醒主人做什么」六步思考，并在严格 JSON 中多输出 `assessment` 对象：`{goals,progress,betterWay,improvement,myMove,ownerAsk}`（每项最长 400 字；`ownerAsk` 可为字符串或 `{text,at,goalId}`，归一化后正文最长 500 字）。
 - 解析：`parseBrainReply` 返回 `{summary,actions,assessment,ownerAsk}`；`assessment` 全空时为 `null`，顶层字符串 `ownerAsk` 也兼容。决策记录新增 `assessment` 与 `ownerAsk`，并同步到大脑状态 `lastAssessment/ownerAsk`。
-- 管家心路：思考条目正文按六步分行（`- 目标：…`、`- 进度：…`、`- 更好的方式：…`、`- 要改进：…`、`- 我来推进：…`、`- 需要主人：…`），`meta.ownerAsk` 保存提醒文案；纯「无需动作」且无 `ownerAsk` 的思考仍不记录。
+- 管家心路：思考条目正文按六步分行（`- 目标：…`、`- 进度：…`、`- 更好的方式：…`、`- 要改进：…`、`- 我来推进：…`、`- 需要主人：…`），`meta.ownerAsk` 保存提醒文案；低价值思考（摘要为「无需/暂不/无动作/保持观察」一类且无执行动作、无错误、无 `ownerAsk`）不记录，连续失败只记第一次（避免刷屏）。
 - 回执：`PATCH /api/brain {ownerAskAck:true}` 清空 `brain.ownerAsk`（控制台「已知悉」），非布尔值/其他非法值返回 400；`GET /api/brain` 输出 `effectiveIntervalSec/nextThinkAt/skippedCycles/lastAssessment/ownerAsk` 等新字段。
 
 ### 3.9 管家心路（Journal）
@@ -257,6 +257,15 @@ flowchart TD
 - 提示词注入：`_runBrainThink` 用 `buildBrainPrompt(snapshot, {mind: this.mind})`，在身份、严格 JSON 与六步协议之后插入 `## 你的灵魂（个性与价值观）`、`## 你的工作方法（思考与行动流程）` 与衔接句「先按上面的灵魂与工作方法推进判断，再把它压缩进六步 assessment；输出仍然必须是下面的严格 JSON 结构。」，再跟随动作白名单与保守原则；按上述上限截断，无 `mind` 时提示词保持原样（向后兼容）。
 - 恢复：构造参数 `options.mind` 与 `state.json` 的 `mind` 都经 `restoreMind` 容错恢复（非对象/空文本回退默认、超长截断、非法 `updatedAt` 置 `null`）；`serializeState()` 始终写出 `{soul,skill,updatedAt}`。
 - 事件：`mind.updated` 与 `journal.updated` / `brainstorm.updated` 一致，只推送 SSE、不写入常规事件列表（`record:false`）。模型调用本身沿用自主大脑的 `BRAIN_*` / `AGNES_*` 环境变量，不新增配置项。
+
+### 3.12 任务回收站（Trash）
+
+- 数据模型：任务新增 `trashedAt`（ISO 字符串或 `null`，随 `state.json` 持久化）与计算字段 `trashed = Boolean(trashedAt)`，`taskToJson` 同时输出两者。只有终态任务（`completed / failed / timeout / cancelled`）可回收；`queued/assigned/running/waiting` 调用 `trashTask` 返回 400「只能回收已结束的任务」。
+- 回收（trash）：`hub.trashTask(task)` 按线程生效——任务本身 + 同 `threadId` 的任务 + 计划子任务（`parentTaskId`/`childTaskIds`）一起写入 `trashedAt`，其中非终态成员跳过并记日志；同时清掉 `archived/archivedAt`（归档与回收站互斥）；广播 `task.updated`，任务事件 `trashed`「任务移入回收站」；重复回收幂等。回收不删除任何任务数据、事件或执行记录。
+- 隐藏规则：`listTasks()` 默认同时排除已归档与回收站任务（`includeTrashed:true` 才返回）；`stats()`、`_brainWorkload()`、`_brainHasNewSignalsSince()`、`_brainSnapshot()` 以及目标进度统计都排除回收站任务（不参与路由与统计）；`snapshot()` 返回的 `tasks` 仍包含回收站任务，供控制台垃圾桶视图使用。
+- 恢复（restore）：`hub.restoreTask(task)` 把任务与同线程/计划子任务一起清空 `trashedAt`，广播 `task.updated`，任务事件 `restored`「任务已恢复」；恢复后保持未归档。不在回收站 → 400「任务不在回收站中」。
+- 彻底删除（purge）：`hub.purgeTask(task)` 仅允许回收站中的任务（否则 400「只能彻底删除回收站中的任务」）；删除任务本身、同线程任务与计划子任务；清理长期目标引用（`goal.taskIds` / `goal.runningTaskId` / `goal.lastTaskId`，并广播 `goal.updated`）；尽力删除 `task-records/<date>/<taskId>.md` 并刷新索引；逐个广播 `task.deleted`（`{taskId}`）；返回 `{taskId, deleted:[...]}`。
+- HTTP：`POST /api/tasks/:id/trash|restore|purge` 与 `GET /api/tasks?includeTrashed=1`（均需管理员令牌；任务不存在 → 404「任务不存在」）。控制台任务筛选新增「垃圾桶」chip，失败视图支持「回收全部失败任务」。
 
 ## 4. 数据模型
 
@@ -291,6 +300,7 @@ flowchart TD
 状态机：`queued → assigned → running → completed | failed | timeout`，任意可 `cancelled`，失败可 `retry` 重新入队。
 任务保存完整事件时间线与路由解释；`output` 支持文本、Markdown、artifacts（文件/链接）。
 `route` 记录 `reason/candidates/excluded`；`routingAdvice` 记录路由提示的来源（`preflight` 本地文件预检、`planner` Agnes 规划指派），随任务持久化并写入任务记录。
+终止态任务可归档（`archived/archivedAt`）或回收进回收站（`trashedAt`，见 3.12），两种状态互斥；`taskToJson` 输出 `trashed/trashedAt` 计算字段。默认任务列表、统计与大脑快照排除回收站任务，而 `/api/snapshot` 为控制台垃圾桶视图保留它们；「彻底删除」会同时清理长期目标引用与执行记录 Markdown。
 
 任务可通过 `goalId` 关联长期目标（见 3.6）；计划子任务用 `context.goalId` 继承父任务的目标，`goalId` 本身留空，避免子任务被当作独立跟进任务。`parentTaskId/childTaskIds/threadId/threadStep/planStep/planGroup` 等计划与线程字段保持不变。任务进入终态时还会写入一条管家心路 `work` 条目（引用 `taskId` 与目标，见 3.9）。头脑风暴「转成任务」创建的任务额外带 `context:{brainstorm:true,sessionId,messageId}`、`priority=6`，并可同时关联长期目标（见 3.10）。
 
@@ -335,9 +345,10 @@ flowchart TD
   "model": null,        // null 表示使用 BRAIN_MODEL / AGNES_MODEL / 默认模型
   "adaptive": true,     // true 时按空闲次数指数退避（见 3.8 自适应节律）
   "idleStreak": 0,      // 连续空闲思考次数，0–20
-  "effectiveIntervalSec": 180, // 当前有效思考间隔；adaptive 时最大 1800
+  "effectiveIntervalSec": 180, // 当前有效思考间隔；adaptive 时封顶 idleIntervalCapSec(intervalSec)
   "nextThinkAt": "2026-11-16T06:03:00.000Z", // 下次计划思考时间（显式优先）
   "skippedCycles": 0,   // 连续跳过模型调用的次数
+  "consecutiveFailures": 0, // 连续思考失败次数，0–6（失败按指数退避）
   "lastAssessment": null, // 六步思考结论 {goals,progress,betterWay,improvement,myMove,ownerAsk}
   "ownerAsk": null,     // 需要主人处理的事项 {text,at,goalId}
   "lastThinkAt": "2026-11-16T06:00:00.000Z",
@@ -373,7 +384,7 @@ flowchart TD
 }
 ```
 
-`GET /api/brain` 返回的 `nextThinkAt` 优先显式保存值，否则由 `lastThinkAt + effectiveIntervalSec` 推导（禁用时为 `null`）；`effectiveIntervalSec` 对外夹在 `intervalSec..1800` 之间。`configured` 表示是否检测到可用的模型 API Key；事件流通过 `brain.updated` 推送最新决策（自适应跳过时 payload 带 `skipped:true`）。
+`GET /api/brain` 返回的 `nextThinkAt` 优先显式保存值，否则由 `lastThinkAt + effectiveIntervalSec` 推导（禁用时为 `null`）；`effectiveIntervalSec` 对外夹在 `intervalSec` 与 `idleIntervalCapSec(intervalSec)`（基准 1800s 时为 7200s，最长 6h）之间。`configured` 表示是否检测到可用的模型 API Key；事件流通过 `brain.updated` 推送最新决策（自适应跳过时 payload 带 `skipped:true`）。
 
 ### 4.7 管家心路（Journal）
 

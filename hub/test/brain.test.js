@@ -96,6 +96,7 @@ test('默认大脑状态与常量符合设计约定', () => {
       effectiveIntervalSec: 180,
       nextThinkAt: null,
       skippedCycles: 0,
+      consecutiveFailures: 0,
       lastThinkAt: null,
       lastError: null,
       lastSummary: '',
@@ -196,6 +197,7 @@ test('restoreBrain：容错恢复默认结构（非法值回退 + 决策裁剪�
     effectiveIntervalSec: 180,
     nextThinkAt: null,
     skippedCycles: 0,
+    consecutiveFailures: 0,
     lastThinkAt: null,
     lastError: null,
     lastSummary: '',
@@ -440,7 +442,7 @@ test('buildBrainPrompt：包含目标/指导/失败任务/设备与既有约定�
   // {text,createdAt} 结构与旧纯字符串指导都要能渲染
   assert.match(user, /用户指导（2026-11-15T00:00:00\.000Z）：优先投广州的岗位/);
   assert.match(user, /用户指导：旧的纯字符串指导/);
-  assert.match(user, /## 任务（最近 1 条，含失败\/等待\/进行中）/);
+  assert.match(user, /## 任务（1 条：进行中 \/ 排队 \/ 失败 \/ 等待回答 \+ 最近完成）/);
   assert.match(user, /task_9｜failed｜投递简历/);
   assert.match(user, /｜目标 goal_1/);
   assert.match(user, /｜尝试 1\/2/);
@@ -452,7 +454,7 @@ test('buildBrainPrompt：包含目标/指导/失败任务/设备与既有约定�
   // 空快照不崩溃，并给出空态占位。
   const empty = buildBrainPrompt({});
   assert.match(empty.user, /## 长期目标（0 个）/);
-  assert.match(empty.user, /## 任务（最近 0 条/);
+  assert.match(empty.user, /## 任务（0 条/);
   assert.match(empty.user, /## 设备（0 台）/);
   const blank = buildBrainPrompt();
   assert.equal(typeof blank.user, 'string');

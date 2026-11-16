@@ -171,10 +171,16 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
   - `requirements`: `{ model?, skills?:[], profile?, gateway?, project?, tags?:[], deviceId? }`，全部可选；`deviceId` 显式指定设备（仍须在线）；`project` 为 Hermes 项目归属（项目名或绝对路径，原样下发设备，由 `cli` 执行器解析并登记到 `$HERMES_HOME/projects.db`）。
   - `priority`: 0-9，默认 5；`timeoutSec`: 30-3600，默认 300；`maxAttempts`: 1-3，默认 2。
   - 创建后立即路由；若无匹配设备，任务留在 `queued` 并记录原因，之后设备上线/能力变化时自动重新路由。
-- `GET /api/tasks?status=&deviceId=&limit=100` → `{ tasks:[Task] }`
+- `GET /api/tasks?status=&deviceId=&limit=100&includeTrashed=1` → `{ tasks:[Task] }`
+  - 默认排除已归档与回收站任务；`includeTrashed=1` 时列表包含回收站任务（`task.trashed=true`）。
 - `GET /api/tasks/:id` → `{ task:Task }`
 - `POST /api/tasks/:id/cancel` → `{ task }`
 - `POST /api/tasks/:id/retry` → `{ task }`（`failed|timeout|cancelled` 可重试，重新入队路由；超时任务在 `maxAttempts` 内会自动重试，无需人工调用）
+- `POST /api/tasks/:id/trash` → `{ ok:true, task }`（把已结束任务移入回收站；同线程任务与计划子任务一起回收；非终态 400「只能回收已结束的任务」；任务不存在 404）
+- `POST /api/tasks/:id/restore` → `{ ok:true, task }`（从回收站恢复任务与同线程/计划子任务；不在回收站 400「任务不在回收站中」）
+- `POST /api/tasks/:id/purge` → `{ ok:true, deleted:[taskId...] }`（仅回收站任务可彻底删除；删除任务/同线程任务/计划子任务，清理长期目标引用与对应执行记录 Markdown，广播 `task.deleted`；不在回收站 400「只能彻底删除回收站中的任务」）
+  - 以上三个接口均需管理员令牌（`x-butler-token`），成功响应中的 `task` 带 `trashed/trashedAt`。
+  - `GET /api/snapshot` 的 `tasks` 包含回收站任务（控制台垃圾桶视图需要），统计 `stats` 与自主大脑快照则排除回收站任务。
 - `POST /api/system/restart` body `{ reason? }` → `202 { ok:true, restarting:true, devices:N, delayMs }`
   - 整套系统自重启：先向在线设备下发 `restart_agent`，`delayMs`（默认 12s，覆盖设备心跳周期）后 Hub 进程自行重启。
   - Hub 以自重启语义恢复：运行中/等待回答的任务自动重新排队，不占用重试次数；规划父任务保持 running 等待子任务收尾。
@@ -242,6 +248,8 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
   "attempts":1, "maxAttempts":2, "timeoutSec":300,
   "output":null, "error":null,
   "goalId":null,
+  "archived":false, "archivedAt":null,                       // 归档（与回收站互斥）
+  "trashed":false, "trashedAt":null,                         // 回收站；trashed 由 trashedAt 派生
   "parentTaskId":null, "childTaskIds":[], "isPlan":false,   // 长任务拆分：父任务 isPlan=true 并带子任务 id
   "planStep":null, "planGroup":null, "planDependsOn":[], "planDependsOnTaskIds":[],  // 子任务的执行计划
   "plan":null,                                               // 父任务：{strategy,blockerPolicy,groups[]}

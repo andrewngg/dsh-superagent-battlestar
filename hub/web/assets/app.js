@@ -26,6 +26,8 @@
   };
   const ACTIVE_STATUS = new Set(['queued', 'assigned', 'running', 'waiting']);
   const RETRYABLE_STATUS = new Set(['failed', 'timeout', 'cancelled']);
+  /** 只有终态任务可以回收进垃圾桶。 */
+  const TRASHABLE_STATUS = new Set(['completed', 'failed', 'timeout', 'cancelled']);
 
   const GOAL_STATUS = {
     active: { label: '进行中', tone: 'active' },
@@ -830,7 +832,7 @@
 
     const named = [
       'device.updated', 'device.online', 'device.offline',
-      'task.created', 'task.updated', 'task.completed', 'task.failed',
+      'task.created', 'task.updated', 'task.completed', 'task.failed', 'task.deleted',
       'goal.created', 'goal.updated', 'goal.deleted', 'goal.approval',
       'nightly.review.updated', 'brain.updated', 'journal.updated', 'brainstorm.updated', 'mind.updated',
       'log', 'ping',
@@ -936,6 +938,7 @@
     if (!payload) return;
     if (name === 'device.updated') return onDeviceUpdated(payload.device);
     if (name === 'device.online' || name === 'device.offline') return onDevicePresence(name, payload);
+    if (name === 'task.deleted') return onTaskDeleted(payload);
     if (name.startsWith('task.')) return onTaskEvent(name, payload.task);
     if (name.startsWith('goal.')) return onGoalEvent(name, payload);
     if (name.startsWith('reminder.')) return onReminderEvent(name, payload);
@@ -1111,6 +1114,32 @@
     if (state.drawer.open && state.drawer.kind === 'task' && state.drawer.id === current.id) refreshOpenDrawer();
     if (isGoalDrawerOpen()) scheduleGoalDetailRefresh(state.drawer.id);
     syncTaskNotifications();
+  }
+
+  /** 任务被彻底删除（回收站 purge / 普通删除）：从本地列表移除并刷新。 */
+  function onTaskDeleted(payload) {
+    const deletedTask = payload && payload.task && payload.task.id ? payload.task : null;
+    const id = String(
+      (payload && (payload.taskId || (deletedTask && deletedTask.id))) || '',
+    );
+    if (!id) return;
+    const known = deletedTask || state.tasks.find((task) => task.id === id);
+    const threadId = known && known.threadId ? String(known.threadId) : '';
+    const before = state.tasks.length;
+    state.tasks = state.tasks.filter((task) => (
+      task.id !== id
+      && task.parentTaskId !== id
+      && !(threadId && String(task.threadId || '') === threadId)
+    ));
+    if (state.tasks.length === before) return;
+    state.sigs.stats = '';
+    state.sigs.tasks = '';
+    if (state.drawer.open && state.drawer.kind === 'task'
+      && !state.tasks.some((task) => task.id === state.drawer.id)) {
+      hideDrawer();
+    }
+    renderAll();
+    if (isGoalDrawerOpen()) scheduleGoalDetailRefresh(state.drawer.id);
   }
 
   function onDeviceUpdated(device) {
@@ -2016,6 +2045,20 @@
   /* ==================================================================
    * 任务列表
    * ================================================================== */
+  /** 回收站任务：snapshot 里保留，但常规筛选、统计与筛选计数都排除。 */
+  function isTrashed(task) {
+    return Boolean(task && (task.trashed || task.trashedAt));
+  }
+
+  function isRootTask(task) {
+    return Boolean(task) && !task.parentTaskId && !task.replyToTaskId;
+  }
+
+  /** 垃圾桶里的根任务（计数与列表都是根任务，线程/子任务随根任务一起回收）。 */
+  function trashRoots() {
+    return state.tasks.filter((task) => isRootTask(task) && isTrashed(task));
+  }
+
   function filteredTasks() {
     const filter = state.taskFilter;
     const roots = state.tasks.filter((task) => !task.parentTaskId && !task.replyToTaskId);
@@ -2024,24 +2067,26 @@
     );
     return roots.filter((root) => {
       const group = groupOf(root);
-      if (filter === 'archived') return group.some((task) => task.archived);
-      const active = group.filter((task) => !task.archived);
-      if (filter === 'all') return active.length > 0;
-      if (filter === 'active') return active.some((task) => ACTIVE_STATUS.has(normStatus(task.status)));
-      if (filter === 'completed') return active.some((task) => normStatus(task.status) === 'completed');
-      if (filter === 'failed') return active.some((task) => ['failed', 'timeout', 'cancelled'].includes(normStatus(task.status)));
+      if (filter === 'trash') return group.some((task) => isTrashed(task));
+      const live = group.filter((task) => !isTrashed(task));
+      if (filter === 'archived') return live.some((task) => task.archived);
+      if (filter === 'all') return live.length > 0;
+      if (filter === 'active') return live.some((task) => ACTIVE_STATUS.has(normStatus(task.status)));
+      if (filter === 'completed') return live.some((task) => normStatus(task.status) === 'completed');
+      if (filter === 'failed') return live.some((task) => ['failed', 'timeout', 'cancelled'].includes(normStatus(task.status)));
       return true;
     });
   }
 
   function renderFilterCounts() {
-    const activeTasks = state.tasks.filter((task) => !task.archived);
+    const activeTasks = state.tasks.filter((task) => !isTrashed(task) && !task.archived);
     const counts = {
       all: activeTasks.length,
       active: activeTasks.filter((t) => ACTIVE_STATUS.has(normStatus(t.status))).length,
       completed: activeTasks.filter((t) => normStatus(t.status) === 'completed').length,
       failed: activeTasks.filter((t) => ['failed', 'timeout', 'cancelled'].includes(normStatus(t.status))).length,
-      archived: state.tasks.filter((t) => t.archived).length,
+      trash: trashRoots().length,
+      archived: state.tasks.filter((t) => !isTrashed(t) && t.archived).length,
     };
     $$('#task-filters .filter-chip').forEach((btn) => {
       const key = btn.dataset.filter;
@@ -2189,11 +2234,11 @@
     return { finished, failed, done: finished.length - failed.length };
   }
 
-  /** 可重试/可继续的失败子任务（不含已归档）。 */
+  /** 可重试/可继续的失败子任务（不含已归档/回收站中的）。 */
   function retryableChildrenOf(task) {
     if (!task || !task.isPlan) return [];
     return childTasksOf(task)
-      .filter((item) => !item.archived)
+      .filter((item) => !item.archived && !isTrashed(item))
       .filter((item) => RETRYABLE_STATUS.has(normStatus(item.status)));
   }
 
@@ -2202,8 +2247,8 @@
    * 子任务进度 + 失败子任务重试 + 本任务重试/继续，避免收起后找不到恢复入口。
    */
   function taskRecoveryStrip(task, status) {
-    if (task.archived) return null;
-    const children = task.isPlan ? childTasksOf(task).filter((item) => !item.archived) : [];
+    if (task.archived || isTrashed(task)) return null;
+    const children = task.isPlan ? childTasksOf(task).filter((item) => !item.archived && !isTrashed(item)) : [];
     const stats = childRecoveryStats(children);
     const canRetry = RETRYABLE_STATUS.has(status);
     const canContinue = !ACTIVE_STATUS.has(status);
@@ -2290,7 +2335,7 @@
     const children = childTasksOf(parent);
     if (!children.length) return null;
     const stats = childRecoveryStats(children);
-    const retryableCount = children.filter((item) => !item.archived && RETRYABLE_STATUS.has(normStatus(item.status))).length;
+    const retryableCount = children.filter((item) => !item.archived && !isTrashed(item) && RETRYABLE_STATUS.has(normStatus(item.status))).length;
     return el('section', { className: 'detail-section' },
       el('div', { className: 'detail-section-head' },
         el('h3', { text: '子任务' }),
@@ -2345,7 +2390,7 @@
   function taskCard(task) {
     const status = normStatus(task.status);
     const card = el('article', {
-      className: 'task-card' + (state.expandedOutput.has(task.id) ? ' output-open' : '') + (state.tasksCollapsed ? ' is-collapsed' : '') + (task.archived ? ' is-archived' : ''),
+      className: 'task-card' + (state.expandedOutput.has(task.id) ? ' output-open' : '') + (state.tasksCollapsed ? ' is-collapsed' : '') + (task.archived ? ' is-archived' : '') + (isTrashed(task) ? ' is-trashed' : ''),
       dataset: { id: task.id, status },
       role: 'button',
       tabIndex: 0,
@@ -2462,32 +2507,43 @@
     actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'open' } },
       icon('chevron'), el('span', { text: '任务详情' })));
     actions.appendChild(el('span', { className: 'spacer' }));
-    if (ACTIVE_STATUS.has(status)) {
-      actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'cancel' } },
-        icon('x'), el('span', { text: '取消' })));
+    if (isTrashed(task)) {
+      actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'restore' } },
+        icon('refresh'), el('span', { text: tr('action.restore') })));
+      actions.appendChild(el('button', { type: 'button', className: 'link-btn is-danger', dataset: { action: 'purge' } },
+        icon('trash'), el('span', { text: tr('action.purge') })));
+    } else {
+      if (ACTIVE_STATUS.has(status)) {
+        actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'cancel' } },
+          icon('x'), el('span', { text: '取消' })));
+      }
+      if (RETRYABLE_STATUS.has(status)) {
+        actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'complete' } },
+          icon('check'), el('span', { text: '标记成功' })));
+        actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'retry' } },
+          icon('refresh'), el('span', { text: '重试' })));
+      }
+      if (!ACTIVE_STATUS.has(status)) {
+        actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'follow-up' } },
+          icon('send'), el('span', { text: '继续此任务' })));
+      }
+      if (status === 'waiting') {
+        actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'answer' } },
+          icon('send'), el('span', { text: '回答 Mika' })));
+      }
+      actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'copy-instruction' } },
+        icon('copy'), el('span', { text: '复制指令' })));
+      actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'edit-instruction' } },
+        icon('edit'), el('span', { text: '编辑重发' })));
+      if (TRASHABLE_STATUS.has(status)) {
+        actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'trash' } },
+          icon('trash'), el('span', { text: tr('action.trash') })));
+      }
+      actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: task.archived ? 'unarchive' : 'archive' } },
+        el('span', { text: task.archived ? '取消归档' : '归档' })));
+      actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'delete' } },
+        el('span', { text: '删除' })));
     }
-    if (RETRYABLE_STATUS.has(status)) {
-      actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'complete' } },
-        icon('check'), el('span', { text: '标记成功' })));
-      actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'retry' } },
-        icon('refresh'), el('span', { text: '重试' })));
-    }
-    if (!ACTIVE_STATUS.has(status)) {
-      actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'follow-up' } },
-        icon('send'), el('span', { text: '继续此任务' })));
-    }
-    if (status === 'waiting') {
-      actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'answer' } },
-        icon('send'), el('span', { text: '回答 Mika' })));
-    }
-    actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'copy-instruction' } },
-      icon('copy'), el('span', { text: '复制指令' })));
-    actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'edit-instruction' } },
-      icon('edit'), el('span', { text: '编辑重发' })));
-    actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: task.archived ? 'unarchive' : 'archive' } },
-      el('span', { text: task.archived ? '取消归档' : '归档' })));
-    actions.appendChild(el('button', { type: 'button', className: 'link-btn', dataset: { action: 'delete' } },
-      el('span', { text: '删除' })));
     actions.appendChild(el('span', { className: 'task-id', text: task.id }));
     card.appendChild(actions);
 
@@ -2530,11 +2586,25 @@
   function renderRecoveryHint() {
     const host = $('#task-recovery-hint');
     if (!host) return;
-    const failed = state.tasks.filter((item) => !item.archived && RETRYABLE_STATUS.has(normStatus(item.status)));
-    const hidden = !failed.length || state.taskFilter === 'failed' || state.taskFilter === 'archived';
+    const failedRoots = state.tasks.filter(
+      (item) => isRootTask(item) && !isTrashed(item) && !item.archived && RETRYABLE_STATUS.has(normStatus(item.status)),
+    );
+    const inFailedView = state.taskFilter === 'failed';
+    const hidden = !failedRoots.length || state.taskFilter === 'archived' || state.taskFilter === 'trash';
     host.hidden = hidden;
     if (hidden) {
       host.replaceChildren();
+      return;
+    }
+    if (inFailedView) {
+      const trashAll = el('button', { type: 'button', className: 'btn btn-ghost btn-sm trash-bulk-btn' },
+        icon('trash'), el('span', { text: tr('trash.bulkTrash') }));
+      trashAll.addEventListener('click', () => void trashAllFailedTasks());
+      host.replaceChildren(
+        icon('alert'),
+        el('span', { className: 'recovery-hint-text', text: `${failedRoots.length} 个失败任务` }),
+        trashAll,
+      );
       return;
     }
     const jump = el('button', { type: 'button', className: 'btn btn-ghost btn-sm' },
@@ -2546,7 +2616,7 @@
     });
     host.replaceChildren(
       icon('alert'),
-      el('span', { className: 'recovery-hint-text', text: `${failed.length} 个失败任务可重试或继续` }),
+      el('span', { className: 'recovery-hint-text', text: `${failedRoots.length} 个失败任务可重试或继续` }),
       jump,
     );
   }
@@ -2576,13 +2646,15 @@
         completed: { icon: 'check', title: '还没有已完成的任务', desc: '设备执行完任务后会显示在这里。' },
         failed: { icon: 'alert', title: '没有失败的任务', desc: '一切正常。' },
         archived: { icon: 'tasks', title: '没有已归档的任务', desc: '任务卡片上的「归档」会把它移到这里。' },
+        trash: { icon: 'trash', title: tr('trash.empty'), desc: tr('trash.emptyDesc') },
       };
       const msg = messages[state.taskFilter] || messages.all;
       list.appendChild(emptyState({ iconName: msg.icon, title: msg.title, desc: msg.desc }));
     } else {
       for (const task of tasks) list.appendChild(taskCard(task));
     }
-    setText('#tasks-sub', `${state.tasks.length} 个任务 · 进行中 ${state.tasks.filter((t) => ACTIVE_STATUS.has(normStatus(t.status))).length}`);
+    const liveTasks = state.tasks.filter((task) => !isTrashed(task));
+    setText('#tasks-sub', `${liveTasks.length} 个任务 · 进行中 ${liveTasks.filter((t) => ACTIVE_STATUS.has(normStatus(t.status))).length}`);
     renderFilterCounts();
     renderRecoveryHint();
   }
@@ -8166,6 +8238,21 @@
         onclick: () => { hideDrawer(); startFollowUp(task.id); },
       }, icon('send'), '继续此任务'));
     }
+    if (isTrashed(task)) {
+      nodes.push(el('button', {
+        type: 'button', className: 'btn btn-ghost btn-sm',
+        onclick: () => restoreTask(task.id),
+      }, icon('refresh'), tr('action.restore')));
+      nodes.push(el('button', {
+        type: 'button', className: 'btn btn-danger btn-sm',
+        onclick: () => purgeTask(task.id),
+      }, icon('trash'), tr('action.purge')));
+    } else if (TRASHABLE_STATUS.has(status)) {
+      nodes.push(el('button', {
+        type: 'button', className: 'btn btn-ghost btn-sm',
+        onclick: () => trashTask(task.id),
+      }, icon('trash'), tr('action.trash')));
+    }
     return nodes;
   }
 
@@ -8311,6 +8398,98 @@
       if (err.status === 401) return handleAuthLost(err.message);
       toast(err.message || '删除失败', 'error');
     }
+  }
+
+  /* ---------------------------------------------------------------- 回收站 */
+
+  async function trashTask(id) {
+    const task = state.tasks.find((item) => item.id === id);
+    if (!task) return;
+    try {
+      const res = await api(`/api/tasks/${encodeURIComponent(id)}/trash`, { method: 'POST', timeout: 15000 });
+      if (res && res.task) upsertTask(res.task);
+      state.sigs.stats = '';
+      state.sigs.tasks = '';
+      await refreshNow(false);
+      toast(tr('trash.trashed'), 'success');
+    } catch (err) {
+      if (err.status === 401) return handleAuthLost(err.message);
+      toast(tr('trash.trashFailed', { message: err.message || '—' }), 'error');
+    }
+  }
+
+  async function restoreTask(id) {
+    try {
+      const res = await api(`/api/tasks/${encodeURIComponent(id)}/restore`, { method: 'POST', timeout: 15000 });
+      if (res && res.task) upsertTask(res.task);
+      state.sigs.stats = '';
+      state.sigs.tasks = '';
+      await refreshNow(false);
+      toast(tr('trash.restored'), 'success');
+    } catch (err) {
+      if (err.status === 401) return handleAuthLost(err.message);
+      toast(tr('trash.restoreFailed', { message: err.message || '—' }), 'error');
+    }
+  }
+
+  async function purgeTask(id) {
+    const task = state.tasks.find((item) => item.id === id);
+    if (!task) return;
+    const ok = await confirmDialog({
+      title: tr('trash.confirmTitle'),
+      message: tr('trash.confirmPurge'),
+      okText: tr('action.purge'),
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      const res = await api(`/api/tasks/${encodeURIComponent(id)}/purge`, { method: 'POST', timeout: 20000 });
+      const deleted = res && Array.isArray(res.deleted) ? res.deleted.map(String) : [id];
+      const removed = new Set(deleted);
+      state.tasks = state.tasks.filter((item) => !removed.has(item.id));
+      if (state.drawer.open && state.drawer.kind === 'task' && removed.has(state.drawer.id)) hideDrawer();
+      state.sigs.stats = '';
+      state.sigs.tasks = '';
+      await refreshNow(false);
+      toast(tr('trash.purged'), 'success');
+    } catch (err) {
+      if (err.status === 401) return handleAuthLost(err.message);
+      toast(tr('trash.purgeFailed', { message: err.message || '—' }), 'error');
+    }
+  }
+
+  /** 失败筛选视图：把当前筛出的失败/超时/取消根任务逐个回收。 */
+  async function trashAllFailedTasks() {
+    const failedRoots = state.tasks.filter(
+      (item) => isRootTask(item) && !isTrashed(item) && !item.archived && RETRYABLE_STATUS.has(normStatus(item.status)),
+    );
+    if (!failedRoots.length) return;
+    const ok = await confirmDialog({
+      title: tr('trash.bulkTitle'),
+      message: tr('trash.confirmPurgeAll'),
+      okText: tr('action.trash'),
+      danger: false,
+    });
+    if (!ok) return;
+    let done = 0;
+    let failed = 0;
+    for (const item of failedRoots) {
+      try {
+        await api(`/api/tasks/${encodeURIComponent(item.id)}/trash`, { method: 'POST', timeout: 15000 });
+        done += 1;
+      } catch (err) {
+        if (err.status === 401) {
+          handleAuthLost(err.message);
+          return;
+        }
+        failed += 1;
+      }
+    }
+    state.sigs.stats = '';
+    state.sigs.tasks = '';
+    await refreshNow(false);
+    if (!failed) toast(tr('trash.bulkDone', { n: done }), 'success');
+    else toast(tr('trash.bulkPartial', { done, failed }), done ? 'warn' : 'error');
   }
 
   async function completeTaskManually(id) {
@@ -8833,6 +9012,9 @@
         else if (action === 'complete') completeTaskManually(id);
         else if (action === 'archive') archiveTask(id, true);
         else if (action === 'unarchive') archiveTask(id, false);
+        else if (action === 'trash') void trashTask(id);
+        else if (action === 'restore') void restoreTask(id);
+        else if (action === 'purge') void purgeTask(id);
         else if (action === 'delete') deleteTask(id);
         else if (action === 'copy-instruction') {
           const task = state.tasks.find((item) => item.id === id);

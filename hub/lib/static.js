@@ -56,7 +56,9 @@ async function sendFile(req, res, filePath) {
   const headers = {
     'Content-Type': mimeFor(filePath),
     'Content-Length': stat.size,
-    'Cache-Control': ['.html','.htm','.js','.css'].includes(ext) ? 'no-cache' : 'public, max-age=300',
+    'Cache-Control': ['.html', '.htm'].includes(ext)
+      ? 'no-store, no-cache, must-revalidate, max-age=0'
+      : ['.js', '.css'].includes(ext) ? 'no-cache' : 'public, max-age=300',
     'X-Content-Type-Options': 'nosniff',
   };
   res.writeHead(200, headers);

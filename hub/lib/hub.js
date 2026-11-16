@@ -7,6 +7,7 @@
 
 const path = require('node:path');
 const os = require('node:os');
+const fs = require('node:fs');
 
 const protocol = require('../../shared/protocol.js');
 const { createHttpServer } = require('./http');
@@ -43,6 +44,7 @@ const {
   brainToJson,
   buildBrainPrompt,
   createBrainThinker,
+  idleIntervalCapSec,
   normalizeBrainPatch,
   parseBrainReply,
   recordBrainDecision,
@@ -731,6 +733,7 @@ class Hub {
       isPlan: raw.isPlan === true,
       archived: raw.archived === true,
       archivedAt: util.str(raw.archivedAt, 40) || null,
+      trashedAt: util.str(raw.trashedAt, 40) || null,
       // 长任务拆分计划：步骤序号 / 并行组 / 依赖（持久化后重启仍按依赖顺序执行）。
       planStep: Number.isFinite(Number(raw.planStep)) && Number(raw.planStep) > 0 ? Math.trunc(Number(raw.planStep)) : null,
       planGroup: util.str(raw.planGroup, 60) || null,
@@ -832,6 +835,8 @@ class Hub {
       goalId: task.goalId || null,
       archived: Boolean(task.archived),
       archivedAt: task.archivedAt || null,
+      trashed: Boolean(task.trashedAt),
+      trashedAt: task.trashedAt || null,
       routingAdvice: task.routingAdvice ? JSON.parse(JSON.stringify(task.routingAdvice)) : null,
       route: {
         reason: task.route.reason,
@@ -852,7 +857,7 @@ class Hub {
     let tasksCompleted = 0;
     let tasksFailed = 0;
     for (const task of this.tasks.values()) {
-      if (task.archived) continue;
+      if (task.archived || task.trashedAt) continue;
       if (task.status === TASK_STATUS.QUEUED) tasksQueued += 1;
       else if (task.status === TASK_STATUS.ASSIGNED) tasksAssigned += 1;
       else if (task.status === TASK_STATUS.RUNNING) tasksRunning += 1;
@@ -980,6 +985,7 @@ class Hub {
     for (const id of ids) {
       const task = this.tasks.get(id);
       if (!task) continue;
+      if (task.trashedAt) continue;
       stats.total += 1;
       if (task.status === TASK_STATUS.ASSIGNED || task.status === TASK_STATUS.RUNNING) stats.running += 1;
       else if (task.status === TASK_STATUS.WAITING) stats.waiting += 1;
@@ -1015,7 +1021,7 @@ class Hub {
     const idSet = new Set(ids);
     return ids
       .map((id) => this.tasks.get(id))
-      .filter((task) => task && !(task.parentTaskId && idSet.has(task.parentTaskId)))
+      .filter((task) => task && !task.trashedAt && !(task.parentTaskId && idSet.has(task.parentTaskId)))
       .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
       .map((task) => this._goalTaskSummary(task));
   }
@@ -1621,7 +1627,7 @@ class Hub {
     const cutoff = Date.now() - 24 * 3600 * 1000;
     const tasks = [...this.tasks.values()]
       .filter((task) => {
-        if (task.archived) return false;
+        if (task.archived || task.trashedAt) return false;
         if (ACTIVE_TASK_STATUSES.has(task.status)) return true;
         const created = Date.parse(task.createdAt);
         return Number.isFinite(created) && created >= cutoff;
@@ -1944,6 +1950,7 @@ class Hub {
       effectiveIntervalSec: this.brain.effectiveIntervalSec,
       nextThinkAt: this.brain.nextThinkAt,
       skippedCycles: this.brain.skippedCycles,
+      consecutiveFailures: this.brain.consecutiveFailures,
       lastThinkAt: this.brain.lastThinkAt,
       lastError: this.brain.lastError,
       lastSummary: this.brain.lastSummary,
@@ -1979,10 +1986,14 @@ class Hub {
       Object.prototype.hasOwnProperty.call(value, 'model') && value.model !== this.brain.model;
     Object.assign(this.brain, value);
     if (ackOwnerAsk) this.brain.ownerAsk = null;
-    if (value.enabled === true) this.brain.lastError = null;
+    if (value.enabled === true) {
+      this.brain.lastError = null;
+      this.brain.consecutiveFailures = 0;
+    }
     if (value.intervalSec !== undefined || value.adaptive !== undefined) {
       // 改基准间隔/切换自适应后，从新基准重新开始，不保留旧的宽松间隔。
       this.brain.idleStreak = 0;
+      this.brain.consecutiveFailures = 0;
       this.brain.effectiveIntervalSec = this.brain.intervalSec;
     }
     if (value.enabled === true) {
@@ -2022,7 +2033,7 @@ class Hub {
       Number(this.brain.effectiveIntervalSec),
       base,
       base,
-      MAX_IDLE_SEC,
+      idleIntervalCapSec(base),
     );
     this.brain.effectiveIntervalSec = current;
     this.brain.nextThinkAt = new Date(Date.now() + current * 1000).toISOString();
@@ -2038,7 +2049,7 @@ class Hub {
     let queuedTasks = 0;
     let retryable = 0;
     for (const task of this.tasks.values()) {
-      if (task.archived) continue;
+      if (task.archived || task.trashedAt) continue;
       if (ACTIVE_TASK_STATUSES.has(task.status)) {
         activeTasks += 1;
         if (task.status === TASK_STATUS.WAITING) waitingTasks += 1;
@@ -2051,14 +2062,9 @@ class Hub {
       ) {
         const maxAttempts = Number.isFinite(Number(task.maxAttempts)) ? Number(task.maxAttempts) : 1;
         const attempts = Number.isFinite(Number(task.attempts)) ? Number(task.attempts) : 0;
-        const finishedMs = Date.parse(task.finishedAt || task.updatedAt || '');
-        const recent = Number.isFinite(finishedMs) && finishedMs > nowMs - 24 * 60 * 60 * 1000;
-        // 用户手动取消的旧任务不再算「有活」，否则大脑会一直以为还有事可做而不肯降频。
-        if (task.status === TASK_STATUS.CANCELLED) {
-          if (recent) retryable += 1;
-        } else if (attempts < maxAttempts) {
-          retryable += 1;
-        }
+        // 用户手动取消的任务不算「有活」：否则 busy 会保持一整天，大脑无法降频省 token。
+        // 只有 failed / timeout 且还有剩余重试次数的任务才算值得思考的活。
+        if (task.status !== TASK_STATUS.CANCELLED && attempts < maxAttempts) retryable += 1;
       }
     }
     let approvals = 0;
@@ -2103,7 +2109,7 @@ class Hub {
       return Number.isFinite(at) && at > base;
     };
     for (const task of this.tasks.values()) {
-      if (task.archived) continue;
+      if (task.archived || task.trashedAt) continue;
       if (changed(task.createdAt) || changed(task.updatedAt) || changed(task.finishedAt)) return true;
     }
     for (const goal of this.goals.values()) {
@@ -2140,7 +2146,7 @@ class Hub {
     this.schedulePersist();
   }
 
-  /** 按 idleStreak 计算实际间隔与下一次思考时间。 */
+  /** 按 idleStreak / 连续失败次数计算实际间隔与下一次思考时间。 */
   _brainApplyInterval() {
     const base = this.brain.intervalSec;
     if (this.brain.adaptive === false) {
@@ -2149,26 +2155,42 @@ class Hub {
       return;
     }
     const streak = util.clampInt(Number(this.brain.idleStreak), 0, 0, 20);
-    const effective = Math.min(base * Math.pow(2, streak), MAX_IDLE_SEC);
+    const failures = util.clampInt(Number(this.brain.consecutiveFailures), 0, 0, 6);
+    // 空闲与连续失败共用指数退避：取两者较大值，退避上限随基准间隔放大（见 idleIntervalCapSec）。
+    const exponent = Math.max(streak, failures);
+    const cap = idleIntervalCapSec(base);
+    const effective = Math.min(base * Math.pow(2, exponent), cap);
     this.brain.effectiveIntervalSec = effective;
     this.brain.nextThinkAt = new Date(Date.now() + effective * 1000).toISOString();
   }
 
-  /** 思考结束后更新节律：有活/有动作 → 回到基准；真没活 → 逐步拉长。 */
-  _brainUpdateCadence(decision) {
-    const workload = this._brainWorkload();
+  /** 思考结束后更新节律：有活/有动作 → 回到基准；真没活 → 逐步拉长；失败 → 失败退避。 */
+  _brainUpdateCadence(decision, workload) {
+    const current = workload || this._brainCycleWorkload || this._brainWorkload();
     const executed = util.arr(decision && decision.actions).some((action) => action.executed);
     const failed = Boolean(decision && decision.error);
-    if (failed || workload.busy || executed) {
+    if (failed) {
+      // 连续失败按 2 倍退避，隔一段时间再试，避免模型故障时每个基准间隔都白烧一次。
+      this.brain.consecutiveFailures = util.clampInt(
+        Number(this.brain.consecutiveFailures) + 1,
+        0,
+        0,
+        6,
+      );
       this.brain.idleStreak = 0;
     } else {
-      this.brain.idleStreak = util.clampInt(Number(this.brain.idleStreak) + 1, 0, 0, 20);
+      this.brain.consecutiveFailures = 0;
+      if (current.busy || executed) {
+        this.brain.idleStreak = 0;
+      } else {
+        this.brain.idleStreak = util.clampInt(Number(this.brain.idleStreak) + 1, 0, 0, 20);
+      }
     }
     this.brain.skippedCycles = 0;
     this._brainApplyInterval();
     this.log(
       'debug',
-      `自主大脑节律：busy=${workload.busy} executed=${executed} 下轮间隔 ${this.brain.effectiveIntervalSec}s`,
+      `自主大脑节律：busy=${current.busy} executed=${executed} failures=${this.brain.consecutiveFailures} 下轮间隔 ${this.brain.effectiveIntervalSec}s`,
     );
   }
 
@@ -2180,14 +2202,17 @@ class Hub {
     if (Number.isFinite(nextAt) && nextAt > Date.now()) return Promise.resolve(null);
     // 省 token：没有活、且自上次思考后没有任何新变化时，直接跳过模型调用并拉长间隔。
     // 至少真实思考过一次（有决策记录）才允许跳过，避免重启后一直空转。
+    // 工作量只评估一次（runBrainCycle 计算，思考结束后复用，见 P1 优化）。
+    this._brainCycleWorkload = null;
     if (this.brain.adaptive !== false && this.brain.lastThinkAt && this.brain.decisions.length > 0) {
       const workload = this._brainWorkload();
+      this._brainCycleWorkload = workload;
       if (!workload.busy && !this._brainHasNewSignalsSince(this.brain.lastThinkAt)) {
         this._brainIdleSkip();
         return Promise.resolve(null);
       }
     }
-    return this.requestBrainThink({ trigger: 'schedule' }).catch((err) => {
+    return this.requestBrainThink({ trigger: 'schedule', workload: this._brainCycleWorkload }).catch((err) => {
       this.log('warn', `自主大脑思考失败：${err && err.message ? err.message : err}`);
       return null;
     });
@@ -2196,12 +2221,12 @@ class Hub {
   /**
    * 立即思考一次（手动按钮/自动定时共用）。
    * 思考中重复调用会复用同一个 Promise；错误只写进 decision/lastError，不抛给调用方。
-   * @param {{trigger?: 'manual'|'schedule'}} [options]
+   * @param {{trigger?: 'manual'|'schedule', workload?: object|null}} [options]
    */
-  requestBrainThink({ trigger = 'manual' } = {}) {
+  requestBrainThink({ trigger = 'manual', workload = null } = {}) {
     if (this._closed) return Promise.resolve(null);
     if (this._brainThinking) return this._brainThinking;
-    const pending = this._runBrainThink(trigger).finally(() => {
+    const pending = this._runBrainThink(trigger, workload).finally(() => {
       if (this._brainThinking === pending) this._brainThinking = null;
     });
     this._brainThinking = pending;
@@ -2218,7 +2243,7 @@ class Hub {
     return this._brainThinker;
   }
 
-  async _runBrainThink(trigger = 'schedule') {
+  async _runBrainThink(trigger = 'schedule', workload = null) {
     const startedAt = Date.now();
     const decision = {
       id: protocol.randomId('brain'),
@@ -2235,7 +2260,7 @@ class Hub {
     };
     try {
       const snapshot = this._brainSnapshot();
-      const prompt = buildBrainPrompt(snapshot, { mind: this.mind });
+      const prompt = buildBrainPrompt(snapshot, { mind: this.mind, maxActions: this.brain.maxActions });
       const think = this._getBrainThinker();
       const reply = await think(prompt);
       const parsed = parseBrainReply(reply);
@@ -2263,7 +2288,7 @@ class Hub {
     } finally {
       decision.durationMs = Date.now() - startedAt;
       this.brain.lastThinkAt = protocol.nowIso();
-      this._brainUpdateCadence(decision);
+      this._brainUpdateCadence(decision, workload);
       recordBrainDecision(this.brain, decision);
       this.broadcast('brain.updated', { brain: this.getBrain(), at: this.brain.lastThinkAt });
       this._journalBrainDecision(decision);
@@ -2279,29 +2304,42 @@ class Hub {
     return decision;
   }
 
-  /** 大脑输入快照：目标、近期任务、设备、待确认提案（结构见 docs/GOAL-BRAIN-DESIGN.md §2.4）。 */
+  /** 大脑输入快照：目标、可行动任务、最近决策、设备、待确认提案（结构见 docs/GOAL-BRAIN-DESIGN.md §2.4）。 */
   _brainSnapshot() {
     const cutoff = Date.now() - 24 * 3600 * 1000;
-    const candidates = [];
+    const actionable = [];
+    const recentDone = [];
     for (const task of this.tasks.values()) {
-      if (task.archived) continue;
+      if (task.archived || task.trashedAt) continue;
       if (
-        ACTIVE_TASK_STATUSES.has(task.status) ||
-        task.status === TASK_STATUS.QUEUED ||
-        task.status === TASK_STATUS.FAILED ||
-        task.status === TASK_STATUS.TIMEOUT ||
-        task.status === TASK_STATUS.CANCELLED
+        ACTIVE_TASK_STATUSES.has(task.status)
+        || task.status === TASK_STATUS.QUEUED
+        || task.status === TASK_STATUS.FAILED
+        || task.status === TASK_STATUS.TIMEOUT
       ) {
-        candidates.push(task);
+        actionable.push(task);
         continue;
       }
+      // 已完成只保留最近 24h 的少量样本；cancelled 等噪音状态一律不喂给模型。
+      if (task.status !== TASK_STATUS.COMPLETED) continue;
       const finishedAt = Date.parse(task.finishedAt || task.updatedAt || '');
-      if (Number.isFinite(finishedAt) && finishedAt >= cutoff) candidates.push(task);
+      if (Number.isFinite(finishedAt) && finishedAt >= cutoff) recentDone.push(task);
     }
-    candidates.sort((a, b) =>
-      String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt)),
+    // 失败/等待/执行中的任务排前面，其余按更新时间倒序；总量封顶 24 + 8。
+    const priority = (status) => {
+      if (status === TASK_STATUS.FAILED || status === TASK_STATUS.TIMEOUT) return 0;
+      if (status === TASK_STATUS.WAITING) return 1;
+      if (status === TASK_STATUS.RUNNING || status === TASK_STATUS.ASSIGNED) return 2;
+      return 3; // queued
+    };
+    const byUpdatedAtDesc = (a, b) =>
+      String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || ''));
+    actionable.sort((a, b) => priority(a.status) - priority(b.status) || byUpdatedAtDesc(a, b));
+    recentDone.sort((a, b) =>
+      String(b.finishedAt || b.updatedAt || '').localeCompare(String(a.finishedAt || a.updatedAt || '')),
     );
-    const tasks = candidates.slice(0, 40).map((task) => {
+    const picked = [...actionable.slice(0, 24), ...recentDone.slice(0, 8)];
+    const tasks = picked.map((task) => {
       const progress = util.isPlainObject(task.progress) ? task.progress : null;
       const children = util
         .arr(task.childTaskIds)
@@ -2396,7 +2434,20 @@ class Hub {
         max: this._maxConcurrent(device),
       },
     }));
-    return { now: protocol.nowIso(), stats: this.stats(), goals, tasks, approvals, devices };
+    // 决策记忆：最近 3 轮结论与动作结果，让模型知道哪些动作刚被拒绝、避免重复。
+    const decisions = this.brain.decisions.slice(-3).map((item) => ({
+      at: item.at || null,
+      summary: util.truncate(item.summary || '', 160),
+      actions: util.arr(item.actions).slice(0, 3).map((action) => ({
+        action: action.action,
+        taskId: action.taskId || null,
+        goalId: action.goalId || null,
+        executed: action.executed === true,
+        skippedReason: action.skippedReason || null,
+        error: action.error ? util.truncate(action.error, 80) : null,
+      })),
+    }));
+    return { now: protocol.nowIso(), stats: this.stats(), goals, tasks, decisions, approvals, devices };
   }
 
   /** 按白名单执行大脑动作（auto 模式）；单条失败不影响其它动作。 */
@@ -2626,9 +2677,14 @@ class Hub {
   _journalBrainDecision(decision) {
     if (!decision) return;
     // 低信息量的「无需动作」思考不写日志：大脑定时思考，全记下来会淹没工作条目。
-    const hasActions = util.arr(decision.actions).length > 0;
+    // 注意 'none' 动作也属于「无动作」，不能算作有动作。
+    const hasActions = util.arr(decision.actions).some(
+      (action) => action && action.action && action.action !== 'none',
+    );
     const summary = util.str(decision.summary, 500);
     const assessment = util.isPlainObject(decision.assessment) ? decision.assessment : null;
+    // 连续失败只在第一次写日志，避免模型故障时心路被重复刷屏。
+    if (decision.error && util.clampInt(Number(this.brain.consecutiveFailures), 0, 0, 6) > 1) return;
     const lowValue =
       !hasActions &&
       !decision.ownerAsk &&
@@ -3576,11 +3632,12 @@ class Hub {
     return this.tasks.get(id) || null;
   }
 
-  listTasks({ status, deviceId, includeArchived = false, limit } = {}) {
+  listTasks({ status, deviceId, includeArchived = false, includeTrashed = false, limit } = {}) {
     this.reconcilePlans();
     const safeLimit = util.clampInt(limit, 100, 1, 500);
     let tasks = [...this.tasks.values()];
     if (!includeArchived) tasks = tasks.filter((task) => !task.archived);
+    if (!includeTrashed) tasks = tasks.filter((task) => !task.trashedAt);
     if (typeof status === 'string' && status) tasks = tasks.filter((task) => task.status === status);
     if (typeof deviceId === 'string' && deviceId) {
       tasks = tasks.filter((task) => task.assignedDeviceId === deviceId);
@@ -3751,6 +3808,7 @@ class Hub {
       plan: null,
       archived: false,
       archivedAt: null,
+      trashedAt: null,
       route: { reason: '等待路由', candidates: [], excluded: [] },
       events: [{ at: now, type: 'created', message: '任务已创建' }],
       _avoidDeviceIds: [],
@@ -3949,6 +4007,7 @@ class Hub {
       plan: planMeta,
       archived: false,
       archivedAt: null,
+      trashedAt: null,
       route: {
         reason: `Agnes 长任务拆分：${plan.title || '长任务'}`,
         candidates: [],
@@ -4241,6 +4300,130 @@ class Hub {
     }
     this.schedulePersist();
     return task;
+  }
+
+  // ---------------------------------------------------------------- 回收站
+
+  /** 回收站的目标集合：任务本身 + 同线程任务 + 计划子任务。 */
+  _trashTargets(task) {
+    const threadTasks = [...this.tasks.values()].filter(
+      (item) => (item.threadId || item.id) === (task.threadId || task.id),
+    );
+    const children = (task.childTaskIds || [])
+      .map((id) => this.tasks.get(id))
+      .filter(Boolean);
+    return [...new Set([task, ...threadTasks, ...children])];
+  }
+
+  /**
+   * 把已结束的任务移入回收站（不删除数据，仅从常规列表/统计/大脑快照中隐藏）。
+   * @param {object} task
+   * @returns {object} 入参任务
+   */
+  trashTask(task) {
+    if (!TERMINAL_TASK_STATUSES.has(task.status)) {
+      throw badRequest('只能回收已结束的任务');
+    }
+    if (task.trashedAt) return task;
+    const targets = this._trashTargets(task).filter((item) => TERMINAL_TASK_STATUSES.has(item.status));
+    const at = protocol.nowIso();
+    for (const item of targets) {
+      item.trashedAt = at;
+      // 回收站与归档互斥，避免出现「已归档 + 回收站」双重状态。
+      item.archived = false;
+      item.archivedAt = null;
+      item.updatedAt = at;
+      this._pushTaskEvent(item, 'trashed', '任务移入回收站');
+      this.broadcast('task.updated', { task: this.taskToJson(item) });
+    }
+    const skipped = this._trashTargets(task).length - targets.length;
+    this.log('info', `任务移入回收站：${task.id}${skipped > 0 ? `（跳过 ${skipped} 个未结束任务）` : ''}`);
+    this.schedulePersist();
+    return task;
+  }
+
+  /**
+   * 从回收站恢复任务（同线程与计划子任务一起恢复）。
+   * @param {object} task
+   * @returns {object} 入参任务
+   */
+  restoreTask(task) {
+    if (!task.trashedAt) throw badRequest('任务不在回收站中');
+    const targets = this._trashTargets(task).filter((item) => item.trashedAt);
+    const at = protocol.nowIso();
+    for (const item of targets) {
+      item.trashedAt = null;
+      item.updatedAt = at;
+      this._pushTaskEvent(item, 'restored', '任务已恢复');
+      this.broadcast('task.updated', { task: this.taskToJson(item) });
+    }
+    this.log('info', `任务已从回收站恢复：${task.id}`);
+    this.schedulePersist();
+    return task;
+  }
+
+  /**
+   * 彻底删除回收站中的任务（含同线程任务与计划子任务），并清理目标引用与执行记录文件。
+   * @param {object} task
+   * @returns {{taskId:string, deleted:string[]}}
+   */
+  purgeTask(task) {
+    if (!task.trashedAt) throw badRequest('只能彻底删除回收站中的任务');
+    const ids = [...new Set(
+      this._trashTargets(task).filter((item) => item.trashedAt).map((item) => item.id),
+    )];
+    for (const id of ids) {
+      const item = this.tasks.get(id);
+      if (!item) continue;
+      this._pushTaskEvent(item, 'purged', '任务已彻底删除');
+      const recordFile = this._taskRecordFile(item);
+      if (recordFile) {
+        try {
+          fs.unlinkSync(recordFile);
+        } catch {
+          // 记录文件可能尚未写入或已被删除，忽略即可。
+        }
+      }
+      const recordTimer = this._recordTimers && this._recordTimers.get(id);
+      if (recordTimer) {
+        clearTimeout(recordTimer);
+        this._recordTimers.delete(id);
+      }
+      this._clearTaskTimers(id);
+      this.tasks.delete(id);
+      this._detachTaskFromGoals(id);
+      this.broadcast('task.deleted', { taskId: id });
+    }
+    this.log('info', `任务已彻底删除：${task.id}${ids.length > 1 ? `（共 ${ids.length} 个）` : ''}`);
+    if (this.recordEnabled) this._scheduleRecordIndex(200);
+    this.schedulePersist();
+    return { taskId: task.id, deleted: ids };
+  }
+
+  /** 任务执行记录文件路径（与 task-record.js 的写入口径一致：<recordDir>/<YYYY-MM-DD>/<taskId>.md）。 */
+  _taskRecordFile(task) {
+    if (!this.recordEnabled || !task || !task.createdAt) return null;
+    const at = new Date(task.createdAt);
+    if (Number.isNaN(at.getTime())) return null;
+    const pad = (n) => String(n).padStart(2, '0');
+    const day = `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`;
+    return path.resolve(String(this.recordDir || '.'), day, `${task.id}.md`);
+  }
+
+  /** 删除任务后，清理长期目标里的任务引用。 */
+  _detachTaskFromGoals(taskId) {
+    let touched = false;
+    for (const goal of this.goals.values()) {
+      const hasRef = Array.isArray(goal.taskIds) && goal.taskIds.includes(taskId);
+      if (!hasRef) continue;
+      goal.taskIds = goal.taskIds.filter((id) => id !== taskId);
+      if (goal.runningTaskId === taskId) goal.runningTaskId = null;
+      if (goal.lastTaskId === taskId) goal.lastTaskId = null;
+      goal.updatedAt = protocol.nowIso();
+      touched = true;
+      this.broadcast('goal.updated', { goal: goalToJson(goal) });
+    }
+    if (touched) this.schedulePersist();
   }
 
   _capabilitiesForMatch(device) {

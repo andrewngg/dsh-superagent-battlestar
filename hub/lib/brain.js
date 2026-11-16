@@ -25,8 +25,14 @@ const MIN_INTERVAL_SEC = 60;
 const MAX_INTERVAL_SEC = 3600;
 const DEFAULT_INTERVAL_SEC = 180;
 const DEFAULT_MAX_ACTIONS = 2;
-/** 自适应节律的空闲上限：连续没活时最多拉长到 30 分钟一次。 */
+/** 自适应节律的空闲下限上限：连续没活时至少可以拉长到 30 分钟一次。 */
 const MAX_IDLE_SEC = 1800;
+/** 空闲退避最多放大到基准间隔的 4 倍（再受 MAX_BACKOFF_SEC 约束）。 */
+const MAX_IDLE_MULTIPLIER = 4;
+/** 退避硬上限：连续没活/连续失败时最多 6 小时思考一次。 */
+const MAX_BACKOFF_SEC = 6 * 3600;
+/** 连续失败计数封顶（到顶后按最长退避重试）。 */
+const MAX_FAILURE_STREAK = 6;
 const MAX_ASSESSMENT_LENGTH = 400;
 const MAX_OWNER_ASK_LENGTH = 500;
 const MAX_SUMMARY_LENGTH = 1200;
@@ -49,6 +55,8 @@ const DEFAULT_BRAIN = Object.freeze({
   effectiveIntervalSec: DEFAULT_INTERVAL_SEC,
   nextThinkAt: null,
   skippedCycles: 0,
+  /** 连续思考失败次数：用于失败退避，成功一次即清零。 */
+  consecutiveFailures: 0,
   lastThinkAt: null,
   lastError: null,
   lastSummary: '',
@@ -179,10 +187,11 @@ function restoreBrain(raw) {
   brain.idleStreak = util.clampInt(Number(src.idleStreak), 0, 0, 20);
   const effective = Number(src.effectiveIntervalSec);
   brain.effectiveIntervalSec = Number.isFinite(effective)
-    ? util.clampInt(effective, brain.intervalSec, brain.intervalSec, MAX_IDLE_SEC)
+    ? util.clampInt(effective, brain.intervalSec, brain.intervalSec, idleIntervalCapSec(brain.intervalSec))
     : brain.intervalSec;
   brain.nextThinkAt = typeof src.nextThinkAt === 'string' ? src.nextThinkAt : null;
   brain.skippedCycles = util.clampInt(Number(src.skippedCycles), 0, 0, 1000);
+  brain.consecutiveFailures = util.clampInt(Number(src.consecutiveFailures), 0, 0, MAX_FAILURE_STREAK);
   brain.lastAssessment = normalizeAssessment(src.lastAssessment);
   brain.ownerAsk = normalizeOwnerAsk(src.ownerAsk);
   const decisions = Array.isArray(src.decisions) ? src.decisions : [];
@@ -279,13 +288,24 @@ function computeNextThinkAt(brain, { nowMs = Date.now(), enabled } = {}) {
   return new Date(base + interval * 1000).toISOString();
 }
 
+/**
+ * 空闲/失败退避的上限（秒）：至少 30 分钟，最多基准间隔的 4 倍，且不超过 6 小时。
+ * 这样基准间隔较大（如 1800s）时退避才真正生效，而不是被 MAX_IDLE_SEC 卡住。
+ */
+function idleIntervalCapSec(intervalSec) {
+  const base = Number.isFinite(Number(intervalSec))
+    ? Math.max(MIN_INTERVAL_SEC, Math.trunc(Number(intervalSec)))
+    : DEFAULT_INTERVAL_SEC;
+  return Math.min(Math.max(MAX_IDLE_SEC, base * MAX_IDLE_MULTIPLIER), MAX_BACKOFF_SEC);
+}
+
 /** 当前使用的思考间隔（秒）：自适应时取 effectiveIntervalSec。 */
 function effectiveIntervalSec(brain) {
   const base = brain && brain.intervalSec ? brain.intervalSec : DEFAULT_INTERVAL_SEC;
   if (!brain || brain.adaptive === false) return base;
   const effective = Number(brain.effectiveIntervalSec);
   if (!Number.isFinite(effective)) return base;
-  return Math.min(Math.max(effective, base), MAX_IDLE_SEC);
+  return Math.min(Math.max(effective, base), idleIntervalCapSec(base));
 }
 
 /** 对外 JSON（不含 thinking；Hub 的 getBrain 会补上运行态字段）。 */
@@ -304,6 +324,9 @@ function brainToJson(brain, { decisions = 10, nowMs = Date.now() } = {}) {
     effectiveIntervalSec: effectiveIntervalSec(brain),
     idleStreak: util.clampInt(Number(brain.idleStreak), 0, 0, 20),
     skippedCycles: util.clampInt(Number(brain.skippedCycles), 0, 0, 1000),
+    consecutiveFailures: util.clampInt(Number(brain.consecutiveFailures), 0, 0, MAX_FAILURE_STREAK),
+    /** 空闲退避能达到的最长间隔（秒），供控制台展示。 */
+    idleLimitSec: idleIntervalCapSec(brain.intervalSec),
     lastThinkAt: brain.lastThinkAt || null,
     nextThinkAt: computeNextThinkAt(brain, { nowMs }),
     lastError: brain.lastError || null,
@@ -341,15 +364,35 @@ function planProgressText(task, tasksById) {
   return `${completed}/${children.length} 完成${failed ? `，${failed} 失败` : ''}${running ? `，${running} 进行中` : ''}`;
 }
 
+/** 把时间点渲染成相对时长（给模型判断“卡了多久”用）。 */
+function formatAge(iso, nowMs) {
+  const at = Date.parse(iso || '');
+  if (!Number.isFinite(at)) return null;
+  const diff = Math.max(0, nowMs - at);
+  const minutes = Math.floor(diff / 60000);
+  if (minutes < 1) return '刚刚';
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  return `${Math.floor(hours / 24)} 天前`;
+}
+
 /**
  * 构建大脑提示词。
  * @param {object} snapshot 由 Hub._brainSnapshot() 生成（见字段说明）
- * @param {{mind?:{soul?:string,skill?:string}}} [options] 心智（灵魂 / 工作流程）
+ * @param {{mind?:{soul?:string,skill?:string}, maxActions?:number}} [options] 心智 / 本轮动作上限
  * @returns {{system:string, user:string}}
  */
 function buildBrainPrompt(snapshot, options = {}) {
   const snap = util.isPlainObject(snapshot) ? snapshot : {};
   const mind = util.isPlainObject(options) && util.isPlainObject(options.mind) ? options.mind : {};
+  const maxActions = util.clampInt(
+    util.isPlainObject(options) && options.maxActions !== undefined ? options.maxActions : DEFAULT_MAX_ACTIONS,
+    DEFAULT_MAX_ACTIONS,
+    1,
+    MAX_ACTIONS_PER_DECISION,
+  );
+  const nowMs = Date.parse(snap.now || '') || Date.now();
   const soul = clampText(mind.soul || '', MAX_SOUL_CHARS).trim();
   const skill = clampText(mind.skill || '', MAX_SKILL_CHARS).trim();
   const mindLines = [];
@@ -367,7 +410,7 @@ function buildBrainPrompt(snapshot, options = {}) {
     '排队中的计划子任务若「依赖」里的前置任务未完成，不要对它 retry（会一直等待）；应先推进前置任务，或选择 none 观察。',
     '六步要求：assessment 六项都要认真填，即使没有变化也要写清结论；ownerAsk 只在确实需要主人决策/授权/提供信息/确认方向时填写，否则留空；myMove 要与 actions 一致。',
     ...mindLines,
-    '保守原则：优先重试/续做/关联已有任务，而不是新建；同一轮最多 2 个动作；没有明确必要时 actions 为空数组；置信度低于 0.6 的动作会被系统拒绝，请如实给出。',
+    `保守原则：优先重试/续做/关联已有任务，而不是新建；同一轮最多 ${maxActions} 个动作；没有明确必要时 actions 为空数组；置信度低于 0.6 的动作会被系统拒绝，请如实给出。`,
     '禁止：臆造任务 id / 目标 id / 设备；编造用户没有要求的工作；重复创建已存在的任务；回答问题或执行设备上的具体操作。',
     '如果某个任务在等待用户回答、或需要用户决定方向，不要代替用户决定：actions 用 none，把要确认的内容写进 assessment.ownerAsk 与 summary。',
   ].join('\n');
@@ -416,15 +459,24 @@ function buildBrainPrompt(snapshot, options = {}) {
   });
 
   const tasks = util.arr(snap.tasks);
-  lines.push(`\n## 任务（最近 ${tasks.length} 条，含失败/等待/进行中）`);
+  lines.push(`\n## 任务（${tasks.length} 条：进行中 / 排队 / 失败 / 等待回答 + 最近完成）`);
   if (!tasks.length) lines.push('（无）');
   tasks.forEach((task, index) => {
     const planText = task.isPlan ? planProgressText(task, byId) : null;
+    const ageSource =
+      task.status === 'completed'
+        ? task.finishedAt || task.updatedAt
+        : task.status === 'queued'
+          ? task.createdAt
+          : task.updatedAt || task.createdAt;
+    const ageLabel = task.status === 'completed' ? '完成' : task.status === 'queued' ? '排队' : '更新';
+    const age = formatAge(ageSource, nowMs);
     lines.push(
       `${index + 1}. ${task.id}｜${task.status}｜${clampText(task.instruction || '', 200)}`
         + `${task.goalId ? `｜目标 ${task.goalId}` : ''}`
         + `${task.assignedDeviceName ? `｜设备 ${task.assignedDeviceName}` : ''}`
         + `${task.attempts !== undefined ? `｜尝试 ${task.attempts}/${task.maxAttempts || '?'}` : ''}`
+        + `${age ? `｜${ageLabel} ${age}` : ''}`
         + `${planText ? `｜计划 ${planText}` : ''}`
         + `${util.arr(task.dependsOn).length ? `｜依赖 ${util.arr(task.dependsOn).join(',')}` : ''}`,
     );
@@ -433,6 +485,27 @@ function buildBrainPrompt(snapshot, options = {}) {
     }
     if (task.error) lines.push(`   错误：${clampText(task.error, 200)}`);
     if (task.lastEvent && task.lastEvent.message) lines.push(`   最近事件：${clampText(task.lastEvent.message, 160)}`);
+  });
+
+  // 决策记忆：把最近几轮结论与失败原因带上，避免模型重复同样的无效动作。
+  const decisions = util.arr(snap.decisions).slice(0, 3);
+  lines.push('\n## 最近决策（最新在前，重复以下无效动作会被再次拒绝）');
+  if (!decisions.length) lines.push('（无）');
+  decisions.forEach((decision, index) => {
+    const age = formatAge(decision.at, nowMs);
+    const head = [age, decision.summary ? clampText(decision.summary, 120) : ''].filter(Boolean).join('｜');
+    lines.push(`${index + 1}. ${head || '（无结论）'}`);
+    for (const action of util.arr(decision.actions)) {
+      const target = action.taskId ? ` ${action.taskId}` : action.goalId ? ` ${action.goalId}` : '';
+      const flag = action.executed
+        ? '已执行'
+        : action.skippedReason
+          ? `跳过：${clampText(action.skippedReason, 60)}`
+          : action.error
+            ? `失败：${clampText(action.error, 60)}`
+            : '未执行';
+      lines.push(`   动作 ${action.action}${target} → ${flag}`);
+    }
   });
 
   const approvals = util.arr(snap.approvals);
@@ -454,7 +527,7 @@ function buildBrainPrompt(snapshot, options = {}) {
 
   lines.push(
     '\n请按六步思考后决策：优先推动与长期目标相关、且已经卡住或接近完成的任务；没有值得执行的动作就返回空数组。',
-    '只输出 JSON，例如：{"assessment":{"goals":"求职目标（goal_hukqu34i）仍是主线","progress":"投递计划 2/5 完成，第 3 步失败导致后续暂停","betterWay":"先重试第 3 步，再让 Mika 手机继续投递","improvement":"上次没有及时重试失败步骤，卡了 20 分钟","myMove":"重试 task_xxx","ownerAsk":""},"summary":"求职目标下的投递计划第 3 步子任务失败，重试它即可继续","actions":[{"action":"retry_task","taskId":"task_xxx","reason":"第 3 步失败导致后续投递暂停","confidence":0.8}]}',
+    '只输出 JSON，例如：{"assessment":{"goals":"目标 A 仍是主线","progress":"计划 2/5 完成，第 3 步失败","betterWay":"先重试失败步骤","improvement":"上次没有及时重试","myMove":"重试 task_x","ownerAsk":""},"summary":"第 3 步失败，重试即可继续","actions":[{"action":"retry_task","taskId":"task_x","reason":"失败步骤卡住后续","confidence":0.8}]}',
   );
   return { system, user: lines.join('\n') };
 }
@@ -607,6 +680,9 @@ module.exports = {
   MIN_INTERVAL_SEC,
   MAX_INTERVAL_SEC,
   MAX_IDLE_SEC,
+  MAX_IDLE_MULTIPLIER,
+  MAX_BACKOFF_SEC,
+  MAX_FAILURE_STREAK,
   MAX_ASSESSMENT_LENGTH,
   MAX_OWNER_ASK_LENGTH,
   BrainError,
@@ -618,6 +694,8 @@ module.exports = {
   restoreBrain,
   computeNextThinkAt,
   effectiveIntervalSec,
+  idleIntervalCapSec,
+  formatAge,
   brainToJson,
   recordBrainDecision,
   buildBrainPrompt,
