@@ -414,3 +414,45 @@ test('cli 执行器：worker 的实时步骤转成 Hub 进度', async () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('cli 执行器：任务级项目传给 worker，设备默认项目使用工作目录', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'butler-cli-project-'));
+  const workerFile = path.join(dir, 'fake-worker.js');
+  fs.writeFileSync(
+    workerFile,
+    [
+      "'use strict';",
+      "const fs = require('node:fs');",
+      "const path = require('node:path');",
+      "fs.writeFileSync(path.join(__dirname, 'args.json'), JSON.stringify(process.argv.slice(2)));",
+      "process.stdout.write(`${JSON.stringify({ ok: true, backend: 'hermes', model: 'fake', profile: '', text: 'done', exitCode: 0, durationMs: 1, commandPreview: 'fake', fallbackFrom: null, fallbackReason: null, at: new Date().toISOString() })}\\n`);",
+    ].join('\n'),
+  );
+  const readArgs = () => JSON.parse(fs.readFileSync(path.join(dir, 'args.json'), 'utf8'));
+  const cfg = { worker: workerFile, mode: 'auto', workdir: dir, timeoutMs: 8000 };
+  try {
+    const taskLevel = createCliExecutor({ executorCfg: cfg, cwd: dir, stateDir: dir, deviceName: '主工作机' });
+    await taskLevel.run({ task: { id: 't1', instruction: 'x', requirements: { project: 'ComfyUI 工作机' } } });
+    let args = readArgs();
+    assert.equal(args[args.indexOf('--project') + 1], 'ComfyUI 工作机');
+    assert.ok(!args.includes('--project-folder'), '任务级项目不应覆盖项目文件夹');
+
+    const deviceLevel = createCliExecutor({ executorCfg: cfg, cwd: dir, stateDir: dir, deviceName: '主工作机' });
+    await deviceLevel.run({ task: { id: 't2', instruction: 'y' } });
+    args = readArgs();
+    assert.equal(args[args.indexOf('--project') + 1], '主工作机');
+    assert.equal(args[args.indexOf('--project-folder') + 1], dir);
+
+    const configured = createCliExecutor({
+      executorCfg: { ...cfg, project: '图像处理主机' },
+      cwd: dir,
+      stateDir: dir,
+      deviceName: '主工作机',
+    });
+    await configured.run({ task: { id: 't3', instruction: 'z' } });
+    args = readArgs();
+    assert.equal(args[args.indexOf('--project') + 1], '图像处理主机', '设备配置项目优先于设备名');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

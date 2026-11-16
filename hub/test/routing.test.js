@@ -24,6 +24,8 @@ test('路由匹配：skills / model / tags / deviceId', async (t) => {
     makeManifest({
       name: 'Office 工作站',
       tags: ['书房'],
+      // 放 5 个槽位：本用例验证路由匹配，不讨论并发排队。
+      limits: { maxConcurrentTasks: 5 },
       models: [{ id: 'deepseek-chat', strengths: ['code'] }],
       skills: [{ id: 'office-docx' }],
     }),
@@ -33,6 +35,7 @@ test('路由匹配：skills / model / tags / deviceId', async (t) => {
     makeManifest({
       name: '客厅媒体中心',
       tags: ['客厅'],
+      limits: { maxConcurrentTasks: 5 },
       models: [{ id: 'gpt-4o' }],
       skills: [{ id: 'office-xlsx' }],
     }),

@@ -70,6 +70,11 @@ SIGINT（Ctrl+C）会优雅注销设备后退出；发送两次强制退出（�
   - `opencode`：`opencode run "<instruction>" -m deepseek/deepseek-flash --format json`，失败可回退 Hermes；
   - `shell`：`pwsh -NoProfile -NonInteractive -Command "<instruction>"`（需 `allowShell: true`）；
   - 由 `requirements.profile`（`hermes` / `hermes-<profile>` / `opencode` / `cli-shell`）或指令前缀（`!` / `/run`）选择后端；输出写入任务 `output.data.backend`；实时步骤写入临时进度文件（worker `--progress-file`），executor 每 500ms 轮询后上报 Hub，**不使用子进程 pipe**（Windows 沙箱安全）；
+  - **Hermes 会话可见**：默认追加 `--source cli`，任务产生的会话会出现在 Hermes 桌面/TUI 的会话列表（不再以 `oneshot` 隐藏）；旧版 Hermes 回退一次性 `-z` 时仍标记为 oneshot；
+  - **项目归属**：任务级 `requirements.project`（项目名或绝对路径）> 设备配置 `executor.cli.project` / `projectName` > 设备名兜底。设备级项目沿用设备工作目录（不改变产出位置）；任务级项目名会解析到已有 Hermes 项目的主目录，不存在时自动在 `$HERMES_HOME/projects.db` 建项目并把会话归入其中（目录为 `<workdir>/projects/<slug>`，绝对路径则直接使用该目录）。需要 Node ≥ 22.5（`node:sqlite`）；写库失败只降级为隔离目录，不影响任务执行。Web 控制台指令框新增「项目（可选）」；worker 输出 JSON 的 `project` 字段可核对解析结果；
+  - **计划子任务上下文**：Hub 会在 `run_task.payload` 带上 `parentTaskId` 与 `context.parentInstruction/planStep/planTotal/planSiblings`。设备端会把「主任务 id / 主任务目标 / 第 x/y 步 / 兄弟子任务」拼进交给 Hermes 的指令，计划子任务不会只看到一句可能含“这里/该项目”的子任务指令；
+  - **计划子任务会话隔离**：worker 以 `task:<taskId>` 作为计划子任务的 Hermes 会话键（普通任务/继续任务仍按 `threadId`），避免同父任务的多个子任务共用会话、把上一子任务的错误对话带进下一步；
+  - **设备级 `promptPrefix` 应写成条件式**：ComfyUI 工作机示例已改为「涉及图片/视频生成才调用 ComfyUI，日志/代码/打包等任务直接执行」；如果你机器上的实际配置还是“必须调用 ComfyUI”，请同步修改，否则非生成类子任务仍可能被带偏；
 - `dsh-cli`：命令模板（默认 `dsh run --print {instruction}`），`{instruction}`、`{taskId}`、`{deviceName}`、`{model}`、`{outputFile}` 占位符；输出重定向到临时文件后截断（**不使用 pipe**，Windows 沙箱安全）；超时/取消会 kill 子进程树；
 - `shell`：同命令模板机制（默认 `echo {instruction}`）；
 - `http`：`POST` 设备本地/内网 endpoint（拒绝指向 Hub 自身），响应 `{ok?, output?, error?}`；
@@ -82,6 +87,8 @@ SIGINT（Ctrl+C）会优雅注销设备后退出；发送两次强制退出（�
   支付/验证码不会被远程自动批准。配置见 `configs/phone-mika.example.json` 与 [docs/MIKA-PHONE.md](../docs/MIKA-PHONE.md)。
 
 并发上限取 `manifest.limits.maxConcurrentTasks`；progress 节流 ≥800ms；超时主动 `result(ok:false, error:"timeout")`；收到 `cancel_task` 中止执行并回报 `cancelled`。
+
+命令队列按 `taskId` 去重（Hub 重投同一任务时只保留一份），收到 `run_task` 立即 `ack`（排队中也会 ack，并发送 `progress({keepalive:true})` 续期），队列上限 `maxQueueSize`（默认 8，可在配置顶层覆盖；超限丢弃新命令且不 ack，等 Hub 稍后重投）。Hub 返回 `{ ignored:true }` 的结果表示任务已终态或本次是旧 attempt，设备只记统计不重试。
 
 ## 配置示例
 

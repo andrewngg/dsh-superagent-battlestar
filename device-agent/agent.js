@@ -43,6 +43,8 @@ const DEFAULTS = Object.freeze({
   maxSeenCommandIds: 500,
   backoffBaseMs: 1000,
   backoffMaxMs: 30000,
+  // 排队命令上限：防止 Hub 重派件无限堆积；满时丢弃新 run_task 并等待 Hub 稍后重投。
+  maxQueueSize: 8,
 });
 
 function isNetworkError(err) {
@@ -147,6 +149,12 @@ class Agent {
       60000,
       15000,
     );
+    this.maxQueueSize = clampInt(
+      options.maxQueueSize !== undefined ? options.maxQueueSize : this.config.maxQueueSize,
+      1,
+      100,
+      DEFAULTS.maxQueueSize,
+    );
 
     const explicitName = options.name || this.config.name;
     this.stateName = explicitName || os.hostname();
@@ -171,6 +179,11 @@ class Agent {
     this.executions = new Set();
     this.seenCommandIds = new Set();
     this.seenCommandOrder = [];
+    // 同一 taskId 只允许在队列/执行中存在一份；ackedTasks 记录“入队即 ack”过的任务，
+    // 用于排队期间的 keepalive（Hub 不再把忙碌设备误判为 ack timeout）。
+    this.taskIdIndex = new Set();
+    this.ackedTasks = new Set();
+    this.queueKeepaliveTimer = null;
 
     this.stopped = false;
     this.connecting = null;
@@ -191,6 +204,9 @@ class Agent {
       tasksCompleted: 0,
       tasksFailed: 0,
       tasksCancelled: 0,
+      duplicateCommands: 0,
+      queueDropped: 0,
+      resultsIgnored: 0,
     };
 
     this._stopPromise = new Promise((resolve) => {
@@ -264,6 +280,7 @@ class Agent {
       env: this.env,
       cwd: this.options.cwd,
       stateDir: this.stateDir,
+      deviceName: manifest.name,
       log: this.log,
     });
     this._checkExecutorEnvironment();
@@ -588,17 +605,110 @@ class Agent {
     for (const command of asArray(commands)) {
       if (!command || !nonEmptyString(command.id)) continue;
       if (this.seenCommandIds.has(command.id)) continue;
+      const taskId = this._commandTaskId(command);
+      if (command.type === 'run_task' && taskId) {
+        if (this.taskIdIndex.has(taskId)) {
+          // 同一 taskId 被 Hub 以新的 command id 重派：丢弃重复件，并（幂等）ack 告知已接收。
+          this.stats.duplicateCommands += 1;
+          this.log.warn(`忽略重复派发 ${command.id}（任务 ${taskId} 已在队列/执行中）`);
+          if (!this.ackedTasks.has(taskId)) this._ackOnReceipt(taskId).catch(() => {});
+          continue;
+        }
+        if (this._queuedRunCount() >= this.maxQueueSize) {
+          // 不记 seen、不 ack：让 Hub 稍后重新投递，而不是把命令永久丢掉。
+          this.stats.queueDropped += 1;
+          this.log.warn(`命令队列已满（${this.maxQueueSize}），暂不接收任务 ${taskId}，等待 Hub 重新派发`);
+          continue;
+        }
+        this.taskIdIndex.add(taskId);
+      }
       this.seenCommandIds.add(command.id);
       this.seenCommandOrder.push(command.id);
       while (this.seenCommandOrder.length > DEFAULTS.maxSeenCommandIds) {
         this.seenCommandIds.delete(this.seenCommandOrder.shift());
       }
       this.queue.push(command);
-      const payload = isPlainObject(command.payload) ? command.payload : {};
-      const taskId = command.taskId || payload.taskId || '';
       this.log.info(`收到命令 ${command.id}（${command.type}${taskId ? `，任务 ${taskId}` : ''}）`);
+      if (command.type === 'run_task' && taskId) {
+        // 协议 §8：收到 run_task 先 ack，再按并发上限执行。ack 幂等，排队期间也保持心跳。
+        this._ackOnReceipt(taskId).catch(() => {});
+      }
     }
     this._pump();
+  }
+
+  _commandTaskId(command) {
+    const payload = isPlainObject(command && command.payload) ? command.payload : {};
+    return (command && (command.taskId || payload.taskId)) || '';
+  }
+
+  _queuedRunCount() {
+    let count = 0;
+    for (const command of this.queue) {
+      if (command && command.type === 'run_task') count += 1;
+    }
+    return count;
+  }
+
+  /** 排队位置：前面正在执行 + 队列里排在前面的 run_task 数。 */
+  _queuePosition(taskId) {
+    let position = this.running.size;
+    for (const command of this.queue) {
+      if (!command || command.type !== 'run_task') continue;
+      position += 1;
+      if (this._commandTaskId(command) === taskId) return position;
+    }
+    return position + 1;
+  }
+
+  /** 从队列移除某任务的 run_task（ack 被拒/取消/结果被忽略时使用）。 */
+  _dropQueuedTask(taskId) {
+    if (!taskId) return false;
+    let dropped = false;
+    for (let i = this.queue.length - 1; i >= 0; i -= 1) {
+      const command = this.queue[i];
+      if (command && command.type === 'run_task' && this._commandTaskId(command) === taskId) {
+        this.queue.splice(i, 1);
+        dropped = true;
+      }
+    }
+    this.taskIdIndex.delete(taskId);
+    if (!this.running.has(taskId)) this.ackedTasks.delete(taskId);
+    return dropped;
+  }
+
+  _announceQueued(taskId) {
+    if (!this.client || this.stopped) return;
+    const position = this._queuePosition(taskId);
+    if (position <= 1) return;
+    this.client.progress(taskId, { message: `排队中（第 ${position} 位）`, percent: 1 }).catch(() => {});
+  }
+
+  /** 收到即 ack：成功则记录并广播排队位置；失败则丢弃命令（Hub 会重新派发）。 */
+  _ackOnReceipt(taskId) {
+    return this._ackTask(taskId).then((ok) => {
+      if (!ok) {
+        // ack 失败（任务已被 Hub 重新派发/取消）：除非已经开始执行，否则丢弃队列中的命令。
+        if (!this.running.has(taskId)) this._dropQueuedTask(taskId);
+        return false;
+      }
+      this.ackedTasks.add(taskId);
+      this._announceQueued(taskId);
+      return true;
+    });
+  }
+
+  /** 排队期间定期 keepalive，避免 Hub 把“已 ack 但还没轮到执行”的任务判为超时。 */
+  _startQueueKeepalive() {
+    if (this.queueKeepaliveTimer) return;
+    this.queueKeepaliveTimer = setInterval(() => {
+      if (this.stopped || !this.client || !this.ackedTasks.size) return;
+      for (const taskId of this.ackedTasks) {
+        if (this.running.has(taskId)) continue;
+        this.client.progress(taskId, { keepalive: true }).catch(() => {});
+      }
+    }, Math.max(1000, this.taskKeepaliveMs));
+    if (this.queueKeepaliveTimer.unref) this.queueKeepaliveTimer.unref();
   }
 
   _pump() {
@@ -699,6 +809,10 @@ class Agent {
 
   _taskFromCommand(command) {
     const payload = isPlainObject(command.payload) ? command.payload : {};
+    const context = isPlainObject(payload.context) ? payload.context : {};
+    const parentTaskId = typeof payload.parentTaskId === 'string' && payload.parentTaskId
+      ? payload.parentTaskId
+      : (typeof context.parentTaskId === 'string' && context.parentTaskId ? context.parentTaskId : null);
     return {
       id: command.taskId || payload.taskId || command.id,
       commandId: command.id,
@@ -706,7 +820,8 @@ class Agent {
       requirements: isPlainObject(payload.requirements) ? payload.requirements : {},
       priority: Number.isFinite(payload.priority) ? payload.priority : 5,
       timeoutSec: Number.isFinite(payload.timeoutSec) ? payload.timeoutSec : 300,
-      context: isPlainObject(payload.context) ? payload.context : {},
+      context,
+      parentTaskId,
       attachments: Array.isArray(payload.attachments) ? payload.attachments : [],
       threadId: typeof payload.threadId === 'string' ? payload.threadId : '',
       replyToTaskId: typeof payload.replyToTaskId === 'string' ? payload.replyToTaskId : null,
@@ -754,6 +869,7 @@ class Agent {
     const taskId = command.taskId || payload.taskId || null;
 
     if (type === 'cancel_task' || type === 'cancel') {
+      this._dropQueuedTask(taskId);
       this._cancelTask(taskId, 'cancelled');
       return;
     }
@@ -785,15 +901,53 @@ class Agent {
     const task = this._taskFromCommand(command);
     this._materializeAttachments(task);
     const context = isPlainObject(task.context) ? task.context : {};
+    const contextParts = [];
+    // 计划子任务：还原主任务目标与自己在计划中的位置，避免被设备级 promptPrefix 带偏。
+    if (context.parentTaskId || context.parentInstruction || task.parentTaskId) {
+      contextParts.push('【BattleStar 主任务背景】');
+      const parentTaskId = context.parentTaskId || task.parentTaskId;
+      if (parentTaskId) contextParts.push(`主任务 id：${parentTaskId}`);
+      if (context.parentInstruction) {
+        contextParts.push(`主任务目标：\n${String(context.parentInstruction).slice(0, 4000)}`);
+      }
+      if (Number.isFinite(context.planStep)) {
+        contextParts.push(
+          Number.isFinite(context.planTotal) && context.planTotal > 0
+            ? `当前是主任务拆分出的第 ${context.planStep}/${context.planTotal} 个子任务。`
+            : `当前是主任务拆分出的第 ${context.planStep} 个子任务。`,
+        );
+      }
+      if (Array.isArray(context.planSiblings) && context.planSiblings.length) {
+        const siblingLines = context.planSiblings
+          .slice(0, 12)
+          .map((item) => {
+            if (!item || typeof item !== 'object') return '';
+            const step = Number.isFinite(item.step) ? `${item.step}. ` : '';
+            const current = item.id === task.id ? '（当前任务）' : '';
+            const status = item.status ? ` [${item.status}]` : '';
+            return `${step}${String(item.instruction || '')}${current}${status}`;
+          })
+          .filter(Boolean)
+          .join('\n');
+        if (siblingLines) contextParts.push(`主任务的其他子任务：\n${siblingLines.slice(0, 3000)}`);
+      }
+      contextParts.push(
+        '注意：当前任务只是主任务的一部分。请结合主任务目标执行，只完成当前子任务的职责；'
+        + '如果当前任务不涉及图片/视频生成，不要调用 ComfyUI；'
+        + '输出中说明本子任务产出了什么（文件路径/结论），供后续步骤使用。',
+      );
+    }
+    // 线程跟进：把上一步的指令/输出/错误合并进 prompt（原有行为）。
     if (context.previousInstruction || context.previousOutput || context.previousError) {
-      const parts = ['【BattleStar 任务线程上下文】'];
-      if (Number.isFinite(context.step)) parts.push(`当前是第 ${context.step} 步。`);
-      if (context.previousInstruction) parts.push(`上一步任务：\n${String(context.previousInstruction).slice(0, 6000)}`);
-      if (context.previousOutput) parts.push(`上一步输出：\n${String(context.previousOutput).slice(0, 8000)}`);
-      if (context.previousError) parts.push(`上一步错误：\n${String(context.previousError).slice(0, 2000)}`);
-      if (context.historySummary) parts.push(`更早的步骤：\n${String(context.historySummary).slice(0, 4000)}`);
-      parts.push('【当前任务】');
-      task.instruction = `${parts.join('\n\n')}\n\n${task.instruction}`;
+      contextParts.push('【BattleStar 任务线程上下文】');
+      if (Number.isFinite(context.step)) contextParts.push(`当前是第 ${context.step} 步。`);
+      if (context.previousInstruction) contextParts.push(`上一步任务：\n${String(context.previousInstruction).slice(0, 6000)}`);
+      if (context.previousOutput) contextParts.push(`上一步输出：\n${String(context.previousOutput).slice(0, 8000)}`);
+      if (context.previousError) contextParts.push(`上一步错误：\n${String(context.previousError).slice(0, 2000)}`);
+      if (context.historySummary) contextParts.push(`更早的步骤：\n${String(context.historySummary).slice(0, 4000)}`);
+    }
+    if (contextParts.length) {
+      task.instruction = `${contextParts.join('\n\n')}\n\n【当前任务】\n${task.instruction}`;
     }
     const controller = new AbortController();
     const record = {
@@ -865,8 +1019,14 @@ class Agent {
 
     let keepaliveTimer = null;
     try {
-      const acked = await this._ackTask(taskId);
-      if (!acked) return;
+      // 入队时已 ack 过（正常路径）；这里作为旧命令/重投的兜底，避免漏 ack。
+      const acked = this.ackedTasks.has(taskId) ? true : await this._ackTask(taskId);
+      if (!acked) {
+        this.taskIdIndex.delete(taskId);
+        this.ackedTasks.delete(taskId);
+        return;
+      }
+      this.ackedTasks.add(taskId);
       keepaliveTimer = setInterval(() => {
         if (record.finished) return;
         // 同时续期本机看门狗与 Hub 侧计时器，避免任务被执行到一半被固定超时中止。
@@ -924,6 +1084,8 @@ class Agent {
       if (keepaliveTimer) clearInterval(keepaliveTimer);
       if (record.timeoutTimer) clearTimeout(record.timeoutTimer);
       this.running.delete(taskId);
+      this.taskIdIndex.delete(taskId);
+      this.ackedTasks.delete(taskId);
       this._pump();
     }
   }
@@ -961,10 +1123,17 @@ class Agent {
 
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
-        await this.client.result(record.taskId, body);
+        const res = await this.client.result(record.taskId, body);
+        const responseBody = res && res.json && typeof res.json === 'object' ? res.json : null;
+        if (responseBody && responseBody.ignored === true) {
+          // Hub 结果收敛：任务已结束/已被重新派发。不是错误，也不需要继续重试。
+          this.stats.resultsIgnored += 1;
+          this.log.warn(`结果被 Hub 忽略（${responseBody.reason || '任务已结束或被重派'}）：${record.taskId}`);
+        }
         return;
       } catch (err) {
         if (err instanceof ApiError && (err.status === 404 || err.status === 409 || err.status === 400)) {
+          this.stats.resultsIgnored += 1;
           this.log.warn(`结果上报被 Hub 忽略（HTTP ${err.status} ${err.code}），任务可能已被取消/重派`);
           return;
         }
@@ -995,6 +1164,7 @@ class Agent {
     }
     this._startHeartbeatLoop();
     this._startPollLoop();
+    this._startQueueKeepalive();
     this.log.info(
       `已连接 Hub ${this.hubUrl}｜心跳 ${this.intervalMs}ms｜长轮询 ${this.pollWaitMs}ms｜并发上限 ${this.maxConcurrent}`,
     );
@@ -1032,6 +1202,10 @@ class Agent {
   async stop(options = {}) {
     if (this.stopped) return this._stopPromise;
     this.stopped = true;
+    if (this.queueKeepaliveTimer) {
+      clearInterval(this.queueKeepaliveTimer);
+      this.queueKeepaliveTimer = null;
+    }
     const unregister = options.unregister !== false;
     this.log.info(`正在停止设备代理${options.reason ? `（${options.reason}）` : ''}…`);
 

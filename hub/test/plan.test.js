@@ -17,7 +17,11 @@ test('长任务拆分：父任务包含子任务，子任务全部完成后父�
       ],
     }),
   });
-  const device = await registerDevice(env, makeManifest({ skills: [{ id: 'office-docx', name: 'Word' }] }));
+  // 单并发设备上两个子任务会串行排队，给 2 个槽位让它们同时派发，专注验证父任务编排。
+  const device = await registerDevice(
+    env,
+    makeManifest({ skills: [{ id: 'office-docx', name: 'Word' }], limits: { maxConcurrentTasks: 2 } }),
+  );
   const res = await request(env.base, 'POST', '/api/tasks', {
     headers: adminHeaders(env),
     body: {

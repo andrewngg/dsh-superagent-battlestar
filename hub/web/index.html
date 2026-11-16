@@ -9,7 +9,7 @@
   <title>BattleStar · 控制台</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="assets/vendor/select2.min.css">
-  <link rel="stylesheet" href="assets/style.css?v=20261108o">
+  <link rel="stylesheet" href="assets/style.css?v=20261116f">
 </head>
 <body>
   <!-- 静态图标库（仅常量路径，不承载用户数据） -->
@@ -166,6 +166,7 @@
                 </div>
               </div>
             </div>
+            <div id="task-recovery-hint" class="recovery-hint" hidden></div>
             <div id="task-list" class="task-list" aria-live="polite"></div>
           </section>
 
@@ -181,8 +182,153 @@
                 </button>
               </div>
             </div>
+            <div id="brain-card" class="brain-card" hidden>
+              <div class="brain-head">
+                <span class="brain-title">
+                  <svg class="icon" aria-hidden="true"><use href="#i-spark"></use></svg>
+                  <strong>自主大脑</strong>
+                </span>
+                <span id="brain-chip" class="brain-chip" data-tone="auto">自动</span>
+                <span id="brain-error" class="brain-error" hidden></span>
+              </div>
+              <p id="brain-summary" class="brain-summary is-empty">还没有思考记录</p>
+              <div id="brain-owner-ask" class="brain-owner-ask" hidden>
+                <span class="brain-owner-ask-icon"><svg class="icon" aria-hidden="true"><use href="#i-bell"></use></svg></span>
+                <div class="brain-owner-ask-main">
+                  <strong id="brain-owner-ask-label">需要主人</strong>
+                  <p id="brain-owner-ask-text"></p>
+                </div>
+                <button type="button" class="btn btn-ghost btn-sm" id="brain-owner-ack">知道了</button>
+              </div>
+              <div id="brain-assessment" class="brain-assessment" hidden></div>
+              <p id="brain-rhythm" class="brain-rhythm" hidden></p>
+              <div class="brain-meta">
+                <span class="brain-meta-item">上次思考 <b id="brain-last">—</b></span>
+                <span class="brain-meta-item">下次思考 <b id="brain-next">—</b></span>
+              </div>
+              <div class="brain-actions">
+                <button type="button" class="btn btn-primary btn-sm" id="brain-think">
+                  <svg class="icon" aria-hidden="true"><use href="#i-spark"></use></svg><span id="brain-think-label">立即思考</span>
+                </button>
+                <button type="button" class="btn btn-ghost btn-sm" id="brain-settings">
+                  <svg class="icon" aria-hidden="true"><use href="#i-gear"></use></svg><span>设置</span>
+                </button>
+                <button type="button" class="btn btn-ghost btn-sm" id="brain-toggle">
+                  <svg class="icon" aria-hidden="true"><use href="#i-power"></use></svg><span id="brain-toggle-label">暂停</span>
+                </button>
+              </div>
+            </div>
             <div id="goal-list" class="goal-list" aria-live="polite"></div>
             <div id="nightly-review" class="nightly-review" hidden></div>
+          </section>
+
+          <section class="panel section-journal" id="section-journal" data-tab-panel="journal">
+            <div class="panel-head">
+              <div>
+                <h2>管家心路</h2>
+                <p class="panel-sub" id="journal-sub">思考、动作与每日实质推进</p>
+              </div>
+              <div class="panel-head-actions">
+                <button type="button" class="btn btn-primary btn-sm" id="journal-summary-now">
+                  <svg class="icon" aria-hidden="true"><use href="#i-spark"></use></svg><span>生成今日总结</span>
+                </button>
+              </div>
+            </div>
+            <div id="journal-controls" class="journal-controls"></div>
+            <div id="journal-error" class="journal-error" role="alert" hidden></div>
+            <div id="journal-body" class="journal-body" aria-live="polite"></div>
+          </section>
+
+          <section class="panel section-brainstorm" id="section-brainstorm" data-tab-panel="brainstorm">
+            <div class="panel-head">
+              <div>
+                <h2>头脑风暴</h2>
+                <p class="panel-sub" id="brainstorm-sub">直接和大脑聊思路、拆目标、做取舍</p>
+              </div>
+              <div class="panel-head-actions">
+                <button type="button" class="btn btn-ghost btn-sm" id="brainstorm-reload">
+                  <svg class="icon" aria-hidden="true"><use href="#i-refresh"></use></svg><span>刷新</span>
+                </button>
+              </div>
+            </div>
+            <div id="brainstorm-error" class="brainstorm-error" role="alert" hidden></div>
+            <div class="brainstorm-layout">
+              <aside class="brainstorm-side">
+                <div class="brainstorm-side-head">
+                  <span>会话</span>
+                  <button type="button" class="btn btn-ghost btn-sm" id="brainstorm-new">
+                    <svg class="icon" aria-hidden="true"><use href="#i-spark"></use></svg><span>新建</span>
+                  </button>
+                </div>
+                <div id="brainstorm-sessions" class="brainstorm-sessions"></div>
+              </aside>
+              <div class="brainstorm-main">
+                <div id="brainstorm-messages" class="brainstorm-messages" aria-live="polite"></div>
+                <form class="brainstorm-composer" id="brainstorm-form">
+                  <textarea id="brainstorm-input" rows="2" maxlength="8000" placeholder="输入你的想法，Enter 发送，Shift+Enter 换行"></textarea>
+                  <div class="brainstorm-composer-foot">
+                    <span id="brainstorm-hint" class="brainstorm-hint">Enter 发送 · Shift+Enter 换行</span>
+                    <button type="submit" class="btn btn-primary btn-sm" id="brainstorm-send">
+                      <svg class="icon" aria-hidden="true"><use href="#i-send"></use></svg><span>发送</span>
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel section-mind" id="section-mind" data-tab-panel="mind">
+            <div class="panel-head">
+              <div>
+                <h2>心智</h2>
+                <p class="panel-sub" id="mind-sub">编辑大脑的灵魂与工作流程。</p>
+              </div>
+              <div class="panel-head-actions">
+                <span id="mind-dirty" class="mind-dirty" hidden>有未保存的修改</span>
+                <span id="mind-updated" class="mind-updated"></span>
+              </div>
+            </div>
+            <div class="mind-intro">
+              <span class="mind-intro-icon"><svg class="icon" aria-hidden="true"><use href="#i-spark"></use></svg></span>
+              <p>这段灵魂与工作流程会在大脑每一轮思考时随现场快照一起交给 Agnes 模型。</p>
+            </div>
+            <div id="mind-error" class="mind-error" role="alert" hidden></div>
+            <div id="mind-editors" class="mind-editors">
+              <article class="mind-card" data-mind-field="soul">
+                <div class="mind-card-head">
+                  <h3>灵魂 Soul</h3>
+                  <span id="mind-soul-badge" class="mind-badge">使用默认内容</span>
+                </div>
+                <p class="mind-card-desc">大脑是谁：价值观、气质、语气、取舍原则，以及面对不确定、风险与失败时的态度。</p>
+                <textarea id="mind-soul" class="mind-textarea" rows="12" spellcheck="false" aria-label="灵魂 Soul" placeholder="正在载入心智…"></textarea>
+                <div class="mind-card-foot">
+                  <span id="mind-soul-count" class="mind-count">0 / 6000</span>
+                  <button type="button" class="btn btn-ghost btn-sm" id="mind-soul-reset" data-mind-reset="soul">恢复默认</button>
+                </div>
+              </article>
+              <article class="mind-card" data-mind-field="skill">
+                <div class="mind-card-head">
+                  <h3>工作流程 Skill</h3>
+                  <span id="mind-skill-badge" class="mind-badge">使用默认内容</span>
+                </div>
+                <p class="mind-card-desc">大脑怎么做事：从观察、判断主要矛盾、评估方案，到小步执行、复盘与请求主人决策的步骤化流程。</p>
+                <textarea id="mind-skill" class="mind-textarea" rows="12" spellcheck="false" aria-label="工作流程 Skill" placeholder="正在载入心智…"></textarea>
+                <div class="mind-card-foot">
+                  <span id="mind-skill-count" class="mind-count">0 / 12000</span>
+                  <button type="button" class="btn btn-ghost btn-sm" id="mind-skill-reset" data-mind-reset="skill">恢复默认</button>
+                </div>
+              </article>
+            </div>
+            <div class="mind-actions">
+              <button type="button" class="btn btn-primary btn-sm" id="mind-save">
+                <svg class="icon" aria-hidden="true"><use href="#i-check"></use></svg><span id="mind-save-label">保存心智</span>
+              </button>
+              <button type="button" class="btn btn-ghost btn-sm" id="mind-reset-all">全部恢复默认</button>
+            </div>
+            <details class="mind-preview" id="mind-preview">
+              <summary>本次思考将使用的提示段（前 600 字）</summary>
+              <pre id="mind-preview-text"></pre>
+            </details>
           </section>
 
           <section class="panel section-reminders" id="section-reminders" data-tab-panel="reminders">
@@ -251,6 +397,11 @@
                   <span class="muted" id="skills-hint">可多选</span>
                 </div>
                 <select id="skill-select" multiple></select>
+              </div>
+
+              <div class="field">
+                <label for="req-project">项目（可选）</label>
+                <input type="text" id="req-project" placeholder="项目名或绝对路径，决定 Hermes 会话归属" autocomplete="off">
               </div>
 
               <div class="field-row">
@@ -351,6 +502,15 @@
     <button type="button" class="mobile-tab" data-tab="goals" aria-selected="false">
       <svg class="icon"><use href="#i-target"></use></svg><span>目标</span>
     </button>
+    <button type="button" class="mobile-tab" data-tab="journal" aria-selected="false">
+      <svg class="icon"><use href="#i-spark"></use></svg><span>心路</span>
+    </button>
+    <button type="button" class="mobile-tab" data-tab="brainstorm" aria-selected="false">
+      <svg class="icon"><use href="#i-spark"></use></svg><span>对话</span>
+    </button>
+    <button type="button" class="mobile-tab" data-tab="mind" aria-selected="false">
+      <svg class="icon"><use href="#i-gear"></use></svg><span>心智</span>
+    </button>
     <button type="button" class="mobile-tab" data-tab="reminders" aria-selected="false">
       <svg class="icon"><use href="#i-bell"></use></svg><span>提醒</span>
     </button>
@@ -407,7 +567,7 @@
 
   <script src="assets/vendor/jquery.min.js" defer></script>
   <script src="assets/vendor/select2.min.js" defer></script>
-  <script src="assets/i18n.js?v=20261108o" defer></script>
-  <script src="assets/app.js?v=20261108s" defer></script>
+  <script src="assets/i18n.js?v=20261116f" defer></script>
+  <script src="assets/app.js?v=20261116f" defer></script>
 </body>
 </html>

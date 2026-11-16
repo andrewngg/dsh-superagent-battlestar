@@ -26,13 +26,73 @@ const {
 const {
   GOAL_STATUS_SET,
   MAX_CHECKS,
+  MAX_GUIDANCE_ENTRIES,
   buildGoalCheckInstruction,
   computeNextCheckAt,
+  computeSkipNextCheckAt,
   goalDisplayName,
   goalToJson,
   normalizeGoalRequest,
+  normalizeGuidanceEntry,
   restoreGoal,
 } = require('./goals');
+const {
+  BRAIN_ACTIONS,
+  MAX_IDLE_SEC,
+  MIN_AUTO_CONFIDENCE,
+  brainToJson,
+  buildBrainPrompt,
+  createBrainThinker,
+  normalizeBrainPatch,
+  parseBrainReply,
+  recordBrainDecision,
+  restoreBrain,
+} = require('./brain');
+const {
+  DEFAULT_SUMMARY_TIME,
+  JOURNAL_KINDS,
+  MAX_DAYS,
+  MAX_ENTRIES,
+  appendJournalEntry,
+  buildDailySummaryPrompt,
+  createJournalThinker,
+  dayKey,
+  entriesForDate,
+  fallbackDailySummary,
+  journalModelConfig,
+  journalStatsForDay,
+  journalToJson,
+  localDateKey: journalDateKey,
+  localTimeKey: journalTimeKey,
+  normalizeJournalPatch,
+  parseDailySummary,
+  restoreJournal,
+  systemTimeZone,
+  validDateKey,
+} = require('./journal');
+const {
+  DEFAULT_BRAINSTORM,
+  MAX_MESSAGES: BRAINSTORM_MAX_MESSAGES,
+  MAX_SESSIONS: BRAINSTORM_MAX_SESSIONS,
+  MAX_TEXT: BRAINSTORM_MAX_TEXT,
+  appendMessage: appendBrainstormMessage,
+  brainstormModelConfig,
+  brainstormToJson,
+  buildBrainstormPrompt,
+  createSession: newBrainstormSession,
+  createBrainstormThinker,
+  findSession: findBrainstormSession,
+  normalizeChatRequest: normalizeBrainstormChatRequest,
+  restoreBrainstorm,
+  sessionSummary: brainstormSessionSummary,
+} = require('./brainstorm');
+const {
+  MAX_SKILL_CHARS,
+  MAX_SOUL_CHARS,
+  mindToJson,
+  normalizeMindPatch,
+  restoreMind,
+} = require('./soul');
 const {
   DEFAULT_NOTIFY_STYLE,
   nextDueAt,
@@ -67,6 +127,14 @@ const TASK_MESSAGES = {
   timeout: '任务超时',
   cancelled: '任务已取消',
 };
+
+/** 计划执行方式的中文标签，用于进度/任务记录展示。 */
+function planExecutionLabel(execution) {
+  const strategy = execution && execution.strategy;
+  if (strategy === 'parallel') return '并行执行';
+  if (strategy === 'sequential') return '按顺序执行';
+  return '并行 + 顺序依赖';
+}
 
 function normalizeOutput(input) {
   if (!util.isPlainObject(input)) return null;
@@ -132,6 +200,9 @@ class Hub {
     this.ackTimeoutMs = util.clampInt(options.ackTimeoutMs, LIMITS.ASSIGN_ACK_TIMEOUT_MS, 20, 3600 * 1000);
     // 任务运行超时后，在 maxAttempts 内自动重新排队（无需人工点「重试」）。
     this.autoRetryOnTimeout = options.autoRetryOnTimeout !== false;
+    // 设备在线但忙碌（正在跑别的任务）时，ack 可能长时间不到。此时不按 ack timeout 重派，
+    // 而是重投同一个 command 并按指数退避等待，最多累计等待该上限（避免排队中的任务被无限重派）。
+    this.ackWaitMaxMs = Math.max(this.ackTimeoutMs * 4, 10 * 60 * 1000);
     // 系统自重启：先通知设备代理重启，留出心跳/长轮询窗口后再重启 Hub 自身。
     this.restartDelayMs = util.clampInt(options.restartDelayMs, 12000, 0, 60000);
     this.restartHandler = typeof options.restartHandler === 'function' ? options.restartHandler : null;
@@ -210,6 +281,35 @@ class Hub {
       lastSkipReason: '',
     };
 
+    // 自主大脑：定时扫描目标/任务/设备状态，让模型决策并执行白名单动作。
+    // 默认启用（用户想要的「会自己思考的大管家」），可在控制台切换为 suggest 或暂停。
+    this.brainTickMs = util.clampInt(options.brainTickMs, 30000, 5000, 600000);
+    this.brain = restoreBrain(options.brain);
+    this._brainTimer = null;
+    this._brainThinking = null;
+    this._brainThinkInjected = typeof options.brainThink === 'function';
+    this.brainThink = this._brainThinkInjected ? options.brainThink : null;
+    this._brainThinker = this.brainThink;
+    this._brainThinkerModel = this._brainThinkInjected ? '*' : null;
+
+    // 管家心路：把思考与工作按天记成时间线，并在每日固定时间生成「实质推进」总结。
+    this.journal = restoreJournal(options.journal);
+    this._journalThinking = null;
+    this._journalThinkInjected = typeof options.journalThink === 'function';
+    this.journalThink = this._journalThinkInjected ? options.journalThink : null;
+    this._journalThinker = this.journalThink;
+    this._journalThinkerModel = this._journalThinkInjected ? '*' : null;
+
+    // 头脑风暴：与大脑多轮对话，可把结论一键转成任务。
+    this.brainstorm = restoreBrainstorm(options.brainstorm);
+    this._brainstormThinkInjected = typeof options.brainstormThink === 'function';
+    this.brainstormThink = this._brainstormThinkInjected ? options.brainstormThink : null;
+    this._brainstormThinker = this.brainstormThink;
+    this._brainstormThinkerModel = this._brainstormThinkInjected ? '*' : null;
+
+    // 心智：灵魂（个性/价值观）与工作流程（Skill），每轮思考注入提示词。
+    this.mind = restoreMind(options.mind);
+
     this.adminToken =
       util.str(options.adminToken, 300) || util.str(process.env.BUTLER_ADMIN_TOKEN, 300) || null;
     this.joinCode = util.str(options.joinCode, 100) || util.str(process.env.BUTLER_JOIN_CODE, 100) || null;
@@ -263,6 +363,8 @@ class Hub {
       const goal = restoreGoal(raw);
       if (goal) this.goals.set(goal.id, goal);
     }
+    // 自主大脑状态：持久化过则以存档为准（包括用户暂停/模式/间隔）。
+    if (savedObj.brain) this.brain = restoreBrain(savedObj.brain);
     // 提醒只做容错恢复；到点通知由 APK 负责，Hub 启动时不补发、不轮询。
     for (const raw of util.arr(savedObj.reminders)) {
       const reminder = restoreReminder(raw);
@@ -278,6 +380,16 @@ class Hub {
       if (task) this.tasks.set(task.id, task);
     }
     this.events = util.arr(savedObj.events).slice(-this.eventLimit);
+
+    // 管家心路：恢复日志；首次运行时用已有任务/大脑决策回填当天记录（只回填一次）。
+    if (savedObj.journal) this.journal = restoreJournal(savedObj.journal);
+    this._seedJournalFromHistory();
+
+    // 头脑风暴：恢复对话历史。
+    if (savedObj.brainstorm) this.brainstorm = restoreBrainstorm(savedObj.brainstorm);
+
+    // 心智：恢复灵魂与工作流程（缺失时用默认内容）。
+    if (savedObj.mind) this.mind = restoreMind(savedObj.mind);
 
     // 系统设置：优先读取持久化文件；文件不存在时写入默认值（默认中文）。
     const storedSettings = readSettings(this.dataDir);
@@ -345,8 +457,14 @@ class Hub {
     this._goalTimer = setInterval(() => {
       this.runDueGoalChecks();
       this.runNightlyReview();
+      this.runJournalCycle();
     }, this.goalTickMs);
     if (this._goalTimer.unref) this._goalTimer.unref();
+    // 自主大脑定时器：到点才真正思考，思考失败只记录 lastError，不影响 Hub。
+    this._brainTimer = setInterval(() => {
+      this.runBrainCycle();
+    }, this.brainTickMs);
+    if (this._brainTimer.unref) this._brainTimer.unref();
 
     // 兼容旧数据：历史规划子任务可能只有 60/90/180s 的超时，按新规则抬高（终态任务保持原样）。
     for (const task of this.tasks.values()) {
@@ -408,9 +526,11 @@ class Hub {
     if (this._sweepTimer) clearInterval(this._sweepTimer);
     if (this._pingTimer) clearInterval(this._pingTimer);
     if (this._goalTimer) clearInterval(this._goalTimer);
+    if (this._brainTimer) clearInterval(this._brainTimer);
     this._sweepTimer = null;
     this._pingTimer = null;
     this._goalTimer = null;
+    this._brainTimer = null;
 
     for (const timers of this._timers.values()) {
       if (timers.ack) clearTimeout(timers.ack);
@@ -501,6 +621,14 @@ class Hub {
         attachments: (task.attachments || []).map((file) => ({ ...file })),
       })),
       goals: [...this.goals.values()].map((goal) => goalToJson(goal)),
+      brain: this._brainStateForPersist(),
+      journal: this._journalStateForPersist(),
+      brainstorm: this._brainstormStateForPersist(),
+      mind: {
+        soul: this.mind.soul,
+        skill: this.mind.skill,
+        updatedAt: this.mind.updatedAt || null,
+      },
       reminders: [...this.reminders.values()].map((reminder) => reminderToJson(reminder)),
       nightlyReview: { ...this.nightlyReview },
       events: this.events.slice(-this.eventLimit),
@@ -603,6 +731,38 @@ class Hub {
       isPlan: raw.isPlan === true,
       archived: raw.archived === true,
       archivedAt: util.str(raw.archivedAt, 40) || null,
+      // 长任务拆分计划：步骤序号 / 并行组 / 依赖（持久化后重启仍按依赖顺序执行）。
+      planStep: Number.isFinite(Number(raw.planStep)) && Number(raw.planStep) > 0 ? Math.trunc(Number(raw.planStep)) : null,
+      planGroup: util.str(raw.planGroup, 60) || null,
+      planDependsOn: util
+        .arr(raw.planDependsOn)
+        .map((n) => Math.trunc(Number(n)))
+        .filter((n) => Number.isInteger(n) && n >= 0)
+        .slice(0, 20),
+      planDependsOnTaskIds: util
+        .arr(raw.planDependsOnTaskIds)
+        .map((value) => util.str(value, 80))
+        .filter(Boolean)
+        .slice(0, 20),
+      plan: util.isPlainObject(raw.plan)
+        ? {
+            strategy: ['parallel', 'sequential', 'mixed'].includes(raw.plan.strategy) ? raw.plan.strategy : 'mixed',
+            blockerPolicy: raw.plan.blockerPolicy === 'continue' ? 'continue' : 'stop-and-ask',
+            groups: util
+              .arr(raw.plan.groups)
+              .filter((group) => util.isPlainObject(group))
+              .slice(0, 6)
+              .map((group) => ({
+                name: util.str(group.name, 40) || '并行组',
+                mode: group.mode === 'sequential' ? 'sequential' : 'parallel',
+                subtaskIndexes: util
+                  .arr(group.subtaskIndexes)
+                  .map((n) => Math.trunc(Number(n)))
+                  .filter((n) => Number.isInteger(n) && n >= 0)
+                  .slice(0, 12),
+              })),
+          }
+        : null,
       routingAdvice: this.normalizeRoutingAdvice(raw.routingAdvice),
       _avoidDeviceIds: [],
     };
@@ -664,6 +824,11 @@ class Hub {
         size: file.size,
       })),
       isPlan: Boolean(task.isPlan),
+      planStep: task.planStep || null,
+      planGroup: task.planGroup || null,
+      planDependsOn: [...(task.planDependsOn || [])],
+      planDependsOnTaskIds: [...(task.planDependsOnTaskIds || [])],
+      plan: task.plan ? JSON.parse(JSON.stringify(task.plan)) : null,
       goalId: task.goalId || null,
       archived: Boolean(task.archived),
       archivedAt: task.archivedAt || null,
@@ -722,6 +887,7 @@ class Hub {
       devices,
       tasks,
       goals: this.listGoals(),
+      brain: this.getBrain(),
       reminders: this.listReminders(),
       nightlyReview: this.getNightlyReview(),
       events: this.events.slice(-safeLimit).map((event) => ({ ...event })),
@@ -787,11 +953,190 @@ class Hub {
         if (byStatus) return byStatus;
         return String(b.createdAt).localeCompare(String(a.createdAt));
       });
-    return goals.map((goal) => goalToJson(goal));
+    return goals.map((goal) => {
+      const json = goalToJson(goal);
+      json.linkedStats = this._goalLinkedStats(goal);
+      return json;
+    });
   }
 
   getGoal(goalId) {
     return goalToJson(this._requireGoal(goalId));
+  }
+
+  /** 目标关联任务的聚合统计（列表页/大脑提示词共用）。 */
+  _goalLinkedStats(goal) {
+    const stats = {
+      total: 0,
+      running: 0,
+      completed: 0,
+      failed: 0,
+      waiting: 0,
+      planTotal: 0,
+      planCompleted: 0,
+    };
+    const ids = util.arr(goal && goal.taskIds);
+    let bestPlanTotal = 0;
+    for (const id of ids) {
+      const task = this.tasks.get(id);
+      if (!task) continue;
+      stats.total += 1;
+      if (task.status === TASK_STATUS.ASSIGNED || task.status === TASK_STATUS.RUNNING) stats.running += 1;
+      else if (task.status === TASK_STATUS.WAITING) stats.waiting += 1;
+      else if (task.status === TASK_STATUS.COMPLETED) stats.completed += 1;
+      else if (
+        task.status === TASK_STATUS.FAILED ||
+        task.status === TASK_STATUS.TIMEOUT ||
+        task.status === TASK_STATUS.CANCELLED
+      ) {
+        stats.failed += 1;
+      }
+      if (task.isPlan && util.arr(task.childTaskIds).length > bestPlanTotal) {
+        bestPlanTotal = task.childTaskIds.length;
+        const children = task.childTaskIds.map((childId) => this.tasks.get(childId)).filter(Boolean);
+        stats.planTotal = task.childTaskIds.length;
+        stats.planCompleted = children.filter((child) => child.status === TASK_STATUS.COMPLETED).length;
+      }
+    }
+    return stats;
+  }
+
+  goalLinkedStats(goalId) {
+    return this._goalLinkedStats(this._requireGoal(goalId));
+  }
+
+  /**
+   * 目标详情页展示用的关联任务摘要列表（只列顶层任务；计划子任务折叠进 childProgress）。
+   * @param {string} goalId
+   */
+  listGoalTasks(goalId) {
+    const goal = this._requireGoal(goalId);
+    const ids = util.arr(goal.taskIds);
+    const idSet = new Set(ids);
+    return ids
+      .map((id) => this.tasks.get(id))
+      .filter((task) => task && !(task.parentTaskId && idSet.has(task.parentTaskId)))
+      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+      .map((task) => this._goalTaskSummary(task));
+  }
+
+  _goalTaskSummary(task) {
+    const progress = util.isPlainObject(task.progress)
+      ? {
+          message: util.str(task.progress.message, 500) || '',
+          percent: Number.isFinite(Number(task.progress.percent))
+            ? Math.max(0, Math.min(100, Math.trunc(Number(task.progress.percent))))
+            : 0,
+          waiting: task.progress.waiting === true,
+          question: util.str(task.progress.question, 500) || null,
+          at: task.progress.at || null,
+        }
+      : null;
+    const children = util
+      .arr(task.childTaskIds)
+      .map((id) => this.tasks.get(id))
+      .filter(Boolean);
+    let childProgress = null;
+    if (task.isPlan && children.length) {
+      childProgress = {
+        total: children.length,
+        completed: children.filter((child) => child.status === TASK_STATUS.COMPLETED).length,
+        failed: children.filter(
+          (child) =>
+            child.status === TASK_STATUS.FAILED ||
+            child.status === TASK_STATUS.TIMEOUT ||
+            child.status === TASK_STATUS.CANCELLED,
+        ).length,
+        running: children.filter(
+          (child) => child.status === TASK_STATUS.ASSIGNED || child.status === TASK_STATUS.RUNNING,
+        ).length,
+        waiting: children.filter((child) => child.status === TASK_STATUS.WAITING).length,
+      };
+    }
+    const events = util.arr(task.events);
+    const last = events.length ? events[events.length - 1] : null;
+    return {
+      id: task.id,
+      instruction: util.truncate(task.instruction || '', 400),
+      status: task.status,
+      goalId: task.goalId || null,
+      isPlan: Boolean(task.isPlan),
+      parentTaskId: task.parentTaskId || null,
+      threadId: task.threadId || null,
+      createdAt: task.createdAt || null,
+      updatedAt: task.updatedAt || null,
+      startedAt: task.startedAt || null,
+      finishedAt: task.finishedAt || null,
+      assignedDeviceName: task.assignedDeviceName || null,
+      progress,
+      error: task.error ? util.truncate(task.error, 300) : null,
+      childProgress,
+      planStep: task.planStep || null,
+      planTitle: null,
+      lastEvent: last
+        ? { at: last.at, type: last.type, message: util.truncate(last.message || '', 200) }
+        : null,
+    };
+  }
+
+  /** 取消任务与目标的关联（不删除任务）。 */
+  unlinkGoalTask(goalId, taskId) {
+    const goal = this._requireGoal(goalId);
+    const task = this._requireTask(util.str(taskId, 80));
+    const now = protocol.nowIso();
+    const index = goal.taskIds.indexOf(task.id);
+    if (index >= 0) goal.taskIds.splice(index, 1);
+    if (task.goalId === goal.id) task.goalId = null;
+    task.updatedAt = now;
+    if (goal.runningTaskId === task.id) goal.runningTaskId = null;
+    if (task.isPlan) {
+      for (const childId of util.arr(task.childTaskIds)) {
+        const child = this.tasks.get(childId);
+        if (!child || !util.isPlainObject(child.context)) continue;
+        if (child.context.goalId !== goal.id) continue;
+        const nextContext = { ...child.context };
+        delete nextContext.goalId;
+        child.context = Object.keys(nextContext).length ? nextContext : null;
+        child.updatedAt = now;
+        this.broadcast('task.updated', { task: this.taskToJson(child) });
+      }
+    }
+    goal.updatedAt = now;
+    this.broadcast('goal.updated', { goal: goalToJson(goal), at: now });
+    this.broadcast('task.updated', { task: this.taskToJson(task) });
+    this.log('info', `长期目标取消关联：${goal.id} ↮ ${task.id}`);
+    this._journalEntry({
+      kind: 'work',
+      title: `取消关联目标「${util.truncate(goalDisplayName(goal), 40)}」`,
+      text: util.truncate(task.instruction, 600),
+      refs: { goalId: goal.id, taskId: task.id },
+      meta: { action: 'unlink', taskStatus: task.status },
+    });
+    this.schedulePersist();
+    return { goal, task };
+  }
+
+  /** 任务创建/关联到目标后的统一登记（去重、runningTaskId、广播）。 */
+  _registerGoalTask(goalId, task) {
+    if (!goalId || !task) return;
+    const goal = this.goals.get(goalId);
+    if (!goal) return;
+    if (!goal.taskIds.includes(task.id)) {
+      goal.taskIds.push(task.id);
+      if (goal.taskIds.length > 50) goal.taskIds.splice(0, goal.taskIds.length - 50);
+    }
+    if (!TERMINAL_TASK_STATUSES.has(task.status)) {
+      if (!goal.runningTaskId || !this._goalActiveTask(goal.runningTaskId)) {
+        goal.runningTaskId = task.id;
+      }
+    }
+    goal.updatedAt = protocol.nowIso();
+    this.broadcast('goal.updated', { goal: goalToJson(goal), at: goal.updatedAt });
+  }
+
+  _goalActiveTask(taskId) {
+    const task = taskId ? this.tasks.get(taskId) : null;
+    return Boolean(task && !TERMINAL_TASK_STATUSES.has(task.status));
   }
 
   createGoal(input) {
@@ -809,6 +1154,8 @@ class Hub {
       schedule: value.schedule,
       requirements: value.requirements || null,
       nextCheckAt: status === 'active' ? computeNextCheckAt(value.schedule) : null,
+      pausedUntil: status === 'paused' ? (value.pausedUntil || null) : null,
+      guidance: [],
       lastCheckAt: null,
       lastCheckStatus: null,
       lastSummary: '',
@@ -850,10 +1197,19 @@ class Hub {
         // 暂停/停止后恢复：从现在开始重新计算，不补跑错过的检查。
         goal.nextCheckAt = computeNextCheckAt(goal.schedule);
         goal.stoppedAt = null;
+        goal.pausedUntil = null;
       } else {
         goal.nextCheckAt = null;
+        goal.pausedUntil = value.status === 'paused'
+          ? (value.pausedUntil !== undefined
+            ? value.pausedUntil
+            : (previousStatus === 'paused' ? (goal.pausedUntil || null) : null))
+          : null;
         goal.stoppedAt = value.status === 'stopped' || value.status === 'completed' ? now : goal.stoppedAt;
       }
+    } else if (value.pausedUntil !== undefined && goal.status === 'paused') {
+      // 仅调整暂停截止时间：保持暂停状态，等调度器到点自动恢复。
+      goal.pausedUntil = value.pausedUntil;
     } else if (scheduleChanged && goal.status === 'active') {
       goal.nextCheckAt = computeNextCheckAt(goal.schedule);
     }
@@ -863,6 +1219,58 @@ class Hub {
     this.broadcast('goal.updated', { goal: goalToJson(goal), at: now });
     if (previousStatus !== goal.status) this.log('info', `长期目标状态：${goal.id} ${previousStatus} → ${goal.status}`);
     else this.log('info', `长期目标更新：${goal.id}`);
+    this.schedulePersist();
+    return goal;
+  }
+
+  /**
+   * 跳过下一次自动跟进（一次）：推进 nextCheckAt 一个计划周期，目标保持 active。
+   * 到点的待确认提案一并取消，避免用户稍后误批准这次想跳过的跟进。
+   * @param {string} goalId
+   * @returns {object} goal
+   */
+  skipNextGoalCheck(goalId) {
+    const goal = this._requireGoal(goalId);
+    if (goal.status !== 'active') throw conflict('只有进行中的目标可以跳过下一次跟进');
+    const now = protocol.nowIso();
+    const previous = goal.nextCheckAt;
+    goal.nextCheckAt = computeSkipNextCheckAt(goal.schedule, goal.nextCheckAt, Date.parse(now));
+    goal.pendingApproval = null;
+    goal.updatedAt = now;
+    this.broadcast('goal.updated', { goal: goalToJson(goal), at: now });
+    this.log(
+      'info',
+      `长期目标跳过下一次跟进：${goal.id}「${util.truncate(goalDisplayName(goal), 40)}」`
+        + `（${previous || '未排期'} → ${goal.nextCheckAt}）`,
+    );
+    this.schedulePersist();
+    return goal;
+  }
+
+  /**
+   * 给目标追加一条「新的指导指令」：会加入之后的跟进任务指令，并立即刷新待确认提案。
+   * @param {string} goalId
+   * @param {{text:string}} input
+   * @returns {object} goal
+   */
+  addGoalGuidance(goalId, input) {
+    const goal = this._requireGoal(goalId);
+    const normalized = normalizeGuidanceEntry(input);
+    if (!normalized.ok) throw badRequest(normalized.error);
+    const now = protocol.nowIso();
+    goal.guidance = [
+      ...(goal.guidance || []),
+      { id: protocol.randomId('gd'), text: normalized.value.text, createdAt: now },
+    ].slice(-MAX_GUIDANCE_ENTRIES);
+    goal.updatedAt = now;
+    // 已有待确认提案时同步刷新指令，避免用户批准后仍用旧指导。
+    if (goal.pendingApproval) goal.pendingApproval.instruction = buildGoalCheckInstruction(goal);
+    this.broadcast('goal.updated', { goal: goalToJson(goal), at: now });
+    this.log(
+      'info',
+      `长期目标新增指导指令：${goal.id}「${util.truncate(goalDisplayName(goal), 40)}」`
+        + `（${util.truncate(normalized.value.text, 60)}）`,
+    );
     this.schedulePersist();
     return goal;
   }
@@ -1028,7 +1436,7 @@ class Hub {
     });
     const now = protocol.nowIso();
     goal.runningTaskId = task.id;
-    goal.taskIds.push(task.id);
+    if (!goal.taskIds.includes(task.id)) goal.taskIds.push(task.id);
     if (goal.taskIds.length > 50) goal.taskIds.splice(0, goal.taskIds.length - 50);
     goal.updatedAt = now;
     this.broadcast('goal.updated', { goal: goalToJson(goal), at: now });
@@ -1056,6 +1464,19 @@ class Hub {
     }
     task.goalId = goal.id;
     task.updatedAt = now;
+    // 计划父任务：给子任务补归属上下文（仅 context.goalId，不写 child.goalId，
+    // 这样只有父任务结束才回写目标，子任务不会各自制造跟进记录）。
+    if (task.isPlan) {
+      for (const childId of util.arr(task.childTaskIds)) {
+        const child = this.tasks.get(childId);
+        if (!child) continue;
+        const context = util.isPlainObject(child.context) ? child.context : {};
+        if (context.goalId === goal.id) continue;
+        child.context = { ...context, goalId: goal.id };
+        child.updatedAt = now;
+        this.broadcast('task.updated', { task: this.taskToJson(child) });
+      }
+    }
     if (TERMINAL_TASK_STATUSES.has(task.status)) {
       const output = util.isPlainObject(task.output) ? task.output : null;
       const summary = util.str(
@@ -1080,13 +1501,20 @@ class Hub {
       if (goal.status === 'active') {
         goal.nextCheckAt = computeNextCheckAt(goal.schedule, Date.now());
       }
-    } else {
+    } else if (!goal.runningTaskId || !this._goalActiveTask(goal.runningTaskId)) {
       goal.runningTaskId = task.id;
     }
     goal.updatedAt = now;
     this.broadcast('goal.updated', { goal: goalToJson(goal), at: now });
     this.broadcast('task.updated', { task: this.taskToJson(task) });
     this.log('info', `长期目标关联任务：${goal.id} ← ${task.id}`);
+    this._journalEntry({
+      kind: 'work',
+      title: `关联任务到目标「${util.truncate(goalDisplayName(goal), 40)}」`,
+      text: util.truncate(task.instruction, 600),
+      refs: { goalId: goal.id, taskId: task.id },
+      meta: { action: 'link', taskStatus: task.status },
+    });
     this.schedulePersist();
     return { goal, task };
   }
@@ -1149,6 +1577,7 @@ class Hub {
     if (!goal.pendingApproval) throw conflict('该目标没有待确认的跟进');
     goal.pendingApproval = null;
     goal.status = 'paused';
+    goal.pausedUntil = null;
     goal.nextCheckAt = null;
     goal.updatedAt = protocol.nowIso();
     this.broadcast('goal.updated', { goal: goalToJson(goal), at: goal.updatedAt });
@@ -1339,10 +1768,34 @@ class Hub {
     this.schedulePersist();
   }
 
+  /**
+   * 自动恢复到期的「暂停到某个时间」：pausedUntil <= now 的目标恢复 active，
+   * 并从当前时刻重新排下一次跟进（暂停期间的检查不补跑）。
+   */
+  _resumeExpiredGoalPauses(nowMs = Date.now()) {
+    const timestamp = Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now();
+    for (const goal of this.goals.values()) {
+      if (goal.status !== 'paused' || !goal.pausedUntil) continue;
+      const until = Date.parse(goal.pausedUntil);
+      if (!Number.isFinite(until) || until > timestamp) continue;
+      goal.status = 'active';
+      goal.pausedUntil = null;
+      goal.nextCheckAt = computeNextCheckAt(goal.schedule, timestamp);
+      goal.updatedAt = protocol.nowIso();
+      this.broadcast('goal.updated', { goal: goalToJson(goal), at: goal.updatedAt });
+      this.log(
+        'info',
+        `长期目标暂停到期，自动恢复：${goal.id}（下次跟进 ${goal.nextCheckAt}）`,
+      );
+      this.schedulePersist();
+    }
+  }
+
   /** 调度器：扫描到点的 active 目标并创建跟进任务；返回本次触发的目标 id。 */
   runDueGoalChecks(now = Date.now()) {
     if (this._closed) return [];
     const timestamp = Number.isFinite(Number(now)) ? Number(now) : Date.now();
+    this._resumeExpiredGoalPauses(timestamp);
     const triggered = [];
     for (const goal of [...this.goals.values()]) {
       if (goal.status !== 'active' || !goal.nextCheckAt) continue;
@@ -1375,43 +1828,1279 @@ class Hub {
         if (!goal.nextCheckAt) goal.nextCheckAt = computeNextCheckAt(goal.schedule);
       } else {
         goal.nextCheckAt = null;
+        // 重启前已经到期的「暂停到某个时间」直接恢复为进行中。
+        if (goal.status === 'paused' && goal.pausedUntil) {
+          const until = Date.parse(goal.pausedUntil);
+          if (Number.isFinite(until) && until <= Date.now()) {
+            goal.status = 'active';
+            goal.pausedUntil = null;
+            goal.nextCheckAt = computeNextCheckAt(goal.schedule);
+            goal.updatedAt = protocol.nowIso();
+          }
+        }
       }
     }
   }
 
-  /** 目标跟进任务结束时回写检查结果与建议。 */
+  /** 计划父任务没有输出时，用子任务结果合成一句结论写回目标。 */
+  _goalPlanSummary(task) {
+    const children = util
+      .arr(task.childTaskIds)
+      .map((id) => this.tasks.get(id))
+      .filter(Boolean);
+    const completed = children.filter((child) => child.status === TASK_STATUS.COMPLETED).length;
+    const failed = children.filter(
+      (child) =>
+        child.status === TASK_STATUS.FAILED ||
+        child.status === TASK_STATUS.TIMEOUT ||
+        child.status === TASK_STATUS.CANCELLED,
+    );
+    const failedText = failed.length
+      ? `（失败步骤：${failed
+          .map((child) => `第 ${child.planStep || '?'} 步 ${util.truncate(child.instruction || '', 60)}`)
+          .join('；')}）`
+      : '';
+    return util.str(
+      `计划「${util.truncate(task.instruction || '长任务', 30)}」共 ${children.length} 步：完成 ${completed}，失败 ${failed.length}${failedText}`,
+      4000,
+    );
+  }
+
+  /** 目标跟进/关联任务结束时回写检查结果与建议。 */
   _goalTaskFinished(task) {
     if (!task || !task.goalId) return;
     const goal = this.goals.get(task.goalId);
     if (!goal) return;
-    if (goal.runningTaskId && goal.runningTaskId !== task.id) return;
     const output = util.isPlainObject(task.output) ? task.output : null;
-    const summary = util.str(
+    let summary = util.str(
       (output && (output.text || output.markdown)) || (task.error ? `执行失败：${task.error}` : ''),
       4000,
     );
+    if (!summary && task.isPlan) summary = this._goalPlanSummary(task);
     const at = task.finishedAt || protocol.nowIso();
-    goal.checks.push({
-      at,
-      taskId: task.id,
-      status: task.status,
-      summary,
-      error: task.error || null,
-    });
-    if (goal.checks.length > MAX_CHECKS) goal.checks.splice(0, goal.checks.length - MAX_CHECKS);
-    goal.runningTaskId = null;
-    goal.pendingApproval = null;
+    const record = { at, taskId: task.id, status: task.status, summary, error: task.error || null };
+    const existing = goal.checks.find((check) => check && check.taskId === task.id);
+    if (existing) {
+      Object.assign(existing, record);
+    } else {
+      goal.checks.push(record);
+      if (goal.checks.length > MAX_CHECKS) goal.checks.splice(0, goal.checks.length - MAX_CHECKS);
+    }
+    // 目标可能同时关联着另一个仍在跑的任务：这时不要清 runningTaskId，也不重排下次跟进。
+    const stillRunning = goal.runningTaskId !== task.id && this._goalActiveTask(goal.runningTaskId);
+    if (!stillRunning) {
+      goal.runningTaskId = null;
+      goal.pendingApproval = null;
+    }
     goal.lastCheckAt = at;
     goal.lastCheckStatus = task.status;
     goal.lastTaskId = task.id;
     goal.lastSummary = summary;
-    if (goal.status === 'active') {
+    if (goal.status === 'active' && !stillRunning) {
       goal.nextCheckAt = computeNextCheckAt(goal.schedule, Date.now());
     }
     goal.updatedAt = protocol.nowIso();
     this.broadcast('goal.updated', { goal: goalToJson(goal), at: goal.updatedAt });
     this.log('info', `长期目标检查完成：${goal.id}（${task.status}）`);
+    this._journalGoalCheck(goal, task, summary);
     this.schedulePersist();
+  }
+
+  // ---------------------------------------------------------------- 心智（Soul / Skill）
+
+  /** 对外心智 JSON（含默认值、上限与字数）。 */
+  getMind() {
+    return mindToJson(this.mind);
+  }
+
+  /** 更新灵魂 / 工作流程；支持 resetSoul、resetSkill 恢复默认。 */
+  updateMind(patch = {}) {
+    const normalized = normalizeMindPatch(patch, this.mind);
+    if (!normalized.ok) throw badRequest(normalized.errors.join('；'));
+    this.mind = {
+      soul: normalized.value.soul,
+      skill: normalized.value.skill,
+      updatedAt: protocol.nowIso(),
+    };
+    const mind = this.getMind();
+    this.broadcast('mind.updated', { mind, at: this.mind.updatedAt }, { record: false });
+    this.log('info', `心智更新：灵魂 ${mind.soulChars} 字 / 工作流程 ${mind.skillChars} 字`);
+    this.schedulePersist();
+    return mind;
+  }
+
+  // ---------------------------------------------------------------- 自主大脑
+
+  /** 持久化到 state.json 的大脑精简结构（不含运行态 thinking）。 */
+  _brainStateForPersist() {
+    return {
+      enabled: this.brain.enabled,
+      mode: this.brain.mode,
+      intervalSec: this.brain.intervalSec,
+      maxActions: this.brain.maxActions,
+      model: this.brain.model,
+      adaptive: this.brain.adaptive,
+      idleStreak: this.brain.idleStreak,
+      effectiveIntervalSec: this.brain.effectiveIntervalSec,
+      nextThinkAt: this.brain.nextThinkAt,
+      skippedCycles: this.brain.skippedCycles,
+      lastThinkAt: this.brain.lastThinkAt,
+      lastError: this.brain.lastError,
+      lastSummary: this.brain.lastSummary,
+      lastAssessment: this.brain.lastAssessment,
+      ownerAsk: this.brain.ownerAsk,
+      decisions: this.brain.decisions.slice(-30).map((decision) => ({ ...decision })),
+    };
+  }
+
+  getBrain() {
+    const json = brainToJson(this.brain, { decisions: 10 });
+    json.thinking = Boolean(this._brainThinking);
+    return json;
+  }
+
+  /** 决策历史（最新在前）。 */
+  listBrainDecisions(limit = 20) {
+    const safe = util.clampInt(limit, 20, 1, 30);
+    return this.brain.decisions
+      .slice(-safe)
+      .reverse()
+      .map((decision) => JSON.parse(JSON.stringify(decision)));
+  }
+
+  /** 更新大脑设置（enabled/mode/intervalSec/maxActions/model/adaptive/ownerAskAck）。 */
+  updateBrain(patch = {}) {
+    const normalized = normalizeBrainPatch(patch, this.brain);
+    if (!normalized.ok) throw badRequest(normalized.errors.join('；'));
+    const value = { ...normalized.value };
+    const ackOwnerAsk = value.ownerAskAck === true;
+    delete value.ownerAskAck;
+    const modelChanged =
+      Object.prototype.hasOwnProperty.call(value, 'model') && value.model !== this.brain.model;
+    Object.assign(this.brain, value);
+    if (ackOwnerAsk) this.brain.ownerAsk = null;
+    if (value.enabled === true) this.brain.lastError = null;
+    if (value.intervalSec !== undefined || value.adaptive !== undefined) {
+      // 改基准间隔/切换自适应后，从新基准重新开始，不保留旧的宽松间隔。
+      this.brain.idleStreak = 0;
+      this.brain.effectiveIntervalSec = this.brain.intervalSec;
+    }
+    if (value.enabled === true) {
+      // 重新启用后尽快思考一次。
+      this.brain.nextThinkAt = protocol.nowIso();
+    } else if (value.intervalSec !== undefined || value.adaptive !== undefined) {
+      this._rescheduleBrainFromNow();
+    }
+    if (modelChanged && !this._brainThinkInjected) {
+      this._brainThinker = null;
+      this._brainThinkerModel = null;
+    }
+    const at = protocol.nowIso();
+    this.broadcast('brain.updated', { brain: this.getBrain(), at });
+    this.log(
+      'info',
+      `自主大脑设置更新：enabled=${this.brain.enabled} mode=${this.brain.mode} interval=${this.brain.intervalSec}s adaptive=${this.brain.adaptive !== false}`,
+    );
+    this.schedulePersist();
+    return this.getBrain();
+  }
+
+  /** 按当前节律从「现在」重新排下一次思考（改间隔 / 开关自适应时用）。 */
+  _rescheduleBrainFromNow() {
+    if (!this.brain.enabled) {
+      this.brain.nextThinkAt = null;
+      return;
+    }
+    const base = this.brain.intervalSec;
+    if (this.brain.adaptive === false) {
+      this.brain.idleStreak = 0;
+      this.brain.effectiveIntervalSec = base;
+      this.brain.nextThinkAt = new Date(Date.now() + base * 1000).toISOString();
+      return;
+    }
+    const current = util.clampInt(
+      Number(this.brain.effectiveIntervalSec),
+      base,
+      base,
+      MAX_IDLE_SEC,
+    );
+    this.brain.effectiveIntervalSec = current;
+    this.brain.nextThinkAt = new Date(Date.now() + current * 1000).toISOString();
+  }
+
+  /**
+   * 统计「有活」信号：判断这一轮值不值得花 token 让模型思考。
+   * @returns {{busy:boolean, counts:object}}
+   */
+  _brainWorkload(nowMs = Date.now()) {
+    let activeTasks = 0;
+    let waitingTasks = 0;
+    let queuedTasks = 0;
+    let retryable = 0;
+    for (const task of this.tasks.values()) {
+      if (task.archived) continue;
+      if (ACTIVE_TASK_STATUSES.has(task.status)) {
+        activeTasks += 1;
+        if (task.status === TASK_STATUS.WAITING) waitingTasks += 1;
+      } else if (task.status === TASK_STATUS.QUEUED) {
+        queuedTasks += 1;
+      } else if (
+        task.status === TASK_STATUS.FAILED
+        || task.status === TASK_STATUS.TIMEOUT
+        || task.status === TASK_STATUS.CANCELLED
+      ) {
+        const maxAttempts = Number.isFinite(Number(task.maxAttempts)) ? Number(task.maxAttempts) : 1;
+        const attempts = Number.isFinite(Number(task.attempts)) ? Number(task.attempts) : 0;
+        const finishedMs = Date.parse(task.finishedAt || task.updatedAt || '');
+        const recent = Number.isFinite(finishedMs) && finishedMs > nowMs - 24 * 60 * 60 * 1000;
+        // 用户手动取消的旧任务不再算「有活」，否则大脑会一直以为还有事可做而不肯降频。
+        if (task.status === TASK_STATUS.CANCELLED) {
+          if (recent) retryable += 1;
+        } else if (attempts < maxAttempts) {
+          retryable += 1;
+        }
+      }
+    }
+    let approvals = 0;
+    try {
+      approvals = util.arr(this.listApprovals()).length;
+    } catch {
+      approvals = 0;
+    }
+    let onlineDevices = 0;
+    for (const device of this.devices.values()) {
+      if (device.online) onlineDevices += 1;
+    }
+    const windowMs = Math.max(120, Number(this.brain.intervalSec) || 180) * 2000;
+    let dueGoals = 0;
+    for (const goal of this.goals.values()) {
+      if (goal.status !== 'active') continue;
+      if (goal.runningTaskId || goal.pendingApproval) {
+        dueGoals += 1;
+        continue;
+      }
+      const nextAt = Date.parse(goal.nextCheckAt || '');
+      if (Number.isFinite(nextAt) && nextAt <= nowMs + windowMs) dueGoals += 1;
+    }
+    const busy =
+      activeTasks > 0
+      || retryable > 0
+      || approvals > 0
+      || dueGoals > 0
+      || (queuedTasks > 0 && onlineDevices > 0);
+    return {
+      busy,
+      counts: { activeTasks, waitingTasks, queuedTasks, retryable, approvals, dueGoals, onlineDevices },
+    };
+  }
+
+  /** 上次思考之后，任务/目标/审批/心路/头脑风暴是否有新变化。 */
+  _brainHasNewSignalsSince(iso) {
+    const base = Date.parse(iso || '');
+    if (!Number.isFinite(base)) return true;
+    const changed = (value) => {
+      const at = Date.parse(value || '');
+      return Number.isFinite(at) && at > base;
+    };
+    for (const task of this.tasks.values()) {
+      if (task.archived) continue;
+      if (changed(task.createdAt) || changed(task.updatedAt) || changed(task.finishedAt)) return true;
+    }
+    for (const goal of this.goals.values()) {
+      if (changed(goal.updatedAt) || changed(goal.lastCheckAt)) return true;
+    }
+    for (const approval of util.arr(this.listApprovals())) {
+      if (changed(approval.createdAt) || changed(approval.approval && approval.approval.at)) return true;
+    }
+    for (const entry of util.arr(this.journal && this.journal.entries).slice(-20)) {
+      // 大脑自己写的「思考」条目不算新信号，否则每轮都会把自己叫醒。
+      if (entry && entry.kind === 'thought') continue;
+      if (changed(entry.at)) return true;
+    }
+    for (const session of util.arr(this.brainstorm && this.brainstorm.sessions)) {
+      if (changed(session.updatedAt)) return true;
+    }
+    return false;
+  }
+
+  /** 没有活时跳过模型调用，并按 2 倍退避拉长间隔。 */
+  _brainIdleSkip() {
+    this.brain.skippedCycles = util.clampInt(Number(this.brain.skippedCycles) + 1, 0, 0, 1000);
+    this.brain.idleStreak = util.clampInt(Number(this.brain.idleStreak) + 1, 0, 0, 20);
+    this._brainApplyInterval();
+    this.log(
+      'debug',
+      `自主大脑空闲：跳过本轮思考（无新变化），下次 ${this.brain.nextThinkAt}（间隔 ${this.brain.effectiveIntervalSec}s）`,
+    );
+    this.broadcast('brain.updated', {
+      brain: this.getBrain(),
+      at: protocol.nowIso(),
+      skipped: true,
+    });
+    this.schedulePersist();
+  }
+
+  /** 按 idleStreak 计算实际间隔与下一次思考时间。 */
+  _brainApplyInterval() {
+    const base = this.brain.intervalSec;
+    if (this.brain.adaptive === false) {
+      this.brain.effectiveIntervalSec = base;
+      this.brain.nextThinkAt = new Date(Date.now() + base * 1000).toISOString();
+      return;
+    }
+    const streak = util.clampInt(Number(this.brain.idleStreak), 0, 0, 20);
+    const effective = Math.min(base * Math.pow(2, streak), MAX_IDLE_SEC);
+    this.brain.effectiveIntervalSec = effective;
+    this.brain.nextThinkAt = new Date(Date.now() + effective * 1000).toISOString();
+  }
+
+  /** 思考结束后更新节律：有活/有动作 → 回到基准；真没活 → 逐步拉长。 */
+  _brainUpdateCadence(decision) {
+    const workload = this._brainWorkload();
+    const executed = util.arr(decision && decision.actions).some((action) => action.executed);
+    const failed = Boolean(decision && decision.error);
+    if (failed || workload.busy || executed) {
+      this.brain.idleStreak = 0;
+    } else {
+      this.brain.idleStreak = util.clampInt(Number(this.brain.idleStreak) + 1, 0, 0, 20);
+    }
+    this.brain.skippedCycles = 0;
+    this._brainApplyInterval();
+    this.log(
+      'debug',
+      `自主大脑节律：busy=${workload.busy} executed=${executed} 下轮间隔 ${this.brain.effectiveIntervalSec}s`,
+    );
+  }
+
+  /** 定时器触发的自动思考：只在启用、未在思考、且已到下一次思考时间时执行。 */
+  runBrainCycle() {
+    if (this._closed || !this.brain.enabled) return Promise.resolve(null);
+    if (this._brainThinking) return Promise.resolve(this._brainThinking);
+    const nextAt = Date.parse(brainToJson(this.brain, { decisions: 0 }).nextThinkAt || '');
+    if (Number.isFinite(nextAt) && nextAt > Date.now()) return Promise.resolve(null);
+    // 省 token：没有活、且自上次思考后没有任何新变化时，直接跳过模型调用并拉长间隔。
+    // 至少真实思考过一次（有决策记录）才允许跳过，避免重启后一直空转。
+    if (this.brain.adaptive !== false && this.brain.lastThinkAt && this.brain.decisions.length > 0) {
+      const workload = this._brainWorkload();
+      if (!workload.busy && !this._brainHasNewSignalsSince(this.brain.lastThinkAt)) {
+        this._brainIdleSkip();
+        return Promise.resolve(null);
+      }
+    }
+    return this.requestBrainThink({ trigger: 'schedule' }).catch((err) => {
+      this.log('warn', `自主大脑思考失败：${err && err.message ? err.message : err}`);
+      return null;
+    });
+  }
+
+  /**
+   * 立即思考一次（手动按钮/自动定时共用）。
+   * 思考中重复调用会复用同一个 Promise；错误只写进 decision/lastError，不抛给调用方。
+   * @param {{trigger?: 'manual'|'schedule'}} [options]
+   */
+  requestBrainThink({ trigger = 'manual' } = {}) {
+    if (this._closed) return Promise.resolve(null);
+    if (this._brainThinking) return this._brainThinking;
+    const pending = this._runBrainThink(trigger).finally(() => {
+      if (this._brainThinking === pending) this._brainThinking = null;
+    });
+    this._brainThinking = pending;
+    return pending;
+  }
+
+  _getBrainThinker() {
+    if (this._brainThinkInjected) return this.brainThink;
+    const model = this.brain.model || null;
+    if (!this._brainThinker || this._brainThinkerModel !== model) {
+      this._brainThinker = createBrainThinker({ model });
+      this._brainThinkerModel = model;
+    }
+    return this._brainThinker;
+  }
+
+  async _runBrainThink(trigger = 'schedule') {
+    const startedAt = Date.now();
+    const decision = {
+      id: protocol.randomId('brain'),
+      at: protocol.nowIso(),
+      trigger: trigger === 'manual' ? 'manual' : 'schedule',
+      mode: this.brain.mode,
+      model: this.brain.model || null,
+      durationMs: 0,
+      summary: '',
+      assessment: null,
+      ownerAsk: null,
+      actions: [],
+      error: null,
+    };
+    try {
+      const snapshot = this._brainSnapshot();
+      const prompt = buildBrainPrompt(snapshot, { mind: this.mind });
+      const think = this._getBrainThinker();
+      const reply = await think(prompt);
+      const parsed = parseBrainReply(reply);
+      decision.summary = parsed.summary;
+      decision.assessment = parsed.assessment;
+      decision.ownerAsk = parsed.ownerAsk;
+      this.brain.lastAssessment = parsed.assessment;
+      this.brain.ownerAsk = parsed.ownerAsk;
+      if (this.brain.mode === 'auto') {
+        this._applyBrainActions(decision, parsed.actions);
+      } else {
+        decision.actions = parsed.actions.map((action) => ({
+          ...action,
+          executed: false,
+          skippedReason: '建议模式（未执行）',
+          error: null,
+        }));
+      }
+      this.brain.lastError = null;
+      this.brain.lastSummary = parsed.summary;
+    } catch (err) {
+      decision.error = err && err.message ? err.message : String(err);
+      this.brain.lastError = decision.error;
+      this.log('warn', `自主大脑思考失败（${decision.trigger}）：${decision.error}`);
+    } finally {
+      decision.durationMs = Date.now() - startedAt;
+      this.brain.lastThinkAt = protocol.nowIso();
+      this._brainUpdateCadence(decision);
+      recordBrainDecision(this.brain, decision);
+      this.broadcast('brain.updated', { brain: this.getBrain(), at: this.brain.lastThinkAt });
+      this._journalBrainDecision(decision);
+      this.schedulePersist();
+    }
+    const executed = decision.actions.filter((action) => action.executed).length;
+    if (!decision.error) {
+      this.log(
+        'info',
+        `自主大脑（${decision.trigger}）：${util.truncate(decision.summary || '无结论', 80)}${executed ? `，执行 ${executed} 个动作` : '，无动作'}｜下轮 ${this.brain.effectiveIntervalSec}s${decision.ownerAsk ? '｜需要主人' : ''}`,
+      );
+    }
+    return decision;
+  }
+
+  /** 大脑输入快照：目标、近期任务、设备、待确认提案（结构见 docs/GOAL-BRAIN-DESIGN.md §2.4）。 */
+  _brainSnapshot() {
+    const cutoff = Date.now() - 24 * 3600 * 1000;
+    const candidates = [];
+    for (const task of this.tasks.values()) {
+      if (task.archived) continue;
+      if (
+        ACTIVE_TASK_STATUSES.has(task.status) ||
+        task.status === TASK_STATUS.QUEUED ||
+        task.status === TASK_STATUS.FAILED ||
+        task.status === TASK_STATUS.TIMEOUT ||
+        task.status === TASK_STATUS.CANCELLED
+      ) {
+        candidates.push(task);
+        continue;
+      }
+      const finishedAt = Date.parse(task.finishedAt || task.updatedAt || '');
+      if (Number.isFinite(finishedAt) && finishedAt >= cutoff) candidates.push(task);
+    }
+    candidates.sort((a, b) =>
+      String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt)),
+    );
+    const tasks = candidates.slice(0, 40).map((task) => {
+      const progress = util.isPlainObject(task.progress) ? task.progress : null;
+      const children = util
+        .arr(task.childTaskIds)
+        .map((id) => this.tasks.get(id))
+        .filter(Boolean);
+      const events = util.arr(task.events);
+      const last = events.length ? events[events.length - 1] : null;
+      return {
+        id: task.id,
+        instruction: util.truncate(task.instruction || '', 300),
+        status: task.status,
+        goalId: task.goalId || null,
+        isPlan: Boolean(task.isPlan),
+        parentTaskId: task.parentTaskId || null,
+        threadId: task.threadId || null,
+        attempts: task.attempts,
+        maxAttempts: task.maxAttempts,
+        createdAt: task.createdAt,
+        updatedAt: task.updatedAt,
+        finishedAt: task.finishedAt || null,
+        error: task.error ? util.truncate(task.error, 300) : null,
+        progress: progress
+          ? {
+              message: util.str(progress.message, 300) || '',
+              percent: Number.isFinite(Number(progress.percent)) ? Math.trunc(Number(progress.percent)) : 0,
+              waiting: progress.waiting === true,
+              question: util.str(progress.question, 300) || null,
+            }
+          : null,
+        planStep: task.planStep || null,
+        dependsOn: util.arr(task.planDependsOnTaskIds).slice(0, 6),
+        childProgress:
+          task.isPlan && children.length
+            ? {
+                total: children.length,
+                completed: children.filter((child) => child.status === TASK_STATUS.COMPLETED).length,
+                failed: children.filter(
+                  (child) =>
+                    child.status === TASK_STATUS.FAILED ||
+                    child.status === TASK_STATUS.TIMEOUT ||
+                    child.status === TASK_STATUS.CANCELLED,
+                ).length,
+                running: children.filter(
+                  (child) => child.status === TASK_STATUS.ASSIGNED || child.status === TASK_STATUS.RUNNING,
+                ).length,
+                waiting: children.filter((child) => child.status === TASK_STATUS.WAITING).length,
+              }
+            : null,
+        assignedDeviceName: task.assignedDeviceName || null,
+        lastEvent: last
+          ? { at: last.at, type: last.type, message: util.truncate(last.message || '', 200) }
+          : null,
+      };
+    });
+    const goals = [...this.goals.values()].map((goal) => ({
+      id: goal.id,
+      title: goal.title,
+      nickname: goal.nickname || '',
+      status: goal.status,
+      schedule: goal.schedule,
+      nextCheckAt: goal.nextCheckAt || null,
+      lastCheckStatus: goal.lastCheckStatus || null,
+      lastSummary: util.truncate(goal.lastSummary || '', 400),
+      guidance: util.arr(goal.guidance).slice(-3).map((entry) => ({
+        text: util.str(entry && entry.text, 300),
+        createdAt: (entry && entry.createdAt) || null,
+      })),
+      taskIds: util.arr(goal.taskIds).slice(-20),
+      runningTaskId: goal.runningTaskId || null,
+      pendingApproval: goal.pendingApproval
+        ? {
+            reason: util.str(goal.pendingApproval.reason, 200),
+            at: goal.pendingApproval.at || null,
+          }
+        : null,
+      linkedStats: this._goalLinkedStats(goal),
+    }));
+    const approvals = this.listApprovals().map((entry) => ({
+      goalId: entry.goalId,
+      goalTitle: entry.goalTitle,
+      createdAt: entry.createdAt,
+      reason: util.str(entry.approval && entry.approval.reason, 200),
+    }));
+    const devices = [...this.devices.values()].map((device) => ({
+      id: device.id,
+      name: deviceDisplayName(device),
+      kind: device.kind,
+      online: Boolean(device.online && !device.disabled),
+      tags: [...(device.tags || [])].slice(0, 5),
+      load: {
+        running: device.load ? device.load.running : 0,
+        max: this._maxConcurrent(device),
+      },
+    }));
+    return { now: protocol.nowIso(), stats: this.stats(), goals, tasks, approvals, devices };
+  }
+
+  /** 按白名单执行大脑动作（auto 模式）；单条失败不影响其它动作。 */
+  _applyBrainActions(decision, actions) {
+    const limit = util.clampInt(this.brain.maxActions, 2, 1, 3);
+    let executed = 0;
+    for (const action of util.arr(actions)) {
+      const record = {
+        action: action.action,
+        taskId: action.taskId || null,
+        goalId: action.goalId || null,
+        instruction: action.instruction || '',
+        reason: action.reason || '',
+        confidence: action.confidence,
+        executed: false,
+        skippedReason: null,
+        error: null,
+      };
+      decision.actions.push(record);
+      if (!BRAIN_ACTIONS.includes(action.action) || action.action === 'none') {
+        record.skippedReason = '无需动作';
+        continue;
+      }
+      if (executed >= limit) {
+        record.skippedReason = '超过本轮动作上限';
+        continue;
+      }
+      if (!(action.confidence >= MIN_AUTO_CONFIDENCE)) {
+        record.skippedReason = 'low-confidence';
+        continue;
+      }
+      try {
+        const outcome = this._applyBrainAction(action);
+        if (outcome && outcome.skippedReason) record.skippedReason = outcome.skippedReason;
+        if (outcome && outcome.taskId) record.taskId = outcome.taskId;
+        if (outcome && outcome.goalId) record.goalId = outcome.goalId;
+        record.executed = !record.skippedReason;
+        if (record.executed) executed += 1;
+      } catch (err) {
+        record.error = err && err.message ? err.message : String(err);
+        this.log('warn', `自主大脑动作失败（${action.action}）：${record.error}`);
+      }
+    }
+  }
+
+  _applyBrainAction(action) {
+    switch (action.action) {
+      case 'retry_task': {
+        if (!action.taskId) return { skippedReason: '缺少 taskId' };
+        const task = this.tasks.get(action.taskId);
+        if (!task) return { skippedReason: 'task-not-found' };
+        if (task.status === TASK_STATUS.QUEUED) {
+          // 排队中的计划子任务要等前置步骤，不能越权重派。
+          const blockedByDependency = util.arr(task.planDependsOnTaskIds).some((id) => {
+            const dependency = this.tasks.get(id);
+            return !dependency || dependency.status !== TASK_STATUS.COMPLETED;
+          });
+          if (blockedByDependency) {
+            return { skippedReason: '前置任务未完成，等待推进', taskId: task.id };
+          }
+          // 普通排队任务不是「失败」，重新路由一次即可；仍无可用设备时保持排队。
+          this.routeTask(task);
+          if (task.status === TASK_STATUS.QUEUED) {
+            return { skippedReason: '暂无可用设备，任务继续排队', taskId: task.id };
+          }
+          return { taskId: task.id, goalId: task.goalId || null };
+        }
+        if (task.status === TASK_STATUS.COMPLETED) {
+          return { skippedReason: '已完成任务不能 retry，续做请用 resume_thread', taskId: task.id };
+        }
+        if (!TERMINAL_TASK_STATUSES.has(task.status)) {
+          return { skippedReason: '任务不在可重试状态' };
+        }
+        if (task.attempts >= task.maxAttempts) return { skippedReason: '已用尽重试次数' };
+        this.retryTask(task);
+        return { taskId: task.id };
+      }
+      case 'resume_thread': {
+        if (!action.taskId) return { skippedReason: '缺少 taskId' };
+        const task = this.tasks.get(action.taskId);
+        if (!task) return { skippedReason: 'task-not-found' };
+        if (!TERMINAL_TASK_STATUSES.has(task.status)) return { skippedReason: '任务尚未结束' };
+        const instruction = action.instruction || '继续此任务并推进下一步';
+        const followUp = this.createFollowUp(task, { instruction });
+        return { taskId: followUp.id };
+      }
+      case 'create_task': {
+        const instruction = String(action.instruction || '').trim();
+        if (instruction.length < 4) return { skippedReason: '缺少可执行的任务指令' };
+        const prefix = instruction.slice(0, 40);
+        const duplicate = [...this.tasks.values()].find(
+          (task) =>
+            !TERMINAL_TASK_STATUSES.has(task.status) &&
+            util.str(task.instruction, 40).startsWith(prefix),
+        );
+        if (duplicate) return { skippedReason: 'duplicate' };
+        const goalId = action.goalId && this.goals.has(action.goalId) ? action.goalId : null;
+        const created = this.createTask({
+          instruction,
+          goalId,
+          priority: 5,
+          context: { brain: true, reason: action.reason || '' },
+        });
+        return { taskId: created.id, goalId: created.goalId };
+      }
+      case 'link_task': {
+        if (!action.goalId || !action.taskId) return { skippedReason: '缺少 goalId 或 taskId' };
+        if (!this.goals.has(action.goalId)) return { skippedReason: 'goal-not-found' };
+        if (!this.tasks.has(action.taskId)) return { skippedReason: 'task-not-found' };
+        this.linkGoalTask(action.goalId, action.taskId);
+        return { goalId: action.goalId, taskId: action.taskId };
+      }
+      default:
+        return { skippedReason: 'unknown-action' };
+    }
+  }
+
+  // ---------------------------------------------------------------- 管家心路
+
+  /** 持久化到 state.json 的日志结构（entry/day 上限裁剪）。 */
+  _journalStateForPersist() {
+    const entries = this.journal.entries.slice(-MAX_ENTRIES).map((entry) => ({
+      ...entry,
+      refs: { ...(entry.refs || {}) },
+      meta: { ...(entry.meta || {}) },
+    }));
+    const days = {};
+    for (const key of Object.keys(this.journal.days || {}).sort().slice(-MAX_DAYS)) {
+      days[key] = JSON.parse(JSON.stringify(this.journal.days[key]));
+    }
+    return {
+      enabled: this.journal.enabled,
+      summaryTime: this.journal.summaryTime,
+      lastSummaryDate: this.journal.lastSummaryDate || null,
+      entries,
+      days,
+    };
+  }
+
+  /** 心路数据（默认今天起 60 天 / 300 条）。 */
+  getJournal({ entries, days, date } = {}) {
+    return journalToJson(this.journal, { entries, days, date });
+  }
+
+  /** 按天倒序的汇总（不含全文条目）。 */
+  listJournalDays(limit = 120) {
+    const safe = util.clampInt(limit, 120, 1, MAX_DAYS);
+    return Object.values(this.journal.days || {})
+      .map((day) => ({
+        ...day,
+        entryCount: entriesForDate(this.journal, day.date).length,
+        stats: Object.keys(day.stats || {}).length
+          ? day.stats
+          : journalStatsForDay(entriesForDate(this.journal, day.date)),
+      }))
+      .sort((a, b) => String(b.date).localeCompare(String(a.date)))
+      .slice(0, safe);
+  }
+
+  /** 更新日志设置（enabled/summaryTime）。 */
+  updateJournal(patch = {}) {
+    const normalized = normalizeJournalPatch(patch, this.journal);
+    if (!normalized.ok) throw badRequest(normalized.errors.join('；'));
+    Object.assign(this.journal, normalized.value);
+    const at = protocol.nowIso();
+    this.broadcast('journal.updated', { journal: this.getJournal(), at }, { record: false });
+    this.log(
+      'info',
+      `管家心路设置更新：enabled=${this.journal.enabled} summaryTime=${this.journal.summaryTime}`,
+    );
+    this.schedulePersist();
+    return this.getJournal();
+  }
+
+  /** 手动追加一条心路（外部/测试/插件用）。 */
+  appendJournalEntry(raw = {}) {
+    return this._journalEntry(raw);
+  }
+
+  _journalEntry(raw) {
+    // 关闭「自动记录」后不再写入新条目（手动触发生成当日总结仍可用）。
+    if (!this.journal.enabled) return null;
+    const entry = appendJournalEntry(this.journal, raw, { timeZone: systemTimeZone() });
+    this.broadcast('journal.updated', {
+      entry,
+      dayKey: entry.date,
+      at: protocol.nowIso(),
+    }, { record: false });
+    this.schedulePersist();
+    return entry;
+  }
+
+  /** 任务结束 → 工作条目。 */
+  _journalTaskFinish(task) {
+    if (!task) return;
+    const statusLabel = TASK_MESSAGES[task.status] || task.status;
+    const output = util.isPlainObject(task.output) ? task.output : null;
+    const detail = util.str((output && (output.text || output.markdown)) || task.error || '', 1500);
+    const title = `${statusLabel}：${util.truncate(task.instruction, 80)}`;
+    const lines = [];
+    if (detail) lines.push(detail);
+    if (task.assignedDeviceName) lines.push(`设备：${task.assignedDeviceName}`);
+    if (task.isPlan) {
+      const done = util.arr(task.childTaskIds).filter((id) => {
+        const child = this.tasks.get(id);
+        return child && child.status === TASK_STATUS.COMPLETED;
+      }).length;
+      lines.push(`计划：${done}/${util.arr(task.childTaskIds).length} 个子任务完成`);
+    }
+    this._journalEntry({
+      kind: 'work',
+      title,
+      text: lines.join('\n\n'),
+      refs: {
+        taskId: task.id,
+        goalId: task.goalId || (task.context && task.context.goalId) || undefined,
+      },
+      meta: {
+        taskStatus: task.status,
+        isPlan: Boolean(task.isPlan),
+        device: task.assignedDeviceName || null,
+      },
+    });
+  }
+
+  /** 自主大脑决策 → 思考条目。 */
+  _journalBrainDecision(decision) {
+    if (!decision) return;
+    // 低信息量的「无需动作」思考不写日志：大脑定时思考，全记下来会淹没工作条目。
+    const hasActions = util.arr(decision.actions).length > 0;
+    const summary = util.str(decision.summary, 500);
+    const assessment = util.isPlainObject(decision.assessment) ? decision.assessment : null;
+    const lowValue =
+      !hasActions &&
+      !decision.ownerAsk &&
+      !decision.error &&
+      (!summary || /^(无需|暂不|无动作|保持观察)|没有需要|不需要/.test(summary));
+    if (lowValue) return;
+    const title = decision.error
+      ? `思考失败：${util.truncate(decision.error, 100)}`
+      : `思考：${util.truncate(decision.summary || '无结论', 100)}`;
+    const lines = [];
+    if (decision.summary) lines.push(decision.summary);
+    if (assessment) {
+      const labels = [
+        ['goals', '目标'],
+        ['progress', '进度'],
+        ['betterWay', '更好的方式'],
+        ['improvement', '要改进'],
+        ['myMove', '我来推进'],
+      ];
+      for (const [key, label] of labels) {
+        const text = util.str(assessment[key], 400);
+        if (text) lines.push(`- ${label}：${text}`);
+      }
+    }
+    if (decision.ownerAsk && decision.ownerAsk.text) {
+      lines.push(`- 需要主人：${decision.ownerAsk.text}`);
+    }
+    for (const action of util.arr(decision.actions)) {
+      const flag = action.executed
+        ? '已执行'
+        : action.skippedReason
+          ? `跳过：${action.skippedReason}`
+          : '未执行';
+      const target = action.taskId ? ` ${action.taskId}` : action.goalId ? ` ${action.goalId}` : '';
+      const reason = action.reason ? ` — ${action.reason}` : '';
+      const failure = action.error ? `（失败：${action.error}）` : '';
+      lines.push(`- ${action.action}${target}${reason}${failure} [${flag}]`);
+    }
+    this._journalEntry({
+      kind: 'thought',
+      title,
+      text: lines.join('\n'),
+      refs: { decisionId: decision.id },
+      meta: {
+        trigger: decision.trigger,
+        mode: decision.mode,
+        durationMs: decision.durationMs,
+        error: decision.error || null,
+        ownerAsk: decision.ownerAsk ? decision.ownerAsk.text : null,
+      },
+    });
+  }
+
+  /** 目标跟进结束 → 目标视角的工作条目。 */
+  _journalGoalCheck(goal, task, summary) {
+    if (!goal || !task) return;
+    this._journalEntry({
+      kind: 'work',
+      title: `目标「${util.truncate(goalDisplayName(goal), 40)}」跟进：${TASK_MESSAGES[task.status] || task.status}`,
+      text: util.truncate(summary || '', 1500),
+      refs: { goalId: goal.id, taskId: task.id },
+      meta: { goalStatus: goal.status, taskStatus: task.status },
+    });
+  }
+
+  /** 计划卡点 → 里程碑条目。 */
+  _journalMilestone(parent, blocker) {
+    if (!parent || !blocker) return;
+    this._journalEntry({
+      kind: 'milestone',
+      title: `计划卡点：${util.truncate(parent.instruction, 60)}`,
+      text: blocker.text || '',
+      refs: {
+        taskId: parent.id,
+        goalId: parent.goalId || (parent.context && parent.context.goalId) || undefined,
+      },
+      meta: { percent: parent.progress ? parent.progress.percent : null },
+    });
+  }
+
+  /** 每天到点生成当日总结；失败只记 lastError，不影响周期任务。 */
+  runJournalCycle() {
+    if (this._closed || !this.journal.enabled) return Promise.resolve(null);
+    if (this._journalThinking) return this._journalThinking;
+    const today = journalDateKey();
+    if (this.journal.lastSummaryDate === today) return Promise.resolve(null);
+    if (journalTimeKey() < (this.journal.summaryTime || DEFAULT_SUMMARY_TIME)) {
+      return Promise.resolve(null);
+    }
+    return this.generateJournalSummary({ date: today }).catch((err) => {
+      this.log('warn', `管家心路总结失败：${err && err.message ? err.message : err}`);
+      return null;
+    });
+  }
+
+  /**
+   * 生成某天的总结（模型不可用时退化为确定性总结，永远不抛错）。
+   * @param {{date?: string, force?: boolean}} [options]
+   */
+  async generateJournalSummary({ date, force = false } = {}) {
+    if (this._closed) return null;
+    const targetDate = validDateKey(date) ? date : journalDateKey();
+    const existing = this.journal.days[targetDate];
+    if (existing && !force) return { day: existing, error: existing.error || null };
+    if (this._journalThinking) {
+      const pending = await this._journalThinking;
+      if (pending && existing && !force) return pending;
+    }
+    const pending = this._generateJournalSummaryOnce(targetDate).finally(() => {
+      if (this._journalThinking === pending) this._journalThinking = null;
+    });
+    this._journalThinking = pending;
+    return pending;
+  }
+
+  async _generateJournalSummaryOnce(targetDate) {
+    const entries = entriesForDate(this.journal, targetDate);
+    const stats = journalStatsForDay(entries);
+    const goals = [...this.goals.values()].map((goal) => goalToJson(goal)).slice(0, 20);
+    const tasks = [...this.tasks.values()]
+      .filter((task) => {
+        const at = Date.parse(task.finishedAt || task.updatedAt || task.createdAt || '');
+        return Number.isFinite(at) && journalDateKey(at) === targetDate;
+      })
+      .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
+      .slice(0, 40)
+      .map((task) => ({
+        id: task.id,
+        instruction: util.truncate(task.instruction, 200),
+        status: task.status,
+        goalId: task.goalId || null,
+      }));
+    let summary = '';
+    let highlights = [];
+    let verdict = '';
+    let error = null;
+    let model = null;
+    try {
+      const config = journalModelConfig();
+      model = config.model;
+      const think = this._getJournalThinker();
+      const prompt = buildDailySummaryPrompt({
+        date: targetDate,
+        entries,
+        stats,
+        goals,
+        tasks,
+        timeZone: systemTimeZone(),
+      });
+      const reply = await think(prompt);
+      const parsed = parseDailySummary(reply);
+      summary = parsed.summary;
+      highlights = parsed.highlights;
+      verdict = parsed.verdict;
+      if (!summary) throw new Error('模型没有返回总结内容');
+    } catch (err) {
+      error = err && err.message ? err.message : String(err);
+      summary = fallbackDailySummary({ date: targetDate, entries, stats });
+      this.log('warn', `管家心路总结降级为本地汇总：${error}`);
+    }
+    const day = {
+      date: targetDate,
+      summary,
+      highlights,
+      verdict,
+      stats,
+      generatedAt: protocol.nowIso(),
+      model,
+      entryCount: entries.length,
+      error,
+    };
+    this.journal.days[targetDate] = day;
+    this.journal.lastSummaryDate = targetDate;
+    this._journalEntry({
+      kind: 'daily',
+      at: day.generatedAt,
+      title: `每日总结：${targetDate}`,
+      text: summary,
+      refs: {},
+      meta: { stats, error, model },
+    });
+    this.broadcast(
+      'journal.updated',
+      { day, dayKey: targetDate, at: day.generatedAt },
+      { record: false },
+    );
+    this.log(
+      'info',
+      `管家心路总结：${targetDate}（${entries.length} 条${error ? '，本地汇总' : '，模型生成'}）`,
+    );
+    this.schedulePersist();
+    return { day, error };
+  }
+
+  _getJournalThinker() {
+    if (this._journalThinkInjected) return this.journalThink;
+    // 每日总结与大模型配置同源（BRAIN_*/AGNES_* 环境变量），暂不支持单独指定模型。
+    const model = null;
+    if (!this._journalThinker || this._journalThinkerModel !== model) {
+      this._journalThinker = createJournalThinker({ model });
+      this._journalThinkerModel = model;
+    }
+    return this._journalThinker;
+  }
+
+  /** 历史数据首次升级：用当天任务与大脑决策回填心路（只做一次）。 */
+  _seedJournalFromHistory() {
+    if (this.journal.entries.length > 0) return;
+    const today = journalDateKey();
+    const seeded = [];
+    for (const task of this.tasks.values()) {
+      const at = Date.parse(task.finishedAt || task.updatedAt || '');
+      if (!Number.isFinite(at) || journalDateKey(at) !== today) continue;
+      if (!TERMINAL_TASK_STATUSES.has(task.status)) continue;
+      seeded.push({
+        at: new Date(at).toISOString(),
+        kind: 'work',
+        title: `${TASK_MESSAGES[task.status] || task.status}：${util.truncate(task.instruction, 80)}`,
+        text: util.truncate(
+          (util.isPlainObject(task.output) &&
+            (task.output.text || task.output.markdown)) ||
+            task.error ||
+            '',
+          1200,
+        ),
+        refs: {
+          taskId: task.id,
+          goalId: task.goalId || (task.context && task.context.goalId) || undefined,
+        },
+        meta: { taskStatus: task.status, seeded: true },
+      });
+    }
+    for (const decision of this.brain.decisions.slice(-10)) {
+      const at = Date.parse(decision.at);
+      if (!Number.isFinite(at) || journalDateKey(at) !== today) continue;
+      seeded.push({
+        at: new Date(at).toISOString(),
+        kind: 'thought',
+        title: decision.error
+          ? `思考失败：${util.truncate(decision.error, 100)}`
+          : `思考：${util.truncate(decision.summary || '无结论', 100)}`,
+        text: util.str(decision.summary || '', 1500),
+        refs: { decisionId: decision.id },
+        meta: { seeded: true, trigger: decision.trigger },
+      });
+    }
+    seeded.sort((a, b) => String(a.at).localeCompare(String(b.at)));
+    for (const entry of seeded) {
+      appendJournalEntry(this.journal, entry, { timeZone: systemTimeZone() });
+    }
+    if (seeded.length) {
+      this.journal.days[today] = this.journal.days[today] || {
+        date: today,
+        summary: '',
+        highlights: [],
+        stats: {},
+        generatedAt: null,
+        model: null,
+        entryCount: seeded.length,
+        error: null,
+      };
+      this.log('info', `管家心路首次回填：${seeded.length} 条（${today}）`);
+    }
+  }
+
+  // ---------------------------------------------------------------- 头脑风暴
+
+  _brainstormStateForPersist() {
+    const sessions = [...this.brainstorm.sessions]
+      .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
+      .slice(0, BRAINSTORM_MAX_SESSIONS)
+      .map((session) => ({
+        id: session.id,
+        title: session.title,
+        createdAt: session.createdAt,
+        updatedAt: session.updatedAt,
+        messages: session.messages.slice(-BRAINSTORM_MAX_MESSAGES).map((message) => ({ ...message })),
+      }));
+    const activeId = sessions.some((session) => session.id === this.brainstorm.activeId)
+      ? this.brainstorm.activeId
+      : null;
+    return { activeId, sessions };
+  }
+
+  getBrainstorm({ messages = 100, sessionId = null } = {}) {
+    return brainstormToJson(this.brainstorm, {
+      messages: util.clampInt(messages, 100, 1, BRAINSTORM_MAX_MESSAGES),
+      sessionId: util.str(sessionId, 80) || null,
+    });
+  }
+
+  listBrainstormSessions() {
+    return this.getBrainstorm().sessions;
+  }
+
+  _findBrainstormSession(sessionId) {
+    return findBrainstormSession(this.brainstorm, sessionId);
+  }
+
+  /** 会话排序 / 置顶 / 淘汰，保持 activeId 指向最近会话。 */
+  _touchBrainstorm(session) {
+    if (!session) return;
+    this.brainstorm.activeId = session.id;
+    this.brainstorm.sessions.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+    if (this.brainstorm.sessions.length > BRAINSTORM_MAX_SESSIONS) {
+      this.brainstorm.sessions = this.brainstorm.sessions.slice(0, BRAINSTORM_MAX_SESSIONS);
+    }
+  }
+
+  _broadcastBrainstorm(session, extra = {}) {
+    this.broadcast(
+      'brainstorm.updated',
+      {
+        session: session ? brainstormSessionSummary(session) : null,
+        activeId: this.brainstorm.activeId,
+        ...extra,
+      },
+      { record: false },
+    );
+  }
+
+  createBrainstormSession() {
+    const session = newBrainstormSession();
+    this.brainstorm.sessions.unshift(session);
+    this._touchBrainstorm(session);
+    this._broadcastBrainstorm(session);
+    this.log('info', `头脑风暴新会话：${session.id}`);
+    this.schedulePersist();
+    return session;
+  }
+
+  deleteBrainstormSession(sessionId) {
+    const id = util.str(sessionId, 80);
+    const index = this.brainstorm.sessions.findIndex((session) => session.id === id);
+    if (index < 0) throw notFound('对话不存在');
+    const removed = this.brainstorm.sessions.splice(index, 1)[0];
+    if (this.brainstorm.activeId === id) {
+      this.brainstorm.activeId = this.brainstorm.sessions[0] ? this.brainstorm.sessions[0].id : null;
+    }
+    this._broadcastBrainstorm(null, { removedId: id });
+    this.log('info', `头脑风暴会话删除：${id}`);
+    this.schedulePersist();
+    return removed;
+  }
+
+  _brainstormModelLabel() {
+    try {
+      return util.str(brainstormModelConfig().model, 80) || null;
+    } catch {
+      return null;
+    }
+  }
+
+  _getBrainstormThinker() {
+    if (this._brainstormThinkInjected) return this.brainstormThink;
+    const model = null; // 与自主大脑同一套 BRAIN_*/AGNES_* 配置，暂不单独指定模型。
+    if (!this._brainstormThinker || this._brainstormThinkerModel !== model) {
+      this._brainstormThinker = createBrainstormThinker({ model });
+      this._brainstormThinkerModel = model;
+    }
+    return this._brainstormThinker;
+  }
+
+  /** 头脑风暴上下文：长期目标、活跃/失败任务、最近心路、待确认。 */
+  _brainstormContext() {
+    const goals = [...this.goals.values()]
+      .filter((goal) => goal.status === 'active' || goal.status === 'paused')
+      .slice(0, 10)
+      .map((goal) => ({
+        title: util.str(goal.nickname, 120) || goal.title,
+        status: goal.status,
+        lastSummary: goal.lastSummary || '',
+      }));
+    const activeTasks = [...this.tasks.values()]
+      .filter((task) => ACTIVE_TASK_STATUSES.has(task.status) || task.status === TASK_STATUS.QUEUED)
+      .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
+      .slice(0, 12);
+    const recentFailures = [...this.tasks.values()]
+      .filter((task) => task.status === TASK_STATUS.FAILED || task.status === TASK_STATUS.TIMEOUT)
+      .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
+      .slice(0, 4);
+    const tasks = [...activeTasks, ...recentFailures].map((task) => ({
+      instruction: task.instruction,
+      status: task.status,
+      error: task.error || null,
+    }));
+    const journal = Object.values(this.journal.days || {})
+      .sort((a, b) => String(b.date).localeCompare(String(a.date)))
+      .slice(0, 3)
+      .map((day) => ({ date: day.date, summary: day.summary || day.verdict || '' }));
+    const approvals = this.listApprovals().map((item) => ({
+      goalTitle: item.goalTitle,
+      reason: item.approval && item.approval.reason,
+    }));
+    return { now: protocol.nowIso(), goals, tasks, journal, approvals };
+  }
+
+  /**
+   * 与大脑对话：追加 user 消息 → 模型回答 → 追加 assistant 消息。
+   * 模型失败不抛给调用方，assistant 消息带 error 字段。
+   */
+  async chatBrainstorm({ sessionId, message } = {}) {
+    const normalized = normalizeBrainstormChatRequest({ sessionId, message });
+    if (!normalized.ok) throw badRequest(normalized.errors.join('；'));
+    const input = normalized.value;
+    let session = this._findBrainstormSession(input.sessionId);
+    if (!session) session = this.createBrainstormSession();
+    appendBrainstormMessage(session, { role: 'user', text: input.message });
+    this._touchBrainstorm(session);
+    const history = session.messages.slice(0, -1).slice(-12);
+    const { system, user } = buildBrainstormPrompt({
+      history,
+      userMessage: input.message,
+      context: this._brainstormContext(),
+    });
+    const modelLabel = this._brainstormModelLabel();
+    let reply = null;
+    let error = null;
+    try {
+      const thinker = this._getBrainstormThinker();
+      const answer = await thinker({ system, user });
+      const text = util.str(answer, BRAINSTORM_MAX_TEXT);
+      if (!text) throw new Error('大脑返回了空回复');
+      reply = text;
+      appendBrainstormMessage(session, { role: 'assistant', text, model: modelLabel });
+    } catch (err) {
+      error = err && err.message ? err.message : String(err);
+      appendBrainstormMessage(session, {
+        role: 'assistant',
+        text: `（大脑暂时无法回答：${util.truncate(error, 300)}）`,
+        error,
+      });
+      this.log('warn', `头脑风暴失败：${error}`);
+    }
+    this._touchBrainstorm(session);
+    this._broadcastBrainstorm(session);
+    this.schedulePersist();
+    if (!error) {
+      this.log(
+        'info',
+        `头脑风暴：${session.id} 第 ${session.messages.length} 条（模型：${modelLabel || 'unknown'}）`,
+      );
+    }
+    return {
+      session: this.getBrainstorm({ sessionId: session.id }).session,
+      reply,
+      error,
+    };
+  }
+
+  /** 把大脑的一条回复转成任务；带 goalId 时自动登记到长期目标。 */
+  brainstormMessageToTask({ sessionId, messageId, goalId } = {}) {
+    const session = this._findBrainstormSession(sessionId);
+    if (!session) throw notFound('对话不存在');
+    const id = util.str(messageId, 80);
+    const message = session.messages.find((item) => item.id === id);
+    if (!message) throw notFound('消息不存在');
+    if (message.role !== 'assistant') throw badRequest('只能把大脑的回复转成任务');
+    const goal = goalId ? this._requireGoal(util.str(goalId, 80)) : null;
+    const instruction = util.str(message.text, BRAINSTORM_MAX_TEXT);
+    if (!instruction) throw badRequest('消息内容为空');
+    const task = this.createTask({
+      instruction,
+      priority: 6,
+      goalId: goal ? goal.id : null,
+      context: { brainstorm: true, sessionId: session.id, messageId: message.id },
+    });
+    this.log(
+      'info',
+      `头脑风暴转任务：${task.id}（会话 ${session.id}${goal ? `，目标 ${goal.id}` : ''}）`,
+    );
+    return { task, session: this.getBrainstorm({ sessionId: session.id }).session };
   }
 
   // ---------------------------------------------------------------- 事件 / 日志
@@ -1730,6 +3419,14 @@ class Hub {
         this._maxConcurrent(device),
       );
     }
+    // 设备当前持有（执行中/已 ack 排队中）的任务 id，用于判定「设备忙碌时不重派」。
+    // 老版本设备不发送 taskIds，这里按空数组处理，避免残留上一次的值把设备长期判为忙碌。
+    device.runningTaskIds = Array.isArray(input.taskIds)
+      ? input.taskIds
+          .filter((id) => typeof id === 'string' && id.trim())
+          .map((id) => id.trim())
+          .slice(0, 50)
+      : [];
     this.broadcast('device.updated', { device: this.deviceToJson(device) }, { record: false });
     this.schedulePersist();
     const commands = this.takeCommands(device, 20);
@@ -2008,6 +3705,8 @@ class Hub {
         tags: [...(device.tags || [])].slice(0, 20),
         skills: ids(device.capabilities && device.capabilities.skills),
         models: ids(device.capabilities && device.capabilities.models),
+        // 让规划器知道每台工作机同时能跑几个任务（手机 Mika 为 1，需要排队）。
+        maxConcurrentTasks: this._maxConcurrent(device),
       }));
   }
 
@@ -2044,6 +3743,12 @@ class Hub {
       goalId: typeof input.goalId === 'string' && input.goalId ? input.goalId : null,
       attachments: Array.isArray(input.attachments) ? input.attachments : [],
       isPlan: false,
+      // 拆分计划的子任务元数据（普通任务保持 null/空）。
+      planStep: null,
+      planGroup: null,
+      planDependsOn: [],
+      planDependsOnTaskIds: [],
+      plan: null,
       archived: false,
       archivedAt: null,
       route: { reason: '等待路由', candidates: [], excluded: [] },
@@ -2071,7 +3776,10 @@ class Hub {
     this.broadcast('task.created', { task: this.taskToJson(task) });
     this.log('info', `任务创建：${task.id}「${util.truncate(task.instruction, 40)}」`);
     this._scheduleTaskRecord(task.id, 0);
-    this.routeTask(task);
+    // 创建时就带 goalId 的任务自动登记到目标（目标页可见、大脑可观察）。
+    if (task.goalId) this._registerGoalTask(task.goalId, task);
+    // 规划子任务由 createPlanTask 写完依赖元数据后再派发，避免依赖未就绪就上路。
+    if (internal.deferRoute !== true) this.routeTask(task);
     this.schedulePersist();
     return task;
   }
@@ -2126,6 +3834,8 @@ class Hub {
         threadId: source.threadId || source.id,
         replyToTaskId: source.id,
         threadStep: context.step,
+        // 「继续此任务」不应脱离长期目标：跟进任务继承源任务的目标归属。
+        goalId: source.goalId || null,
         context,
         attachments: Array.isArray(input.attachments) ? input.attachments : [],
       },
@@ -2153,6 +3863,7 @@ class Hub {
     const normalized = protocol.normalizeTaskRequest(input);
     if (!normalized.ok) throw badRequest(normalized.errors.join('；'));
     const value = normalized.value;
+    const planGoalId = util.str(input.goalId, 80) || null;
     // 路由提示优先级：用户显式 deviceId > Agnes 指派 > 本地文件预检 pin。
     const userDeviceId = value.requirements.deviceId || null;
     let routingAdvice = this.normalizeRoutingAdvice(input.routingAdvice);
@@ -2186,6 +3897,28 @@ class Hub {
     }
     const now = protocol.nowIso();
     const parentThreadId = protocol.randomId('thread');
+    // 执行计划元数据：strategy/groups/blockerPolicy 由 planner 归一化后写入，随任务持久化。
+    const execution = plan.execution && typeof plan.execution === 'object'
+      ? plan.execution
+      : { strategy: 'mixed', groups: [], blockerPolicy: 'stop-and-ask' };
+    const executionLabel = planExecutionLabel(execution);
+    const planMeta = {
+      strategy: ['parallel', 'sequential', 'mixed'].includes(execution.strategy) ? execution.strategy : 'mixed',
+      blockerPolicy: execution.blockerPolicy === 'continue' ? 'continue' : 'stop-and-ask',
+      groups: util
+        .arr(execution.groups)
+        .filter((group) => util.isPlainObject(group))
+        .slice(0, 6)
+        .map((group) => ({
+          name: util.str(group.name, 40) || '并行组',
+          mode: group.mode === 'sequential' ? 'sequential' : 'parallel',
+          subtaskIndexes: util
+            .arr(group.subtaskIndexes)
+            .map((n) => Math.trunc(Number(n)))
+            .filter((n) => Number.isInteger(n) && n >= 0)
+            .slice(0, 12),
+        })),
+    };
     const parent = {
       id: protocol.randomId('task'),
       instruction: value.instruction,
@@ -2203,15 +3936,17 @@ class Hub {
       timeoutSec: value.timeoutSec,
       output: null,
       error: null,
-      progress: { message: `Agnes 已拆分为 ${plan.subtasks.length} 个子任务`, percent: 0, logs: [], at: now },
+      progress: { message: `Agnes 已拆分为 ${plan.subtasks.length} 个子任务（${executionLabel}）`, percent: 0, logs: [], at: now },
       parentTaskId: null,
       childTaskIds: [],
       threadId: parentThreadId,
       replyToTaskId: null,
       threadStep: 1,
       context: null,
+      goalId: planGoalId,
       attachments: Array.isArray(input.attachments) ? input.attachments : [],
       isPlan: true,
+      plan: planMeta,
       archived: false,
       archivedAt: null,
       route: {
@@ -2222,7 +3957,7 @@ class Hub {
       routingAdvice,
       events: [
         { at: now, type: 'created', message: '长任务已创建' },
-        { at: now, type: 'plan', message: `Agnes 拆分为 ${plan.subtasks.length} 个子任务` },
+        { at: now, type: 'plan', message: `Agnes 拆分为 ${plan.subtasks.length} 个子任务（${executionLabel}）` },
       ],
       _avoidDeviceIds: [],
     };
@@ -2231,6 +3966,7 @@ class Hub {
     }
     this.tasks.set(parent.id, parent);
     this.broadcast('task.created', { task: this.taskToJson(parent) });
+    if (planGoalId) this._registerGoalTask(planGoalId, parent);
     this.log('info', `Agnes 拆分任务：${parent.id} → ${plan.subtasks.length} 个子任务`);
     // 子任务超时不超过父任务预算；过短的值由 createTask 里的 _planSubtaskTimeoutFloor 兜底。
     const planTimeoutSec = Math.max(LIMITS.MIN_TASK_TIMEOUT_SEC, value.timeoutSec);
@@ -2242,7 +3978,16 @@ class Hub {
     const plannerDeviceIds = new Set(
       [...this.devices.values()].filter((device) => !device.disabled).map((device) => device.id),
     );
-    for (const subtask of plan.subtasks) {
+    for (let planIndex = 0; planIndex < plan.subtasks.length; planIndex += 1) {
+      const subtask = plan.subtasks[planIndex];
+      // dependsOn 只允许指向更靠前的子任务（planner 已归一化，这里再兜底一次）。
+      const dependsOn = util
+        .arr(subtask.dependsOn)
+        .map((n) => Math.trunc(Number(n)))
+        .filter((n) => Number.isInteger(n) && n >= 0 && n < planIndex)
+        .filter((n, i, arr) => arr.indexOf(n) === i)
+        .slice(0, 10)
+        .sort((a, b) => a - b);
       const subtaskInstruction = String(subtask.instruction || '');
       const plannerDeviceId = util.str(subtask.deviceId, 80);
       const plannerTags = util
@@ -2306,17 +4051,64 @@ class Hub {
           parentTaskId: parent.id,
           threadId: parent.threadId,
           threadStep: 1,
+          // 计划子任务必须带主任务上下文：设备端据此还原「这句话是在做什么」，
+          // 避免只看到「GUI 项目 / 这里」这类指代就误解方向。
+          context: {
+            parentTaskId: parent.id,
+            parentInstruction: util.truncate(String(parent.instruction || ''), 4000),
+            planStep: planIndex + 1,
+            planTotal: plan.subtasks.length,
+            planTitle: util.str(plan.title, 120) || null,
+            ...(planGoalId ? { goalId: planGoalId } : {}),
+          },
           attachments: parent.attachments || [],
         },
-        { routingAdvice: Object.keys(childAdvice).length ? childAdvice : null },
+        // 先不派发：写完依赖元数据再决定是否可以上路。
+        { routingAdvice: Object.keys(childAdvice).length ? childAdvice : null, deferRoute: true },
       );
+      child.planStep = planIndex + 1;
+      child.planGroup = util.str(subtask.parallelGroup, 60) || null;
+      child.planDependsOn = dependsOn;
+      child.planDependsOnTaskIds = dependsOn
+        .map((index) => parent.childTaskIds[index])
+        .filter((id) => typeof id === 'string' && id);
       parent.childTaskIds.push(child.id);
+      // 依赖已就绪的立即派发；未就绪的由 routeTask 保持 queued 并写明「等待前置子任务」。
+      this.routeTask(child);
     }
     parent.updatedAt = protocol.nowIso();
     this.broadcast('task.updated', { task: this.taskToJson(parent) });
     this._scheduleTaskRecord(parent.id, 0);
     this.schedulePersist();
     return parent;
+  }
+
+  /**
+   * 计算计划卡点：前置子任务已失败/超时/取消，且仍有依赖它的子任务在排队。
+   * 卡点会写进父任务进度，等待用户确认（重试失败子任务或取消计划）后才继续。
+   * @returns {{text:string, blockedTaskIds:string[]}|null}
+   */
+  _planBlocker(parent) {
+    if (!parent || !parent.isPlan) return null;
+    const children = (parent.childTaskIds || []).map((id) => this.tasks.get(id)).filter(Boolean);
+    const finished = children.filter((task) => TERMINAL_TASK_STATUSES.has(task.status));
+    if (!finished.length || finished.length === children.length) return null;
+    const failed = finished.filter((task) => task.status !== TASK_STATUS.COMPLETED);
+    if (!failed.length) return null;
+    const failedIds = failed.map((task) => task.id);
+    const waiting = children.filter(
+      (task) =>
+        task.status === TASK_STATUS.QUEUED &&
+        Array.isArray(task.planDependsOnTaskIds) &&
+        task.planDependsOnTaskIds.some((id) => failedIds.includes(id)),
+    );
+    if (!waiting.length) return null;
+    const describe = (task) =>
+      task ? `第 ${task.planStep || '?'} 步「${util.truncate(task.instruction, 24)}」` : '前置子任务';
+    return {
+      text: `卡点：${failed.map(describe).join('、')} 未完成，后续 ${waiting.length} 个子任务已暂停，等待确认（重试失败子任务或取消计划）`,
+      blockedTaskIds: failedIds,
+    };
   }
 
   _reconcileParent(parent) {
@@ -2326,45 +4118,79 @@ class Hub {
     if (!children.length) return;
     const finished = children.filter((task) => TERMINAL_TASK_STATUSES.has(task.status));
     const failed = finished.filter((task) => task.status !== TASK_STATUS.COMPLETED);
+    const waiting = children.filter((task) => task.status === TASK_STATUS.WAITING);
+    const blocker = this._planBlocker(parent);
     const allDone = finished.length === children.length;
+    const at = protocol.nowIso();
     if (allDone) {
       const nextStatus = failed.length ? TASK_STATUS.FAILED : TASK_STATUS.COMPLETED;
       const nextError = failed.length ? `${failed.length} 个子任务失败` : null;
       if (parent.status === nextStatus && (parent.error || null) === nextError && parent.progress && parent.progress.percent === 100) {
         return;
       }
-    } else {
-      const percent = children.length ? Math.round((finished.length / children.length) * 100) : 0;
-      if (parent.progress && parent.progress.percent === percent && parent.progress.message === `子任务 ${finished.length}/${children.length} 已完成`) {
-        return;
-      }
-    }
-    parent.updatedAt = protocol.nowIso();
-    if (!allDone) {
-      parent.progress = {
-        message: `子任务 ${finished.length}/${children.length} 已完成`,
-        percent: children.length ? Math.round((finished.length / children.length) * 100) : 0,
-        logs: [],
-        at: parent.updatedAt,
+      parent.updatedAt = at;
+      parent.status = nextStatus;
+      parent.finishedAt = at;
+      parent.progress = { message: '全部子任务结束', percent: 100, logs: [], at };
+      parent.output = {
+        text: `Agnes 拆分的 ${children.length} 个子任务已结束：完成 ${children.length - failed.length} 个，失败 ${failed.length} 个。`,
       };
-      this.broadcast('task.updated', { task: this.taskToJson(parent) });
+      parent.error = nextError;
+      parent.events.push({ at, type: parent.status, message: parent.output.text });
+      this.broadcast(parent.status === TASK_STATUS.COMPLETED ? 'task.completed' : 'task.failed', {
+        task: this.taskToJson(parent),
+      });
+      // 计划父任务本身也可能是长期目标的关联任务：结束时同样回写目标（检查历史/建议/runningTaskId）。
+      this._goalTaskFinished(parent);
+      // 管家心路：未关联目标的计划完成时也记一条工作日志（关联目标时由目标检查条目覆盖）。
+      if (!parent.goalId) this._journalTaskFinish(parent);
       this._scheduleTaskRecord(parent.id);
       this.schedulePersist();
       return;
     }
-    parent.status = failed.length ? TASK_STATUS.FAILED : TASK_STATUS.COMPLETED;
-    parent.finishedAt = parent.updatedAt;
-    parent.progress = { message: '全部子任务结束', percent: 100, logs: [], at: parent.updatedAt };
-    parent.output = {
-      text: `Agnes 拆分的 ${children.length} 个子任务已结束：完成 ${children.length - failed.length} 个，失败 ${failed.length} 个。`,
+    const percent = children.length ? Math.round((finished.length / children.length) * 100) : 0;
+    let message = `子任务 ${finished.length}/${children.length} 已完成`;
+    if (waiting.length) {
+      message += `；等待回答：${waiting.map((task) => `第 ${task.planStep || '?'} 步`).join('、')}`;
+    }
+    if (blocker) message += `；${blocker.text}`;
+    if (
+      parent.progress &&
+      parent.progress.percent === percent &&
+      parent.progress.message === message &&
+      Boolean(parent.progress.blocked) === Boolean(blocker)
+    ) {
+      return;
+    }
+    parent.updatedAt = at;
+    parent.progress = {
+      message,
+      percent,
+      logs: [],
+      waiting: waiting.length > 0,
+      blocked: Boolean(blocker),
+      at,
     };
-    parent.error = failed.length ? `${failed.length} 个子任务失败` : null;
-    parent.events.push({ at: parent.updatedAt, type: parent.status, message: parent.output.text });
-    this.broadcast(parent.status === TASK_STATUS.COMPLETED ? 'task.completed' : 'task.failed', {
-      task: this.taskToJson(parent),
-    });
+    if (blocker) {
+      const alreadyLogged = parent.events.some((event) => event.type === 'blocked' && event.message === blocker.text);
+      if (!alreadyLogged) {
+        parent.events.push({ at, type: 'blocked', message: blocker.text });
+        this._journalMilestone(parent, blocker);
+      }
+    }
+    this.broadcast('task.updated', { task: this.taskToJson(parent) });
     this._scheduleTaskRecord(parent.id);
     this.schedulePersist();
+  }
+
+  /** 子任务状态变化后推进计划：依赖已满足的排队子任务重新进入路由。 */
+  _advancePlan(parent) {
+    if (!parent || !parent.isPlan) return;
+    if (parent.status !== TASK_STATUS.RUNNING) return;
+    for (const id of parent.childTaskIds || []) {
+      const child = this.tasks.get(id);
+      if (child && child.status === TASK_STATUS.QUEUED) this.routeTask(child);
+    }
   }
 
   reconcilePlans() {
@@ -2377,6 +4203,7 @@ class Hub {
     if (!child || !child.parentTaskId) return;
     const parent = this.tasks.get(child.parentTaskId);
     if (!parent || !parent.isPlan) return;
+    this._advancePlan(parent);
     this._reconcileParent(parent);
   }
 
@@ -2424,12 +4251,84 @@ class Hub {
     return Math.max(1, device.capabilities.limits.maxConcurrentTasks || 1);
   }
 
+  /**
+   * 拆分计划的依赖闸门：前置子任务未全部完成时不派发。
+   * - 前置还在执行：等待依赖就绪（不算卡点）；
+   * - 前置已失败/超时/取消：卡点，等待用户确认（重试或取消该子任务）。
+   * @returns {{reason:string, blocked:boolean}|null} 返回 null 表示依赖已满足，可以正常路由
+   */
+  _planDependencyGate(task) {
+    const ids = Array.isArray(task && task.planDependsOnTaskIds) ? task.planDependsOnTaskIds : [];
+    if (!ids.length) return null;
+    const missing = ids.filter((id) => !this.tasks.get(id));
+    const deps = ids.map((id) => this.tasks.get(id)).filter(Boolean);
+    const pending = deps.filter((dep) => dep.status !== TASK_STATUS.COMPLETED);
+    if (!pending.length && !missing.length) return null;
+    const describe = (dep) => {
+      const step = dep.planStep ? `第 ${dep.planStep} 步` : '前置子任务';
+      return `${step}「${util.truncate(dep.instruction, 24)}」`;
+    };
+    const failed = pending.filter((dep) => TERMINAL_TASK_STATUSES.has(dep.status));
+    if (failed.length) {
+      const failedText = failed
+        .map((dep) => {
+          const label =
+            dep.status === TASK_STATUS.FAILED
+              ? '失败'
+              : dep.status === TASK_STATUS.TIMEOUT
+                ? '超时'
+                : '已取消';
+          return `${describe(dep)}（${label}）`;
+        })
+        .join('、');
+      return {
+        reason: `卡点：${failedText}，等待确认（重试该子任务或取消本计划）`,
+        blocked: true,
+      };
+    }
+    if (missing.length) {
+      return { reason: `卡点：前置子任务已不存在（${missing.length} 个），等待确认`, blocked: true };
+    }
+    return { reason: `等待前置子任务：${pending.map(describe).join('、')}`, blocked: false };
+  }
+
   /** 为 queued 任务计算候选并派发；无匹配保持 queued 并记录原因。 */
   routeTask(task) {
     if (task.status !== TASK_STATUS.QUEUED) return task;
+    // 绝对派发预算：即使 attempts 被重启/自重启路径改写，也不允许无限派发。
+    if (task.attempts >= task.maxAttempts) {
+      this._finishTask(task, TASK_STATUS.FAILED, {
+        error: `dispatch budget exhausted (${task.attempts}/${task.maxAttempts})`,
+        eventMessage: '派发次数已达上限',
+      });
+      return task;
+    }
+    // 拆分计划：依赖未满足的子任务先排队，不能提前派发。
+    const dependencyGate = this._planDependencyGate(task);
+    if (dependencyGate) {
+      const sameReason = Boolean(task.route) && task.route.reason === dependencyGate.reason;
+      task.status = TASK_STATUS.QUEUED;
+      task.assignedDeviceId = null;
+      task.assignedDeviceName = null;
+      task.updatedAt = protocol.nowIso();
+      task.route = { reason: dependencyGate.reason, candidates: [], excluded: [] };
+      if (!sameReason) {
+        this._pushTaskEvent(task, 'queued', dependencyGate.reason);
+        this.broadcast('task.updated', { task: this.taskToJson(task) });
+        this.schedulePersist();
+      }
+      return task;
+    }
     const requirements = task.requirements;
     const candidates = [];
     const excluded = [];
+    // 设备占用 = 已分配但还没结束的任务数（assigned/running/waiting）。
+    // 只看 load.running 会把“已分配但尚未 ack”的任务漏算，导致单并发设备（如 Mika 手机）被同时塞进多个任务。
+    const occupancy = new Map();
+    for (const current of this.tasks.values()) {
+      if (!current.assignedDeviceId || !ACTIVE_TASK_STATUSES.has(current.status)) continue;
+      occupancy.set(current.assignedDeviceId, (occupancy.get(current.assignedDeviceId) || 0) + 1);
+    }
 
     for (const device of this.devices.values()) {
       let reason = null;
@@ -2437,8 +4336,8 @@ class Hub {
         reason = 'disabled';
       } else if (!device.online) {
         reason = 'offline';
-      } else if (device.load.running >= this._maxConcurrent(device)) {
-        reason = `at capacity (${device.load.running}/${this._maxConcurrent(device)})`;
+      } else if ((occupancy.get(device.id) || 0) >= this._maxConcurrent(device)) {
+        reason = `at capacity (${occupancy.get(device.id) || 0}/${this._maxConcurrent(device)})`;
       } else if (requirements.deviceId && requirements.deviceId !== device.id) {
         reason = 'deviceId mismatch';
       } else {
@@ -2453,7 +4352,8 @@ class Hub {
         {
           id: device.id,
           capabilities: this._capabilitiesForMatch(device),
-          load: device.load,
+          // 评分同样用真实占用，避免把任务继续压给“已分配未 ack”的设备。
+          load: { running: occupancy.get(device.id) || 0, max: device.load.max },
           lastSeenAt: device.lastSeenAt,
         },
         requirements,
@@ -2527,10 +4427,9 @@ class Hub {
       'assigned',
       `派发到 ${deviceDisplayName(device)}（第 ${task.attempts}/${task.maxAttempts} 次尝试）`,
     );
-    this.enqueueCommand(device, this._buildRunCommand(task, device));
+    this.enqueueCommand(device, this._runCommandForAttempt(task, device, task.attempts));
     this._setTaskTimer(task.id, 'ack', () => {
-      if (task.status !== TASK_STATUS.ASSIGNED || task.assignedDeviceId !== device.id) return;
-      this._dispatchFailure(task, device, 'ack timeout');
+      this._handleAckTimeout(task, device.id, task.attempts);
     }, this.ackTimeoutMs);
     this._refreshTaskTimeout(task);
     this.broadcast('task.updated', { task: this.taskToJson(task) });
@@ -2549,6 +4448,42 @@ class Hub {
   }
 
   _buildRunCommand(task, device) {
+    // 计划子任务必须把「主任务是谁 / 整体目标 / 这是第几步」带到设备端，
+    // 否则子任务里的“这里/该项目”没有任何上下文可指代，执行方向会跑偏。
+    const parent = task.parentTaskId ? this.tasks.get(task.parentTaskId) : null;
+    const planSiblings = parent
+      ? (parent.childTaskIds || [])
+          .map((childId) => this.tasks.get(childId))
+          .filter(Boolean)
+          .slice(0, 12)
+          .map((child) => ({
+            id: child.id,
+            step: Number.isFinite(child.planStep) ? child.planStep : null,
+            status: child.status,
+            instruction: util.truncate(String(child.instruction || ''), 240),
+          }))
+      : [];
+    const context = {
+      deviceName: deviceDisplayName(device),
+      requestedAt: protocol.nowIso(),
+      taskId: task.id,
+      threadId: task.threadId || null,
+      ...(task.context || {}),
+    };
+    if (parent) {
+      context.parentTaskId = parent.id;
+      context.parentInstruction = util.truncate(String(parent.instruction || ''), 4000);
+      if (!Number.isFinite(context.planStep)) {
+        context.planStep = Number.isFinite(task.planStep) ? task.planStep : null;
+      }
+      if (!Number.isFinite(context.planTotal)) {
+        context.planTotal = (parent.childTaskIds || []).length || null;
+      }
+      context.planTitle = context.planTitle || util.str(parent.plan && parent.plan.title, 120) || null;
+      if (planSiblings.length) context.planSiblings = planSiblings;
+    } else if (task.parentTaskId) {
+      context.parentTaskId = task.parentTaskId;
+    }
     return {
       id: protocol.randomId('cmd'),
       type: 'run_task',
@@ -2562,14 +4497,70 @@ class Hub {
         threadId: task.threadId,
         replyToTaskId: task.replyToTaskId || null,
         threadStep: task.threadStep || 1,
-        context: {
-          deviceName: deviceDisplayName(device),
-          requestedAt: protocol.nowIso(),
-          ...(task.context || {}),
-        },
+        parentTaskId: task.parentTaskId || null,
+        context,
         attachments: (task.attachments || []).map((file) => ({ ...file })),
       },
     };
+  }
+
+  /**
+   * 同一 attempt 的重复派发必须复用同一个 command id，设备端才能按 command.id 幂等去重。
+   * 只有进入新 attempt（attempts 递增）时才生成新的 command。
+   */
+  _runCommandForAttempt(task, device, attempt) {
+    const cached = task._dispatch;
+    if (cached && cached.attempt === attempt && cached.deviceId === device.id && cached.command) {
+      return cached.command;
+    }
+    const command = this._buildRunCommand(task, device);
+    task._dispatch = { attempt, deviceId: device.id, command };
+    return command;
+  }
+
+  /** 设备在线且确实还有任务在跑/排队（不能只看 ack 是否到达）。 */
+  _deviceBusy(device) {
+    if (!device || !device.online) return false;
+    const reported = Number.isFinite(device.reportedRunning) ? device.reportedRunning : 0;
+    const taskIds = Array.isArray(device.runningTaskIds) ? device.runningTaskIds : [];
+    return device.status === 'busy' || reported > 0 || taskIds.length > 0;
+  }
+
+  /**
+   * ack 超时：
+   * - 设备离线/不存在 → 按协议重新调度（保留原有语义）。
+   * - 设备在线但忙碌（任务还在排队） → 不重派，重投同一个 command（同一 id），指数退避等待；
+   *   首次推送“设备忙碌”事件，避免用户看到“无意义的 ack timeout 重派”。
+   * - 设备空闲却没 ack → 视为派发失败，按预算重排。
+   */
+  _handleAckTimeout(task, deviceId, attempt) {
+    if (!task || task.status !== TASK_STATUS.ASSIGNED) return;
+    if (task.assignedDeviceId !== deviceId || task.attempts !== attempt) return;
+    const device = this.devices.get(deviceId);
+    if (!device || !device.online) {
+      this._dispatchFailure(task, device || null, 'ack timeout');
+      return;
+    }
+    if (this._deviceBusy(device) || task.progress) {
+      task._ackWaits = (task._ackWaits || 0) + 1;
+      task._ackWaitMs = (task._ackWaitMs || 0) + this.ackTimeoutMs;
+      if (task._ackWaitMs <= this.ackWaitMaxMs) {
+        if (task._ackWaits === 1) {
+          this._pushTaskEvent(task, 'queued', '设备忙碌，等待空槽后执行（已确认派发，不重复调度）');
+          this.broadcast('task.updated', { task: this.taskToJson(task) });
+        }
+        this.enqueueCommand(device, this._runCommandForAttempt(task, device, attempt));
+        this._setTaskTimer(
+          task.id,
+          'ack',
+          () => this._handleAckTimeout(task, deviceId, attempt),
+          Math.min(this.ackTimeoutMs * 2 ** Math.min(task._ackWaits, 5), 5 * 60 * 1000),
+        );
+        this.schedulePersist();
+        return;
+      }
+    }
+    this._dispatchFailure(task, device, 'ack timeout');
   }
 
   _buildCancelCommand(task, reason) {
@@ -2738,6 +4729,9 @@ class Hub {
   _finishTask(task, status, { output, error, eventMessage } = {}) {
     const wasActive = task.status === TASK_STATUS.RUNNING || task.status === TASK_STATUS.WAITING;
     this._clearTaskTimers(task.id);
+    task._dispatch = null;
+    task._ackWaits = 0;
+    task._ackWaitMs = 0;
     task.status = status;
     task.finishedAt = protocol.nowIso();
     task.updatedAt = task.finishedAt;
@@ -2762,6 +4756,8 @@ class Hub {
     this._updateParentTask(task);
     // 长期目标的跟进任务结束后，把结果回写到目标（进度/建议/下次跟进）。
     this._goalTaskFinished(task);
+    // 管家心路：任务终态记一条工作日志（完成/失败/超时/取消）。
+    this._journalTaskFinish(task);
     // 每日总结任务结束后，记录结论供前端展示。
     if (task.context && task.context.nightlyReview) this._nightlyReviewFinished(task);
     this.schedulePersist();
@@ -2778,6 +4774,8 @@ class Hub {
       task.status = TASK_STATUS.RUNNING;
       task.startedAt = task.startedAt || protocol.nowIso();
       task.updatedAt = protocol.nowIso();
+      task._ackWaits = 0;
+      task._ackWaitMs = 0;
       this._adjustLoad(device.id, 1);
       this._refreshTaskTimeout(task);
       this._pushTaskEvent(task, 'ack', '设备已确认任务');
@@ -2811,6 +4809,8 @@ class Hub {
     task.updatedAt = protocol.nowIso();
     this._pushTaskEvent(task, 'progress', '回答已发送，等待设备继续执行');
     this.broadcast('task.updated', { task: this.taskToJson(task) });
+    // 父计划进度里的「等待回答」状态同步刷新。
+    if (task.parentTaskId) this._updateParentTask(task);
     this.schedulePersist();
     return task;
   }
@@ -2862,14 +4862,30 @@ class Hub {
     task.updatedAt = task.progress.at;
     this._pushTaskEvent(task, 'progress', message || (waiting ? '等待回答' : `进度 ${task.progress.percent == null ? '' : `${task.progress.percent}%`}`.trim()));
     this.broadcast('task.updated', { task: this.taskToJson(task) });
+    // 子任务进入/退出等待回答时，刷新父计划进度（等待回答 / 卡点）。
+    if (task.parentTaskId) this._updateParentTask(task);
     this.schedulePersist();
     return task;
   }
 
   handleResult(device, taskId, body) {
     const task = this._requireTask(taskId);
-    if (task.assignedDeviceId !== device.id) throw conflict('任务未分配给该设备');
-    if (!ACTIVE_TASK_STATUSES.has(task.status)) throw conflict(`任务状态 ${task.status} 不接受结果`);
+    // 结果收敛：同一任务只接受一次终态结果。旧 attempt / 重复上报返回 200 + ignored，
+    // 而不是 409 —— 设备端把 409 当作“无需处理”，Hub 却可能继续重派，形成死循环。
+    if (TERMINAL_TASK_STATUSES.has(task.status)) {
+      this.log('info', `忽略迟到结果：${task.id}（任务已 ${task.status}）`);
+      return { task, ignored: true, reason: `任务已 ${task.status}` };
+    }
+    if (task.assignedDeviceId !== device.id) {
+      this.log(
+        'warn',
+        `忽略旧尝试结果：${task.id}（来自 ${device.id}，当前 ${task.assignedDeviceId || '未分配'}）`,
+      );
+      return { task, ignored: true, reason: '旧尝试的结果，任务已被重新派发' };
+    }
+    if (!ACTIVE_TASK_STATUSES.has(task.status)) {
+      return { task, ignored: true, reason: `任务状态 ${task.status} 不接受结果` };
+    }
     const input = util.isPlainObject(body) ? body : {};
     const ok = input.ok !== false;
     const output = normalizeOutput(input.output);
@@ -2883,10 +4899,10 @@ class Hub {
         eventMessage: message,
       });
     }
-    return task;
+    return { task, ignored: false };
   }
 
-  cancelTask(task) {
+  cancelTask(task, internal = {}) {
     if (task.isPlan) {
       for (const childId of task.childTaskIds || []) {
         const child = this.tasks.get(childId);
@@ -2903,6 +4919,21 @@ class Hub {
     }
     if (![TASK_STATUS.QUEUED, TASK_STATUS.ASSIGNED, TASK_STATUS.RUNNING, TASK_STATUS.WAITING].includes(task.status)) {
       throw conflict(`任务状态 ${task.status} 不可取消`);
+    }
+    // 拆分计划：取消某个子任务时，级联取消依赖它、尚未执行的后续子任务，避免计划卡在死依赖上。
+    if (!internal.skipDependents && task.parentTaskId) {
+      const siblings = (this.tasks.get(task.parentTaskId)?.childTaskIds || [])
+        .map((id) => this.tasks.get(id))
+        .filter(Boolean);
+      for (const sibling of siblings) {
+        if (sibling.status !== TASK_STATUS.QUEUED) continue;
+        if (!Array.isArray(sibling.planDependsOnTaskIds) || !sibling.planDependsOnTaskIds.includes(task.id)) continue;
+        try {
+          this.cancelTask(sibling, { skipDependents: false });
+        } catch {
+          /* 依赖子任务可能已被其他路径取消 */
+        }
+      }
     }
     const device = task.assignedDeviceId ? this.devices.get(task.assignedDeviceId) : null;
     if (device) {
@@ -2939,6 +4970,8 @@ class Hub {
     this.broadcast('task.updated', { task: this.taskToJson(task) });
     this.log('info', `任务重试：${task.id}`);
     this.routeTask(task);
+    // 重试成功后推进计划：原本因失败依赖而暂停的后续子任务重新进入路由。
+    if (task.parentTaskId) this._updateParentTask(task);
     this.schedulePersist();
     return task;
   }

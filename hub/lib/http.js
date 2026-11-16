@@ -24,7 +24,7 @@ const TASK_ADMIN_RE = /^\/api\/tasks\/([^/]+)(?:\/(cancel|retry|archive|unarchiv
 const TASK_FOLLOW_RE = /^\/api\/tasks\/([^/]+)\/follow-up$/;
 const TASK_ANSWER_RE = /^\/api\/tasks\/([^/]+)\/answer$/;
 const TASK_EXTERNAL_RE = /^\/api\/tasks\/([^/]+)\/external-result$/;
-const GOAL_ADMIN_RE = /^\/api\/goals\/([^/]+)(?:\/(check|link|approve|reject))?$/;
+const GOAL_ADMIN_RE = /^\/api\/goals\/([^/]+)(?:\/(check|link|unlink|approve|reject|skip|guidance))?$/;
 const REMINDER_ADMIN_RE = /^\/api\/reminders\/([^/]+)(?:\/(fire))?$/;
 const RECORD_RE = /^\/api\/records\/([^/]+)$/;
 const DSH_JOB_RE = /^\/api\/dsh\/job\/([^/]+)$/;
@@ -381,6 +381,174 @@ async function handleRequest(hub, req, res) {
     throw notFound('接口不存在');
   }
 
+  // ---------------------------------------------------------------- 自主大脑
+  if (pathname === '/api/brain') {
+    requireAdmin(hub, req, url);
+    if (method === 'GET') {
+      return sendJson(res, 200, {
+        brain: hub.getBrain(),
+        decisions: hub.listBrainDecisions(util.clampInt(queryNumber(url, 'decisions'), 20, 1, 30)),
+        hubTime: protocol.nowIso(),
+      });
+    }
+    if (method === 'PATCH' || method === 'PUT') {
+      const body = await readJsonBody(req);
+      const brain = hub.updateBrain(body);
+      return sendJson(res, 200, { brain, hubTime: protocol.nowIso() });
+    }
+    throw notFound('接口不存在');
+  }
+
+  if (pathname === '/api/brain/think') {
+    requireAdmin(hub, req, url);
+    if (method !== 'POST') throw notFound('接口不存在');
+    await readJsonBody(req);
+    const decision = await hub.requestBrainThink({ trigger: 'manual' });
+    if (!decision) throw badRequest('自主大脑正在思考，请稍后重试');
+    const brain = hub.getBrain();
+    // 未配置模型时是配置问题（400），其余思考失败按 502 返回但同样带上决策记录。
+    if (decision.error && /BRAIN_API_KEY|AGNES_API_KEY/.test(decision.error)) {
+      throw badRequest(decision.error);
+    }
+    if (decision.error) {
+      return sendJson(res, 502, {
+        error: { code: 'brain_failed', message: decision.error },
+        decision,
+        brain,
+        hubTime: protocol.nowIso(),
+      });
+    }
+    return sendJson(res, 200, { decision, brain, hubTime: protocol.nowIso() });
+  }
+
+  // ---------------------------------------------------------------- 心智（Soul / Skill）
+
+  if (pathname === '/api/mind') {
+    requireAdmin(hub, req, url);
+    if (method === 'GET') {
+      return sendJson(res, 200, { mind: hub.getMind(), hubTime: protocol.nowIso() });
+    }
+    if (method === 'PATCH' || method === 'PUT') {
+      const body = await readJsonBody(req);
+      const mind = hub.updateMind(body);
+      return sendJson(res, 200, { mind, hubTime: protocol.nowIso() });
+    }
+    throw notFound('接口不存在');
+  }
+
+  // ---------------------------------------------------------------- 管家心路
+  if (pathname === '/api/journal') {
+    requireAdmin(hub, req, url);
+    if (method === 'GET') {
+      const journal = hub.getJournal({
+        entries: util.clampInt(queryNumber(url, 'entries'), 300, 1, 800),
+        days: util.clampInt(queryNumber(url, 'days'), 60, 1, 180),
+        date: queryString(url, 'date') || null,
+      });
+      return sendJson(res, 200, { journal, entries: journal.entries, hubTime: protocol.nowIso() });
+    }
+    if (method === 'PATCH' || method === 'PUT') {
+      const body = await readJsonBody(req);
+      const journal = hub.updateJournal(body);
+      return sendJson(res, 200, { journal, hubTime: protocol.nowIso() });
+    }
+    throw notFound('接口不存在');
+  }
+
+  if (pathname === '/api/journal/summary') {
+    requireAdmin(hub, req, url);
+    if (method !== 'POST') throw notFound('接口不存在');
+    const body = await readJsonBody(req);
+    const date = body && typeof body.date === 'string' ? body.date.trim() : '';
+    const force = !(body && body.force === false);
+    const result = await hub.generateJournalSummary({ date: date || undefined, force });
+    if (!result) throw badRequest('管家心路正在生成总结，请稍后重试');
+    return sendJson(res, 200, {
+      day: result.day || null,
+      error: result.error || null,
+      hubTime: protocol.nowIso(),
+    });
+  }
+
+  // ---------------------------------------------------------------- 头脑风暴
+  if (pathname === '/api/brainstorm') {
+    requireAdmin(hub, req, url);
+    if (method !== 'GET') throw notFound('接口不存在');
+    const view = hub.getBrainstorm({
+      messages: util.clampInt(queryNumber(url, 'messages'), 100, 1, 200),
+      sessionId: queryString(url, 'session') || null,
+    });
+    return sendJson(res, 200, {
+      brainstorm: { activeId: view.activeId, sessions: view.sessions },
+      session: view.session,
+      hubTime: protocol.nowIso(),
+    });
+  }
+
+  if (pathname === '/api/brainstorm/chat') {
+    requireAdmin(hub, req, url);
+    if (method !== 'POST') throw notFound('接口不存在');
+    const body = await readJsonBody(req);
+    const result = await hub.chatBrainstorm({
+      sessionId: body && body.sessionId,
+      message: body && body.message,
+    });
+    return sendJson(res, 200, {
+      session: result.session,
+      reply: result.reply || null,
+      error: result.error || null,
+      hubTime: protocol.nowIso(),
+    });
+  }
+
+  if (pathname === '/api/brainstorm/sessions') {
+    requireAdmin(hub, req, url);
+    if (method !== 'POST') throw notFound('接口不存在');
+    await readJsonBody(req);
+    const session = hub.createBrainstormSession();
+    const view = hub.getBrainstorm({ sessionId: session.id });
+    return sendJson(res, 200, {
+      session: view.session,
+      brainstorm: { activeId: view.activeId, sessions: view.sessions },
+      hubTime: protocol.nowIso(),
+    });
+  }
+
+  const brainstormSessionMatch = /^\/api\/brainstorm\/sessions\/([^/]+)$/.exec(pathname);
+  if (brainstormSessionMatch) {
+    requireAdmin(hub, req, url);
+    if (method !== 'DELETE') throw notFound('接口不存在');
+    let deletedId;
+    try {
+      deletedId = decodeURIComponent(brainstormSessionMatch[1]);
+    } catch {
+      throw badRequest('会话 ID 非法');
+    }
+    hub.deleteBrainstormSession(deletedId);
+    const view = hub.getBrainstorm({ messages: 1 });
+    return sendJson(res, 200, {
+      ok: true,
+      brainstorm: { activeId: view.activeId, sessions: view.sessions },
+      hubTime: protocol.nowIso(),
+    });
+  }
+
+  if (pathname === '/api/brainstorm/to-task') {
+    requireAdmin(hub, req, url);
+    if (method !== 'POST') throw notFound('接口不存在');
+    const body = await readJsonBody(req);
+    const result = hub.brainstormMessageToTask({
+      sessionId: body && body.sessionId,
+      messageId: body && body.messageId,
+      goalId: body && body.goalId,
+    });
+    return sendJson(res, 200, {
+      task: hub.taskToJson(result.task),
+      session: result.session,
+      hubTime: protocol.nowIso(),
+    });
+  }
+
   if (pathname === '/api/goals') {
     requireAdmin(hub, req, url);
     if (method === 'GET') {
@@ -406,7 +574,13 @@ async function handleRequest(hub, req, res) {
     }
     const action = goalMatch[2] || null;
     if (!action && method === 'GET') {
-      return sendJson(res, 200, { goal: hub.getGoal(goalId), hubTime: protocol.nowIso() });
+      const goal = hub.getGoal(goalId);
+      return sendJson(res, 200, {
+        goal,
+        tasks: hub.listGoalTasks(goalId),
+        linkedStats: hub.goalLinkedStats(goalId),
+        hubTime: protocol.nowIso(),
+      });
     }
     if (!action && (method === 'PATCH' || method === 'PUT')) {
       const body = await readJsonBody(req);
@@ -436,6 +610,28 @@ async function handleRequest(hub, req, res) {
         task: hub.taskToJson(task),
         hubTime: protocol.nowIso(),
       });
+    }
+    if (action === 'unlink' && method === 'POST') {
+      const body = await readJsonBody(req);
+      const taskId = body && typeof body.taskId === 'string' ? body.taskId.trim() : '';
+      if (!taskId) throw badRequest('taskId 必填');
+      const { goal } = hub.unlinkGoalTask(goalId, taskId);
+      return sendJson(res, 200, {
+        goal: hub.getGoal(goal.id),
+        tasks: hub.listGoalTasks(goalId),
+        linkedStats: hub.goalLinkedStats(goalId),
+        hubTime: protocol.nowIso(),
+      });
+    }
+    if (action === 'skip' && method === 'POST') {
+      await readJsonBody(req);
+      const goal = hub.skipNextGoalCheck(goalId);
+      return sendJson(res, 200, { goal: hub.getGoal(goal.id), hubTime: protocol.nowIso() });
+    }
+    if (action === 'guidance' && method === 'POST') {
+      const body = await readJsonBody(req);
+      const goal = hub.addGoalGuidance(goalId, body);
+      return sendJson(res, 200, { goal: hub.getGoal(goal.id), hubTime: protocol.nowIso() });
     }
     if (action === 'approve' && method === 'POST') {
       await readJsonBody(req);
@@ -863,8 +1059,15 @@ async function handleDeviceScoped(hub, req, res, url, method, deviceId, rest) {
       hub.handleProgress(device, taskId, body);
       return sendJson(res, 200, { ok: true });
     }
-    const task = hub.handleResult(device, taskId, body);
-    return sendJson(res, 200, { ok: true, task: hub.taskToJson(task) });
+    const result = hub.handleResult(device, taskId, body);
+    // 结果收敛：旧 attempt / 重复上报也回 200，用 ignored 标记，避免设备把 409 当成
+    // “Hub 仍在处理”而继续等待/重试，也避免 Hub 因 409 继续重派。
+    return sendJson(res, 200, {
+      ok: true,
+      ignored: Boolean(result && result.ignored),
+      task: hub.taskToJson(result.task),
+      ...(result && result.ignored && result.reason ? { reason: result.reason } : {}),
+    });
   }
 
   throw notFound('接口不存在');

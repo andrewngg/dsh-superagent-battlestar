@@ -126,6 +126,15 @@ score = 100
 
 **审计与持久化**：`task.routingAdvice = { preflight?, planner? }` 会随任务一起写入 `state.json` 并在重启后恢复，同时展示在任务记录中，因此“为什么派到这台机器”在控制台、手机和 Markdown 记录里都可追溯。
 
+**D. 执行计划（并行组 / 依赖 / 卡点）**：规划器在拆分时还要判断“哪些子任务能同时做、哪些必须按顺序、卡住了怎么办”，并把结论放进 `execution = { strategy: "parallel" | "sequential" | "mixed", groups: [{ name, mode, subtaskIndexes }], blockerPolicy: "stop-and-ask" | "continue" }`；每个子任务可带 `dependsOn`（只允许指向更早的序号，Hub 校验并去环）与 `parallelGroup`。Hub 把它落到父任务的 `plan`（strategy/blockerPolicy/groups）和子任务的 `planStep / planGroup / planDependsOn / planDependsOnTaskIds`，并在路由前加一道依赖闸门（`_planDependencyGate`）：
+
+- 依赖还没完成：子任务保持 `queued`，`route.reason` 显示「等待前置子任务：第 N 步…」，不会提前占用设备。
+- 前序子任务失败/超时/取消：依赖它的子任务显示「卡点：…等待确认（重试该子任务或取消本计划）」，父任务 `progress.blocked = true` 并追加 `blocked` 事件，控制台/手机显示「卡点」标记。
+- 默认 `blockerPolicy = "stop-and-ask"`：卡住后不自动跳过，等用户决定；用户重试失败子任务、或回答等待中的问题后，`_updateParentTask → _advancePlan` 会自动放行后续依赖子任务。
+- 取消某个子任务会级联取消依赖它的后续排队子任务，避免悬空依赖。
+
+**排队与 Mika 单并发**：设备名额按“真实占用”计算（`assigned` / `running` / `waiting`，含已下发但尚未 ack 的任务），不是只看 `load.running`，避免单并发设备（如 Mika 手机 `limits.maxConcurrentTasks = 1`）在 ack 前被并行塞入多个任务。超出容量的任务保持 `queued`，每次任务结束、失败子任务重试、依赖满足都会触发 `_advancePlan` + `retryQueuedTasks` 重新派发。规划器 prompt 会收到每台设备的并发上限，并明确建议：需要 Mika 手机的子任务超过 2 个时用 `dependsOn` 串行排队。
+
 **并发**：母机 `first-machine` 的 `limits.maxConcurrentTasks` 现为 4；超出容量的任务保持 `queued`，槽位释放后由 Hub 自动重派，拆分出的子任务不会因为一台机器满载就失败。
 
 ### 3.4 命令与执行
@@ -166,13 +175,22 @@ flowchart TD
   S --> G
   U[用户立即跟进 check] --> T
   U2[暂停/恢复/停止] --> G
+  SK[跳过下一次 skip<br/>nextCheckAt +1 周期<br/>清空 pendingApproval] --> G
+  GD[追加指导指令 guidance<br/>注入下一次跟进/刷新提案] --> T
+  PZ[暂停到指定时间 pausedUntil] --> R[Hub tick 到点自动恢复 active<br/>重排 nextCheckAt] --> G
 ```
 
 - 目标执行前必须获得用户同意：调度器到点只生成 `pendingApproval` 提案（管理员通过 `GET /api/approvals` 或控制台看到），批准后才创建跟进任务；否决则目标转入 `paused`，不再排期，等用户恢复或下一步指令。`POST /api/goals/:id/check` 是用户主动发起，视为已同意。
+- 「暂停止」：`skip` 保持 `active`，把 `nextCheckAt` 推进一个计划周期并清空待确认提案；`pausedUntil` 记录暂停截止时间，调度器每个 tick 先调用 `_resumeExpiredGoalPauses` 把到点目标恢复为 `active` 并按计划重排（暂停期间不自动生成提案，手动 `check` 仍可用）；`paused` 且 `pausedUntil=null` 表示一直暂停，等手动恢复。最长暂停 366 天。
+- 「恢复自动跟进」：`paused` 或 `stopped` 的目标都可恢复——`updateGoal` 在 `status=active` 分支清空 `stoppedAt/pausedUntil`、从当前时间重排 `nextCheckAt`、清空 `pendingApproval`；`completed` 的「重新激活」共用该分支。
+- 「新的指导指令」：`POST /api/goals/:id/guidance` 把一条 ≤2000 字的指导追加到 `goal.guidance`（最多 20 条）；`buildGoalCheckInstruction` 每次构建跟进指令时注入最近 6 条（按时间顺序、越靠后越新），已有 `pendingApproval` 时同步重建其 `instruction`，因此下一次自动跟进/待批准提案都会带最新方向。
 - 目标不是新任务类型：每次跟进就是一条普通任务，通过 `task.goalId` 关联，复用路由/并发/重试/记录全套机制；优先级手动 7、定时 4。
 - 调度由 Hub 内置定时器完成（`BUTLER_GOAL_TICK_MS`，默认 30000ms），无需外部 cron；Hub 停机期间错过的检查不补跑，恢复后按计划排下一次。
 - 同一个目标同时只允许一条跟进任务（`runningTaskId` 防重），已有待确认提案时亦不重复生成，避免目标检查自我叠加。
 - 目标持久化在 `state.json` 的 `goals` 字段；任务结束回调 `_goalTaskFinished` 写入 `checks`（最多 20 条）与 `lastSummary`，并通过 SSE `goal.updated` 实时推给控制台。
+- 任务关联：`POST /api/goals/:id/link` / `POST /api/goals/:id/unlink` 维护双向关联（`task.goalId` ↔ `goal.taskIds`，各最多 50 条）；关联执行中任务会占位 `goal.runningTaskId`，取消关联时清空该占位并同步解除计划子任务的 `context.goalId`。`GET /api/goals/:id` 返回 `{goal,tasks,linkedStats,hubTime}`，其中 `tasks` 只列顶层任务（计划子任务折叠进 `childProgress`），`linkedStats` 实时汇总 `{total,running,completed,failed,waiting,planTotal,planCompleted}`。
+- 关联计划：计划父任务关联目标时，子任务同步写入 `context.goalId`（子任务本身不带 `goalId`，仍以继承父任务目标为准）；通过 `POST /api/tasks {goalId}` 创建普通/计划任务，或对已关联任务「继续此任务」创建跟进任务，新任务都会自动继承并登记到目标 `taskIds`。
+- 回写去重：`_goalTaskFinished` 按 `taskId` 去重 `checks`（同一条任务的失败→重试→成功只保留一条并更新状态）；计划父任务无输出时用子任务进度生成合成摘要（`计划「…」共 N 步：完成 X，失败 Y（失败步骤：…）`），并仅在「没有其他关联任务在执行」时清空 `runningTaskId/pendingApproval`。
 - 每晚总结（Nightly Review）：Hub 每天本地时间 `nightlyReviewTime`（默认 22:00，可用构造参数、`BUTLER_NIGHTLY_REVIEW_TIME` 或 `BUTLER_NIGHTLY_REVIEW=0` 控制）创建一条普通任务，汇总所有目标、最近 24 小时任务与子任务进度，输出 Markdown：目标进度 / 任务复盘 / 明天工作方向 / 需要确认事项 / 目标下一步细节；状态与全文保存在 `state.json` 的 `nightlyReview` 字段，控制台通过 `nightly.review.updated` 实时展示，也可用 `POST /api/nightly-review/run` 手动强制生成。
 
 ### 3.7 提醒（Reminders）
@@ -185,6 +203,60 @@ flowchart TD
   - App 被系统杀死或重启不影响已排闹钟；`BOOT_COMPLETED` / `MY_PACKAGE_REPLACED` 后 `BootReceiver` 从 SharedPreferences 缓存重排；
   - 前台服务每 5s 轮询 `/api/snapshot` 时也会同步 `reminders`，作为后台兜底。
 - 浏览器只管理、不弹通知；控制台提醒页展示提示条说明这一点。多台手机各自排程，回写以 Hub 为准（同一提醒会在多台手机上同时响）。
+
+### 3.8 自主大脑（Brain）
+
+- 模块 `hub/lib/brain.js` + Hub 内置定时器：`brainTickMs`（默认 30s）检查是否到点，`brain.intervalSec`（默认 180s）是模型思考间隔；两者互不代替，思考间隔可在 60–3600s 之间调整。
+- 每次思考读取当前快照（长期目标、最近任务、待确认提案、设备负载），要求模型输出严格 JSON：`{summary, actions:[{action,taskId?,goalId?,instruction?,reason,confidence}]}`，无效/越界的动作会被归一化或丢弃。
+- 动作白名单：`retry_task`（重试失败/超时/已取消任务，受 `maxAttempts` 限制）、`resume_thread`（对已结束任务开新线程继续）、`create_task`（新建普通任务，可选挂到目标）、`link_task`（把已有任务关联到目标）、`none`；大脑只能调用白名单动作，不执行设备命令或任意代码。
+- 两种模式：`auto`（默认）自动执行动作，单轮最多 `maxActions` 个（默认 2，最多 3），置信度低于 `0.6` 的动作只记录为 `low-confidence` 不执行；`suggest` 只记录建议（`executed:false`），不改任务。
+- 决策与错误持久化在 `state.json` 的 `brain` 字段，`decisions` 保留最近 30 条（触发方式 manual/schedule、耗时、动作、执行结果/跳过原因/错误，以及六步 `assessment` 与 `ownerAsk`）；`lastError` 只在下一次成功思考后清空，思考失败不会向调用方抛错，也不阻断目标跟进。
+- HTTP：`GET /api/brain`（`?decisions=1..30` 取历史，默认 20）、`PATCH /api/brain`（校验 `enabled/mode/intervalSec/maxActions/model/adaptive/ownerAskAck`）、`POST /api/brain/think`（立即思考，返回 `{decision,brain,hubTime}`；模型未配置时 400，模型调用失败 502）。事件流通过 `brain.updated` 推送最新决策。
+- 模型配置：`BRAIN_API_KEY`（或 `AGNES_API_KEY` / `BUTLER_AGNES_API_KEY`）、`BRAIN_BASE_URL`、`BRAIN_MODEL`、`BRAIN_TIMEOUT_MS`；未配置 Key 时自动思考跳过并记录 `lastError`，不影响手动的任务/目标功能。
+
+#### 自适应节律（`adaptive`，省 token）
+
+- 目标：没有实质工作时降低思考频次，减少模型调用与 token 消耗；一旦有活，自动回到基准间隔。
+- 新字段：`adaptive`（默认 `true`）、`idleStreak`（连续空闲思考次数，0–20）、`effectiveIntervalSec`、`nextThinkAt`、`skippedCycles`。adaptive 开启时有效间隔按 `min(intervalSec × 2^idleStreak, MAX_IDLE_SEC)` 指数退避，`MAX_IDLE_SEC = 1800s`；`nextThinkAt` 显式保存时优先于推导值。
+- `runBrainCycle()` 只在同时满足「adaptive 开启、已真实思考过（decisions 非空）、当前无繁忙工作、`lastThinkAt` 之后无新信号」时跳过模型调用：`skippedCycles+1`、`idleStreak+1`（封顶 20）、按新间隔重排、广播 `brain.updated`（payload 带 `skipped:true`），本轮不产生决策。
+- 工作判定 `_brainWorkload()`：存在进行中/等待任务、可重试的失败任务、待用户确认的提案、临近到期的目标跟进，或「有排队任务且设备在线」即视为 busy。新信号 `_brainHasNewSignalsSince(lastThinkAt)`：任务、目标、提案、非 `thought` 心路条目、头脑风暴会话的更新时间。
+- 真实思考结束后 `_brainUpdateCadence()` 更新节律：失败、busy 或实际执行了动作 → `idleStreak=0`（回到基准间隔）；否则 `idleStreak+1`；每次真实思考都会清零 `skippedCycles`。手动思考（`POST /api/brain/think`）不受跳过规则限制，但同样更新节律；`PATCH /api/brain` 修改 `adaptive/intervalSec` 后从当前时间重新排期（`_rescheduleBrainFromNow`）。
+
+#### 六步思考协议
+
+- 提示词要求模型按「目标 → 进度 → 更好的工作方式 → 要改进哪里 → 我能做什么 → 是否提醒主人做什么」六步思考，并在严格 JSON 中多输出 `assessment` 对象：`{goals,progress,betterWay,improvement,myMove,ownerAsk}`（每项最长 400 字；`ownerAsk` 可为字符串或 `{text,at,goalId}`，归一化后正文最长 500 字）。
+- 解析：`parseBrainReply` 返回 `{summary,actions,assessment,ownerAsk}`；`assessment` 全空时为 `null`，顶层字符串 `ownerAsk` 也兼容。决策记录新增 `assessment` 与 `ownerAsk`，并同步到大脑状态 `lastAssessment/ownerAsk`。
+- 管家心路：思考条目正文按六步分行（`- 目标：…`、`- 进度：…`、`- 更好的方式：…`、`- 要改进：…`、`- 我来推进：…`、`- 需要主人：…`），`meta.ownerAsk` 保存提醒文案；纯「无需动作」且无 `ownerAsk` 的思考仍不记录。
+- 回执：`PATCH /api/brain {ownerAskAck:true}` 清空 `brain.ownerAsk`（控制台「已知悉」），非布尔值/其他非法值返回 400；`GET /api/brain` 输出 `effectiveIntervalSec/nextThinkAt/skippedCycles/lastAssessment/ownerAsk` 等新字段。
+
+### 3.9 管家心路（Journal）
+
+- 模块 `hub/lib/journal.js`（纯函数）+ Hub 集成：把「管家思考」与「工作结果」按天记成时间线，并在每天 `summaryTime`（默认 23:30，本地时区）自动生成《每日总结》；数据持久化在 `state.json` 的 `journal` 字段（结构见 4.7），控制台「管家心路」页展示。
+- 条目类型 `JOURNAL_KINDS`：`thought`（大脑思考）、`work`（任务/目标/计划结果）、`milestone`（计划卡点等里程碑）、`daily`（每日总结）。条目形如 `{id,at,date,kind,title,text,refs:{taskId?,goalId?,decisionId?},meta}`，按本地日期 `date` 分组，最多 800 条、保留 180 天。
+- 自动记录 hook：`_runBrainThink` 结束后记录思考（标题为摘要截断，正文列每个动作及已执行/跳过原因；失败记 `思考失败：<error>`；纯「无需动作」且无错误不记）；`_finishTask` 在终态记录任务结果（标题 `任务完成/任务失败/任务超时/任务已取消：<指令>`，正文含输出/错误、设备与计划进度）；`_reconcileParent` 首次出现卡点时记录里程碑（`计划卡点：…`）；`_goalTaskFinished` 记录目标跟进；`linkGoalTask` / `unlinkGoalTask` 记录关联/取消关联。`journal.enabled=false` 时所有 hook 直接跳过（手动生成总结仍可用）。每日总结本身也作为 `daily` 条目追加。
+- 每日总结：`runJournalCycle` 复用 `_goalTimer` 每个 tick 检查（禁用、今天已总结、未到 `summaryTime` 时跳过）；`generateJournalSummary({date,force})` 汇总当天条目、目标与任务，复用自主大脑的模型配置与 `createBrainThinker` 生成 Markdown 总结与 `highlights/verdict/stats`。模型未配置或调用失败时降级为本地确定性汇总（`fallbackDailySummary`），错误写入 `day.error`，不抛错、不阻断任务与目标功能。
+- 首次升级回填：`_seedJournalFromHistory` 在日志为空时，把当天已完成任务与最近大脑决策回填为条目（`meta.seeded=true`），避免新功能上线后当天时间线空白。
+- HTTP：`GET /api/journal?days=1..180&entries=1..800&date=YYYY-MM-DD` 返回 `{journal,entries,hubTime}`（`journal` 含 `enabled/summaryTime/lastSummaryDate/timeZone/today/nowTime/days[]`）；`PATCH /api/journal` 调整 `{enabled,summaryTime}`（校验失败 400）；`POST /api/journal/summary` 手动或强制生成（`{date,force}`，模型不可用仍返回 200 并带 `day.error`）。条目写入与总结保存产生的 `journal.updated` SSE 事件只推送、不写入常规事件列表（`record:false`），控制台据此刷新。
+- 模型与自主大脑共用 `BRAIN_API_KEY` / `AGNES_API_KEY` / `BUTLER_AGNES_API_KEY`、`BRAIN_BASE_URL`、`BRAIN_MODEL`、`BRAIN_TIMEOUT_MS`（见 3.8）。
+
+### 3.10 头脑风暴（Brainstorm，对话大脑）
+
+- 模块 `hub/lib/brainstorm.js`（纯函数，无 I/O）+ Hub 集成：控制台「头脑风暴」页与自主大脑多轮对话，用来梳理方向、拆解目标、评估取舍；会话持久化在 `state.json` 的 `brainstorm` 字段（结构见 4.8），最多 30 个会话、每会话 200 条消息、单条正文 8000 字。
+- 数据流：`chatBrainstorm({sessionId?,message})` 校验请求 → 无会话则新建（`createBrainstormSession`，标题「新对话」）→ 追加 user 消息（首条用户消息自动生成标题：取首行、去 Markdown 装饰、截断 40 字）→ 组装上下文（活跃/暂停目标、进行中/失败任务、最近 3 天管家心路总结、待确认提案）→ `buildBrainstormPrompt`（system 要求中文 Markdown、区分事实与假设、给 2–3 个方案并推荐一个、结尾给「下一步」，不要求 JSON；user 含上述上下文与最近 12 条对话）→ 复用自主大脑的模型配置调用模型 → 追加 assistant 消息（失败时消息带 `error`、正文为「（大脑暂时无法回答：…）」）→ `broadcast('brainstorm.updated',{session,activeId},{record:false})` → 持久化，返回 `{session,reply,error}`。
+- 模型失败/未配置不抛给调用方：HTTP 仍返回 200，`reply=null`、`error` 说明原因，用户消息与失败回复都已落盘，可继续追问；未配置模型时错误为 `未配置自主大脑模型（BRAIN_API_KEY / AGNES_API_KEY）`。空回复按失败处理（`大脑返回了空回复`）。
+- 转任务：`brainstormMessageToTask({sessionId,messageId,goalId?})` 只接受 assistant 消息，用正文作为任务指令（`priority:6`、`context:{brainstorm:true,sessionId,messageId}`），`goalId` 存在时走 `_registerGoalTask` 自动关联到长期目标并出现在目标详情的任务列表里。
+- 会话管理：`getBrainstorm({messages=100,sessionId})` 返回会话摘要列表（最近更新在前）与指定会话最近 N 条消息；`createBrainstormSession()`、`deleteBrainstormSession(id)`、`listBrainstormSessions()`；`activeId` 指向最近使用的会话，删除后回落到剩余最近会话或 `null`。
+- HTTP：`GET /api/brainstorm?messages=1..200&session=<id>` → `{brainstorm:{activeId,sessions},session,hubTime}`；`POST /api/brainstorm/chat` `{sessionId?,message}` → `{session,reply,error,hubTime}`（参数非法 400）；`POST /api/brainstorm/sessions` → `{session,brainstorm,hubTime}`；`DELETE /api/brainstorm/sessions/:id` → `{ok:true,brainstorm,hubTime}`（不存在 404）；`POST /api/brainstorm/to-task` `{sessionId,messageId,goalId?}` → `{task,session,hubTime}`（消息不存在 404、非 assistant 消息 400）。
+- 事件：仅 SSE `brainstorm.updated`（`record:false`，不写入常规事件列表），payload 含 `session` 摘要与 `activeId`；删除时额外带 `removedId`。
+- 模型配置与自主大脑/管家心路共用 `BRAIN_API_KEY` / `AGNES_API_KEY` / `BUTLER_AGNES_API_KEY`、`BRAIN_BASE_URL`、`BRAIN_MODEL`、`BRAIN_TIMEOUT_MS`（见 3.8），不新增配置项。
+
+### 3.11 心智（Soul / Skill）
+
+- 模块 `hub/lib/soul.js`（纯函数）+ `hub/lib/soul-defaults.js`（由 `docs/soul.default.md`、`docs/skill.default.md` 自动生成的默认文本，不要手改）：给自主大脑一段稳定的「灵魂」（个性、价值观、语气、面对不确定与失败的态度、与主人的关系，上限 6000 字）和一份可迭代的「工作方法」（观察 → 抓主要矛盾 → 评估方案 → 小步执行 → 复盘 → 请示的步骤化流程，上限 12000 字）。两者在每次大脑思考时注入提示词，控制台「心智」页可编辑与恢复默认；持久化在 `state.json` 的 `mind` 字段（结构见 4.9）。
+- 数据流：`GET /api/mind` → `hub.getMind()`（`mindToJson`：`soul/skill/updatedAt/soulIsDefault/skillIsDefault/soulChars/skillChars/defaults/limits`，已内置默认值与上限）→ 控制台渲染两张编辑卡。`PATCH /api/mind`（`PUT` 等价）body `{soul?,skill?,resetSoul?,resetSkill?}` → `normalizeMindPatch` 校验（非字符串、空/空白文本、超长均为 400，错误一次性汇总）→ `hub.updateMind` 应用并写 `updatedAt=nowIso` → `broadcast('mind.updated',{mind,at},{record:false})` → `schedulePersist()`，返回 `{mind,hubTime}`。显式文本优先于同名 `reset`；`resetSoul/resetSkill=true` 恢复对应默认文本。
+- 提示词注入：`_runBrainThink` 用 `buildBrainPrompt(snapshot, {mind: this.mind})`，在身份、严格 JSON 与六步协议之后插入 `## 你的灵魂（个性与价值观）`、`## 你的工作方法（思考与行动流程）` 与衔接句「先按上面的灵魂与工作方法推进判断，再把它压缩进六步 assessment；输出仍然必须是下面的严格 JSON 结构。」，再跟随动作白名单与保守原则；按上述上限截断，无 `mind` 时提示词保持原样（向后兼容）。
+- 恢复：构造参数 `options.mind` 与 `state.json` 的 `mind` 都经 `restoreMind` 容错恢复（非对象/空文本回退默认、超长截断、非法 `updatedAt` 置 `null`）；`serializeState()` 始终写出 `{soul,skill,updatedAt}`。
+- 事件：`mind.updated` 与 `journal.updated` / `brainstorm.updated` 一致，只推送 SSE、不写入常规事件列表（`record:false`）。模型调用本身沿用自主大脑的 `BRAIN_*` / `AGNES_*` 环境变量，不新增配置项。
 
 ## 4. 数据模型
 
@@ -220,10 +292,13 @@ flowchart TD
 任务保存完整事件时间线与路由解释；`output` 支持文本、Markdown、artifacts（文件/链接）。
 `route` 记录 `reason/candidates/excluded`；`routingAdvice` 记录路由提示的来源（`preflight` 本地文件预检、`planner` Agnes 规划指派），随任务持久化并写入任务记录。
 
+任务可通过 `goalId` 关联长期目标（见 3.6）；计划子任务用 `context.goalId` 继承父任务的目标，`goalId` 本身留空，避免子任务被当作独立跟进任务。`parentTaskId/childTaskIds/threadId/threadStep/planStep/planGroup` 等计划与线程字段保持不变。任务进入终态时还会写入一条管家心路 `work` 条目（引用 `taskId` 与目标，见 3.9）。头脑风暴「转成任务」创建的任务额外带 `context:{brainstorm:true,sessionId,messageId}`、`priority=6`，并可同时关联长期目标（见 3.10）。
+
 ### 4.3 长期目标（Goal）
 
 状态机：`active ⇄ paused`，可 `stopped`（用户停止，终态）或 `completed`（目标达成，终态）；`stopped/completed` 不再自动排期。
-字段：`id/title/nickname/description/status/schedule/nextCheckAt/lastCheckAt/lastCheckStatus/lastSummary/runningTaskId/taskIds[]/checks[]/pendingApproval`（`nickname` 是用户给目标起的称呼，≤40 字、可选，控制台卡片/提醒/跟进指令/每日总结优先用它，留空回退 `title`；最近 20 次跟进记录，含时间/任务/状态/摘要/错误；`pendingApproval={id,at,reason,instruction,source}` 表示到点后等待用户同意的跟进提案，持久化并在重启后恢复）。
+字段：`id/title/nickname/description/status/schedule/nextCheckAt/lastCheckAt/lastCheckStatus/lastSummary/runningTaskId/taskIds[]/checks[]/pendingApproval/pausedUntil/guidance[]`（`nickname` 是用户给目标起的称呼，≤40 字、可选，控制台卡片/提醒/跟进指令/每日总结优先用它，留空回退 `title`；最近 20 次跟进记录，含时间/任务/状态/摘要/错误；`pendingApproval={id,at,reason,instruction,source}` 表示到点后等待用户同意的跟进提案，持久化并在重启后恢复；`pausedUntil` 仅在 `paused` 时非空，ISO 字符串，到点由调度器自动恢复，`null` 表示一直暂停；`guidance` 是追加式指导指令列表 `{id,text,createdAt}`，最多 20 条，`buildGoalCheckInstruction` 取最近 6 条注入跟进任务）。
+`taskIds[]` 保存已关联任务（最多 50 条，含计划父任务；计划子任务折叠在父任务的 `childProgress` 中），`runningTaskId` 只在关联任务执行中占位；`GET /api/goals` 列表与 `GET /api/goals/:id` 详情附带实时计算的 `linkedStats={total,running,completed,failed,waiting,planTotal,planCompleted}`。
 `schedule` 为 `{type:'daily',time:'HH:mm'}`（本地时区，默认 09:00）或 `{type:'interval',minutes}`（5 分钟–7 天）。
 `state.json` 顶层 `nightlyReview` 保存每晚总结：`{date,taskId,status,startedAt,finishedAt,summary,error}`。
 
@@ -247,7 +322,142 @@ flowchart TD
 
 ### 4.5 事件（Event）
 
-设备与任务的变更都产生事件，经 SSE 推送给所有控制台；Hub 本身保留最近事件用于快照与排查。
+设备与任务的变更都产生事件，经 SSE 推送给所有控制台；Hub 本身保留最近事件用于快照与排查。管家心路的条目写入与每日总结保存只推 `journal.updated`、不写入常规事件列表，避免高频日志淹没事件流（见 3.9）。
+
+### 4.6 自主大脑（Brain）
+
+```jsonc
+{
+  "enabled": true,
+  "mode": "auto",       // auto（自动执行白名单动作） | suggest（只记录建议）
+  "intervalSec": 180,   // 思考间隔，60–3600
+  "maxActions": 2,      // 单轮自动执行上限，1–3
+  "model": null,        // null 表示使用 BRAIN_MODEL / AGNES_MODEL / 默认模型
+  "adaptive": true,     // true 时按空闲次数指数退避（见 3.8 自适应节律）
+  "idleStreak": 0,      // 连续空闲思考次数，0–20
+  "effectiveIntervalSec": 180, // 当前有效思考间隔；adaptive 时最大 1800
+  "nextThinkAt": "2026-11-16T06:03:00.000Z", // 下次计划思考时间（显式优先）
+  "skippedCycles": 0,   // 连续跳过模型调用的次数
+  "lastAssessment": null, // 六步思考结论 {goals,progress,betterWay,improvement,myMove,ownerAsk}
+  "ownerAsk": null,     // 需要主人处理的事项 {text,at,goalId}
+  "lastThinkAt": "2026-11-16T06:00:00.000Z",
+  "lastError": null,
+  "lastSummary": "任务 A 失败但还有重试次数，已重试。",
+  "decisions": [        // 最多 30 条，最新的在末尾（HTTP 返回时反转为最新在前）
+    {
+      "id": "brain_x1",
+      "at": "2026-11-16T06:00:00.000Z",
+      "trigger": "manual",           // manual | schedule
+      "mode": "auto",
+      "model": null,
+      "durationMs": 1234,
+      "summary": "任务 A 失败但还有重试次数，已重试。",
+      "assessment": null,            // 本次六步思考结论（结构同 lastAssessment）
+      "ownerAsk": null,              // 本次需要主人做的事项
+      "actions": [
+        {
+          "action": "retry_task",
+          "taskId": "task_x1",
+          "goalId": null,
+          "instruction": "",
+          "reason": "attempts 1/2，还有一次机会",
+          "confidence": 0.9,
+          "executed": true,
+          "skippedReason": null,
+          "error": null
+        }
+      ],
+      "error": null
+    }
+  ]
+}
+```
+
+`GET /api/brain` 返回的 `nextThinkAt` 优先显式保存值，否则由 `lastThinkAt + effectiveIntervalSec` 推导（禁用时为 `null`）；`effectiveIntervalSec` 对外夹在 `intervalSec..1800` 之间。`configured` 表示是否检测到可用的模型 API Key；事件流通过 `brain.updated` 推送最新决策（自适应跳过时 payload 带 `skipped:true`）。
+
+### 4.7 管家心路（Journal）
+
+```jsonc
+{
+  "enabled": true,
+  "summaryTime": "23:30",          // 每日总结时间（本地时区，HH:MM）
+  "lastSummaryDate": "2026-11-16",
+  "entries": [                     // 最多 800 条，按 at 升序保存
+    {
+      "id": "jrn_x1",
+      "at": "2026-11-16T07:12:00.000Z",
+      "date": "2026-11-16",        // 本地时区日期
+      "kind": "work",              // thought | work | milestone | daily
+      "title": "任务完成：整理本周报表",
+      "text": "报表已生成\n设备：书房工作站",
+      "refs": { "taskId": "task_x1", "goalId": "goal_x1" },
+      "meta": { "taskStatus": "completed", "isPlan": false, "device": "书房工作站" }
+    }
+  ],
+  "days": {                        // 最近 180 天，按日期倒序返回
+    "2026-11-16": {
+      "date": "2026-11-16",
+      "summary": "## 2026-11-16 管家总结\n...",
+      "highlights": [{ "text": "完成报表", "category": "推进" }],
+      "verdict": "稳步推进",
+      "stats": { "thought": 3, "work": 5, "milestone": 1, "total": 9, "completedTasks": 4, "failedTasks": 1 },
+      "generatedAt": "2026-11-16T15:30:00.000Z",
+      "model": "agnes-2.5-flash",
+      "entryCount": 9,
+      "error": null
+    }
+  }
+}
+```
+
+`GET /api/journal` 返回 `{journal:{enabled,summaryTime,lastSummaryDate,timeZone,today,nowTime,days[]},entries,hubTime}`：`entries` 默认取最近 300 条并按时间倒序，`days` 默认最近 60 天；条目 id 前缀 `jrn_`，`refs` 可指向 `taskId/goalId/decisionId`。`journal.days[date].stats` 在总结生成时写入，未生成的日期由条目实时统计（`thought/work/milestone/daily/total/completedTasks/failedTasks`）。
+
+### 4.8 头脑风暴（Brainstorm）
+
+```jsonc
+{
+  "activeId": "bs_a1b2c3",           // 最近使用的会话
+  "sessions": [                      // 最多 30 个，恢复/返回时按 updatedAt 倒序
+    {
+      "id": "bs_a1b2c3",
+      "title": "帮我把求职目标拆成本周行动", // 首条用户消息截断 40 字
+      "createdAt": "2026-11-16T07:12:00.000Z",
+      "updatedAt": "2026-11-16T07:15:00.000Z",
+      "messages": [                  // 每会话最多 200 条，按时间升序保存
+        {
+          "id": "bm_x1",
+          "role": "user",            // user | assistant
+          "at": "2026-11-16T07:12:00.000Z",
+          "text": "帮我把求职目标拆成本周行动"
+        },
+        {
+          "id": "bm_x2",
+          "role": "assistant",
+          "at": "2026-11-16T07:12:05.000Z",
+          "text": "## 结论\n...",
+          "model": "agnes-2.5-flash", // 模型调用成功时记录
+          "error": null               // 失败时记录错误，正文为降级提示
+        }
+      ]
+    }
+  ]
+}
+```
+
+`GET /api/brainstorm` 返回 `{brainstorm:{activeId,sessions:[summary]},session,hubTime}`：列表项是摘要 `{id,title,createdAt,updatedAt,messageCount,lastMessageAt,preview}`（`preview` 取最后一条消息截断 120 字），`session` 返回指定会话（`?session=`）或 `activeId`/最近会话的最近 N 条消息（`?messages=1..200`，默认 100）。会话 id 前缀 `bs_`、消息 id 前缀 `bm_`，单条正文上限 8000 字。转任务产生的任务带 `context:{brainstorm:true,sessionId,messageId}` 且 `priority=6`（见 3.10）。
+
+### 4.9 心智（Mind / Soul / Skill）
+
+```jsonc
+{
+  "soul": "你是主人的自主大脑。\n\n...",   // 灵魂：个性、价值观、语气、态度；≤6000 字
+  "skill": "这是你每次定期思考、或接到任务时的固定动作。\n\n...", // 工作方法：步骤化流程；≤12000 字
+  "updatedAt": "2026-11-16T07:40:39.601Z"  // 最近一次修改时间；null 表示从未改过
+}
+```
+
+`GET /api/mind` 返回的 `mind` 是视图对象：除上述三个字段外还带 `defaults:{soul,skill}`、`limits:{soul:6000,skill:12000}`、`soulChars/skillChars` 与 `soulIsDefault/skillIsDefault`。`restoreMind` 对非法 `soul/skill`（非字符串、空文本）回退默认文本、超长截断到上限、非法 `updatedAt` 置 `null`；空文本或超长 `PATCH` 返回 400。
+
 
 ## 5. 安全模型
 
@@ -264,13 +474,13 @@ flowchart TD
 
 - Hub 是**单点**：常开设备（NAS/小主机）上跑；断网时任务无法下发。
 - 设备端执行器是“薄适配层”：DSH 的命令行/接口因版本而异，默认提供可配置命令模板与模拟器，生产环境需要按实际 DSH 版本调模板。
-- 路由评分本身是确定性规则；长任务拆分与子任务设备指派由 Agnes 规划器（LLM）提供建议，Hub 校验后执行（见 3.3.1）。未显式指定设备、预检未命中的任务仍按评分 + 心跳新鲜度选择，可能落到非预期的机器上——需要确定性时请显式指定设备，或让指令直接提到本机文件。
+- 路由评分本身是确定性规则；长任务拆分与子任务设备指派由 Agnes 规划器（LLM）提供建议，Hub 校验后执行（见 3.3.1）。子任务依赖只允许指向更早序号（线性 DAG），不是通用 DAG 调度器。未显式指定设备、预检未命中的任务仍按评分 + 心跳新鲜度选择，可能落到非预期的机器上——需要确定性时请显式指定设备，或让指令直接提到本机文件。
 - 本地文件预检只做**存在性**判断，不会把文件同步到别的机器；命中后任务会固定到 Hub 宿主执行，跨机执行需要共享盘或自行同步。
 - APK 是 WebView 壳（内网直连），不是完整原生客户端；离线缓存与推送通知不在 v1 范围。提醒通知是例外：由原生 `AlarmManager` 排程，App 被杀死/手机重启后仍可触发；但精确闹钟权限被撤销时会退化为非精确（Doze 下可能延迟数分钟），通知权限被拒时只回写不弹窗。「闹钟」方式只是高优先级通知 + 闹钟音/震动（非系统级闹钟，不会全屏），受勿扰模式、音量与渠道设置影响；通知渠道属性创建后不可变。
 
 ## 7. Roadmap
 
-1. **管家大脑**：Hub 增加 LLM planner，把一句话拆成有依赖关系的多设备任务 DAG（参考 dsh-superagent 的 ticket/assignment 模型）。
+1. **管家大脑**：v1 自主大脑已落地（白名单动作：重试/续做/新建/关联任务，见 3.8），「管家心路」时间线与每日总结 v1 也已落地（见 3.9），对话大脑「头脑风暴」与一键转任务 v1 也已落地（见 3.10）；下一步是通用多设备子任务 DAG 调度（跨父任务抢占、优先级与资源约束）；当前 Agnes 拆分已支持并行组 + 向前依赖 + 卡点暂停（见 3.3.1 D）。
 2. **设备端 DSH 深度适配**：直接对接 DSH 的 Web API / 插件协议，而不是命令模板。
 3. **多用户与权限**：家庭成员角色（查看/发指令/管理设备）。
 4. **通知**：任务完成/失败推送到手机（APK 前台服务或 ntfy/Telegram 网关）。

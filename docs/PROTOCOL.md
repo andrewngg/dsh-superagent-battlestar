@@ -82,6 +82,9 @@ assigned/running ──timeout──▶ retry（maxAttempts 内自动重排，�
                               └─ 重试用尽 ──▶ timeout（可人工重试；超时窗口 = timeoutSec，设备 keepalive 可续期）
 ```
 
+- 重派是**幂等**的：同一 `attempt` 的重投复用同一个命令 `id`（设备按 `id` 去重）。设备心跳 `status=busy`、`load.running>0` 或 `taskIds` 非空时，Hub **不得**因 ack 超时而重派，而是重投原命令并按退避等待（等待窗口默认 `max(4×ackTimeout, 10min)`），期间任务保持 `assigned`、不消耗 `attempts`。
+- Hub 维护“绝对派发预算”：`attempts >= maxAttempts` 时不再派发，直接 `failed`（`dispatch budget exhausted`），即使发生自重启/超时重排也不会绕过。
+
 ## 5. 端点
 
 ### 5.1 公共
@@ -108,6 +111,7 @@ Resp: `{ commands:[Command] }`
 
 `POST /api/devices/:id/tasks/:taskId/ack`
 Body: `{ ok:true }` → `{ ok:true, task }`；幂等。ack 后任务 `assigned → running`。
+设备应在**收到 `run_task` 时立即 ack**（允许排队等待执行槽位），而不是等真正开始执行才 ack；排队期间用 `progress({keepalive:true})` 续期。Hub 依据心跳里的 `status`/`load.running`/`taskIds` 判断设备是否忙碌：忙碌时按上面的幂等重投处理，绝不因 ack 超时重派给同一设备。
 
 `POST /api/devices/:id/tasks/:taskId/progress`
 Body: `{ message:"正在解析表格…", percent?:0-100, logs?:["…"] }` → `{ ok:true }`
@@ -116,7 +120,8 @@ Body（保活）: `{ keepalive:true }` → `{ ok:true }`；只续期该任务的
 
 `POST /api/devices/:id/tasks/:taskId/result`
 Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?}], data?:any }, error?:string, durationMs?:number }`
-→ `{ ok:true, task }`；完成后广播。
+→ `{ ok:true, ignored:false, task }`；正常完成后广播。
+→ `{ ok:true, ignored:true, task, reason? }`：结果被**收敛忽略**（任务已到终态，或结果来自已被重新派发的旧 attempt）。设备端应把 `ignored` 视为“无需重试”，只记日志/指标，不再重发。
 
 `POST /api/devices/:id/unregister` → `{ ok:true }`（标记离线并移除；调试用）
 
@@ -131,7 +136,9 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
   - `schedule`: `{ type:'daily', time:'HH:mm' }`（默认）或 `{ type:'interval', minutes:5..10080 }`；缺省为每天 09:00。
   - 生命周期：`active | paused | stopped | completed`；创建默认 `active`，并按计划计算 `nextCheckAt`。
 - `GET /api/goals/:id` → `{ goal }`
-- `PATCH|PUT /api/goals/:id` body `{ title?, nickname?, description?, schedule?, status? }` → `{ goal }`；`nickname` 传空字符串可清除昵称；恢复为 `active` 时从当前时间重新排期，不补跑错过的检查。
+- `PATCH|PUT /api/goals/:id` body `{ title?, nickname?, description?, schedule?, status?, pausedUntil? }` → `{ goal }`；`nickname` 传空字符串可清除昵称；恢复为 `active` 时从当前时间重新排期，不补跑错过的检查。`pausedUntil` 仅在 `status='paused'` 时有意义：ISO 时间字符串表示到点自动恢复，`null` 表示一直暂停、等你手动恢复（最长 366 天）；暂停中的目标可只传 `pausedUntil` 修改恢复时间，其它状态传该字段返回 400。
+- `POST /api/goals/:id/skip` → `{ goal, hubTime }`：跳过下一次自动跟进（保持 `active`），把 `nextCheckAt` 推进一个计划周期（每天计划顺延到下一次同时刻，间隔计划顺延一个间隔），并清空该目标待确认的 `pendingApproval`；非 `active` 目标返回 409。
+- `POST /api/goals/:id/guidance` body `{ text }` → `{ goal, hubTime }`：给目标追加一条「新的指导指令」（trim 后 1–2000 字，最多保留最近 20 条）；之后每次自动跟进任务都会按时间顺序带上最近 6 条（越靠后越新、优先遵守），已有待确认提案时同步刷新其指令；空文本或超长返回 400。
 - `POST /api/goals/:id/check` → `{ goal, task, hubTime }`：立即创建一次跟进任务（`task.goalId` 指向目标），视为用户已同意执行；该目标已有执行中的跟进任务时返回 409。
 - `POST /api/goals/:id/link` body `{ taskId }` → `{ goal, task, hubTime }`：把已有任务关联到目标（`task.goalId` 指向目标、加入 `goal.taskIds`）。任务已结束时同步写入 `goal.lastCheckAt/lastCheckStatus/lastTaskId/lastSummary` 并追加一条 `checks`（同一任务不会重复追加），下一次跟进任务会带着这段结论继续；关联执行中的任务则登记为 `goal.runningTaskId`。
 - `POST /api/goals/:id/approve` → `{ goal, task, hubTime }`：同意该目标的待确认跟进，立即创建跟进任务并清空 `pendingApproval`；没有待确认提案时返回 409。
@@ -142,6 +149,8 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
 - `DELETE /api/goals/:id` → `{ ok:true }`（已创建的历史任务保留）。
   - Hub 每 `goalTickMs`（默认 30s）扫描到点的 active 目标，先生成一条 `pendingApproval` 提案（不会直接执行）；只有用户批准（`approve`）或手动 `check` 后才创建跟进任务。既有提案未处理时不会重复生成。
   - 目标执行前必须获得用户同意；用户否决后目标暂停（`paused`），不再排期，等用户恢复或给出下一步指令。
+  - 「暂停止」：`skip` 只跳过下一次自动跟进、保持 `active`；`pausedUntil` 表示暂停到指定时间，Hub 调度器每 tick 检查到点自动恢复为 `active` 并重排 `nextCheckAt`（暂停期间手动 `check` 仍可用，但不会自动派发）；不带 `pausedUntil` 的 `paused` 一直等你手动恢复。
+- 「恢复自动跟进」：`paused` 与 `stopped` 的目标都可以通过 `PATCH /api/goals/:id` body `{ status: "active" }` 恢复——清空 `stoppedAt`/`pausedUntil`、从当前时间重新排 `nextCheckAt`、清空待确认提案；`completed` 目标的「重新激活」走同一分支。
   - 跟进任务是普通任务（`goalId` 关联），优先级手动 7 / 定时 4，`timeoutSec=600`、`maxAttempts=2`，消耗一条设备并发槽位。
   - 每晚总结：Hub 每天本地时间 `nightlyReviewTime`（默认 22:00，`BUTLER_NIGHTLY_REVIEW_TIME` 或构造参数可改）自动创建一条总结任务，复盘所有目标、最近 24h 任务与子任务进度，并给出明天工作方向与目标下一步细节；完成后的 Markdown 摘要通过 `nightly.review.updated` 推送并在控制台展示。可用 `BUTLER_NIGHTLY_REVIEW=0` 关闭自动触发（手动接口仍可强制运行）。
 - `GET /api/reminders` → `{ reminders:[Reminder], hubTime }`：按 `dueAt` 升序（相同再按 `createdAt`）。
@@ -159,7 +168,7 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
   - `nickname`: 用户在 Hub 侧给设备起的用途昵称（≤40 字，保存在 Hub 的 state.json）；传空字符串可清除。设备重报 manifest 只更新 `name`，不会覆盖 `nickname`。控制台与任务展示优先用昵称，没有昵称时回退到 `name`。
 - `DELETE /api/devices/:id` → `{ ok:true }`
 - `POST /api/tasks` body `{ instruction, requirements?, priority?, timeoutSec?, maxAttempts? }` → `{ task }`
-  - `requirements`: `{ model?, skills?:[], profile?, gateway?, tags?:[], deviceId? }`，全部可选；`deviceId` 显式指定设备（仍须在线）。
+  - `requirements`: `{ model?, skills?:[], profile?, gateway?, project?, tags?:[], deviceId? }`，全部可选；`deviceId` 显式指定设备（仍须在线）；`project` 为 Hermes 项目归属（项目名或绝对路径，原样下发设备，由 `cli` 执行器解析并登记到 `$HERMES_HOME/projects.db`）。
   - `priority`: 0-9，默认 5；`timeoutSec`: 30-3600，默认 300；`maxAttempts`: 1-3，默认 2。
   - 创建后立即路由；若无匹配设备，任务留在 `queued` 并记录原因，之后设备上线/能力变化时自动重新路由。
 - `GET /api/tasks?status=&deviceId=&limit=100` → `{ tasks:[Task] }`
@@ -233,12 +242,22 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
   "attempts":1, "maxAttempts":2, "timeoutSec":300,
   "output":null, "error":null,
   "goalId":null,
+  "parentTaskId":null, "childTaskIds":[], "isPlan":false,   // 长任务拆分：父任务 isPlan=true 并带子任务 id
+  "planStep":null, "planGroup":null, "planDependsOn":[], "planDependsOnTaskIds":[],  // 子任务的执行计划
+  "plan":null,                                               // 父任务：{strategy,blockerPolicy,groups[]}
   "route":{"reason":"matched 2 candidates; picked dev_ab12cd34 (score 118)",
            "candidates":[{"deviceId":"dev_ab12cd34","score":118,"matched":["skill:office-docx"]}],
            "excluded":[{"deviceId":"dev_z","reason":"missing model:deepseek-chat"}]},
   "events":[{"at":"...","type":"created","message":"任务已创建"}]
 }
 ```
+
+### 执行计划（`isPlan` / `plan*` 字段）
+
+- 规划器可返回 `execution = { strategy: "parallel" | "sequential" | "mixed", groups: [{ name, mode, subtaskIndexes }], blockerPolicy: "stop-and-ask" | "continue" }`，子任务可带 `dependsOn`（0 基、只能指向更早序号）与 `parallelGroup`。
+- Hub 归一化后写入父任务 `plan` 与子任务 `planStep`（1 基）、`planGroup`、`planDependsOn`（0 基序号）、`planDependsOnTaskIds`（落库后的真实任务 id），并随 `state.json` 持久化、经 SSE 广播。
+- 路由闸门：`planDependsOnTaskIds` 未全部 `completed` 时子任务保持 `queued`，`route.reason` 为「等待前置子任务：第 N 步…」；前序失败/超时/取消时 `route.reason` 为「卡点：…」且父任务 `progress.blocked=true`，并追加 `blocked` 事件；`blockerPolicy` 默认 `stop-and-ask`，重试失败子任务或回答等待中的问题后自动放行。
+- 取消子任务会级联取消依赖它的后续排队子任务（`cancelTask` 内部 `skipDependents` 防递归）。
 
 ### Goal（长期目标）
 
@@ -250,6 +269,10 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
   "status":"active",                       // active | paused | stopped | completed
   "schedule":{"type":"daily","time":"09:30"}, // 或 {"type":"interval","minutes":120}
   "requirements":null,
+  "pausedUntil":null,                      // 仅 status='paused'：ISO 到点自动恢复；null=一直暂停
+  "guidance":[                             // 追加式指导指令；之后每次自动跟进都会带上（最多 20 条）
+    {"id":"gd_a1b2c3","text":"优先处理 A 项目，B 项目暂缓","createdAt":"..."}
+  ],
   "nextCheckAt":"2026-11-09T01:30:00.000Z",
   "lastCheckAt":null, "lastCheckStatus":null, "lastSummary":"",
   "lastTaskId":null, "runningTaskId":null,
@@ -288,10 +311,19 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
   "id":"cmd_9f8e", "type":"run_task", "taskId":"task_x1y2z3",
   "createdAt":"...", "payload":{
     "instruction":"...", "requirements":{...}, "priority":5, "timeoutSec":300,
-    "context":{"deviceName":"...", "requestedAt":"..."}
+    "threadId":"thread_...", "replyToTaskId":null, "threadStep":1,
+    "parentTaskId":"task_parent", "context":{
+      "deviceName":"...", "requestedAt":"...", "taskId":"task_x1y2z3",
+      "parentTaskId":"task_parent", "parentInstruction":"主任务目标（截断 4000 字符）",
+      "planStep":2, "planTotal":3, "planTitle":"计划标题",
+      "planSiblings":[{"id":"task_...","step":1,"status":"completed","instruction":"..."}]
+    }
   }
 }
 ```
+
+- 计划子任务的 `parentTaskId` / `context.parentTaskId` 必须指向主任务，`context.parentInstruction` 携带主任务目标，`planStep/planTotal/planTitle/planSiblings` 描述它在计划中的位置与兄弟子任务。设备端据此在 prompt 中拼接「主任务背景」，不能依赖子任务指令里的“这里/该项目”之类指代。
+- 计划子任务不共享父任务的 Hermes 会话：worker 以 `task:<taskId>` 作为会话键（普通任务/继续任务仍按 `threadId`），避免兄弟子任务之间的对话互相污染、越跑越偏。
 
 | type | 说明 |
 | --- | --- |
@@ -302,7 +334,7 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
 
 ## 7. 路由评分（Hub 必须实现，测试可依赖）
 
-1. 过滤：`disabled`、`!online`、`load.running >= limits.maxConcurrentTasks`、缺少所需能力 → 排除并记录原因。
+1. 过滤：`disabled`、`!online`、真实占用 `assigned+running+waiting` 达到 `limits.maxConcurrentTasks`、缺少所需能力 → 排除并记录原因。
 2. 必配（requirements 非空时）：`model` ∈ models[].id（`available!==false`）；`skills` ⊆ skills[].id；`profile` ∈ profiles[].id；`gateway` ∈ gateways[].id；`tags` ⊆ device.tags；`deviceId` 完全相等。
 3. 评分：基础 100；`loadRatio = running/max`；`-20*loadRatio`；指定 `deviceId` +15；匹配到 model.strengths 中含需求关键词 +5；最近心跳更近 +最多 3。
 4. 取最高分；同分取 `lastSeenAt` 更新者。返回 `route.candidates`（前 5）与 `route.excluded`（最多 10）。
@@ -310,7 +342,7 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
 ## 8. 设备代理行为约定
 
 - 启动：读取配置 → 探测能力（DSH profile / Ollama / 配置覆盖）→ 注册（保存 deviceId/deviceToken 到本地状态文件）→ 心跳循环（10s）。
-- 命令：优先通过心跳响应领取；空闲时用长轮询（25s）。收到 `run_task` 先 ack，再按 `maxConcurrentTasks` 并发执行，周期 progress（执行期间额外发送 `keepalive`），最后 result。
+- 命令：优先通过心跳响应领取；空闲时用长轮询（25s）。收到 `run_task` **立即 ack**（含排队场景），再按 `maxConcurrentTasks` 并发执行；同一 `taskId` 在队列/执行中时再次收到派发必须丢弃（按 taskId 去重，而不是只看 command id）。排队上限 `maxQueueSize`（默认 8），超限时丢弃新命令且不 ack，等待 Hub 稍后重投；排队期间发送 `progress({keepalive:true})`。执行期间周期 progress（额外发送 `keepalive`），最后 result。收到 `{ ignored:true }` 的结果响应时不重试。
 - 执行器（可插拔）：`simulate`（默认演示）、`cli`（本机 CLI：Hermes / OpenCode / shell）、`dsh-cli`（命令模板，如 `dsh run --print {instruction}`）、`shell`（命令模板）、`http`（POST 到设备本地服务）、`ollama`（`/api/generate`）、`comfyui`（提交工作流并下载生成图片）、`mika`（调用 Mika CLI 指挥 Android 手机）。
 - 断线：后台指数退避重连（1s→30s）；重启后凭本地状态恢复注册，不重复占号。
 - 超时语义：Hub 的单任务超时是“静默窗口”（默认 `timeoutSec`，设备 keepalive 会续期），设备失联或卡死才会超时；实际执行时长由执行器自身的 `timeoutMs` 约束。设备侧同样以 keepalive 续期看门狗，超时主动 result(ok:false, error:"timeout")。

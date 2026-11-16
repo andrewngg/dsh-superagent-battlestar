@@ -51,13 +51,14 @@
     "cli": {
       "mode": "hermes",
       "workdir": "C:/Users/you/comfyui-worker",
+      "project": "ComfyUI 工作机",
       "timeoutMs": 900000,
       "hermes": {
         "home": "C:/Users/you/AppData/Local/hermes",
         "exe": "C:/Users/you/AppData/Local/hermes/bin/hermes.exe"
       },
       "skills": ["comfyui-workflow"],
-      "promptPrefix": "你是 BattleStar 的 ComfyUI 工作机。必须优先使用 comfyui-workflow skill 调用本机 ComfyUI 完成生成任务；先理解用户对图片/视频的题材、风格、时长、比例和数量要求，选择正确的工作流执行，完成后返回生成文件的绝对路径、工作流名称和 prompt_id。不要只回复计划，不要声称已生成却没有实际调用 ComfyUI。"
+      "promptPrefix": "你是 BattleStar 的 ComfyUI 工作机，本机具备图像/视频生成能力。先判断当前任务类型：如果任务涉及图片/视频生成，必须优先使用 comfyui-workflow skill 调用本机 ComfyUI，先理解题材、风格、时长、比例和数量要求，选择正确的工作流执行，完成后返回生成文件的绝对路径、工作流名称和 prompt_id，不要声称已生成却没有实际调用 ComfyUI；如果任务是日志检索、代码分析、文件整理、打包等非生成类任务，不要调用 ComfyUI，按任务指令直接执行并在结果中说明产物。"
     }
   },
   "discovery": { "dsh": false, "ollama": false, "gateway": false, "skills": false }

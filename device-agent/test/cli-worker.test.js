@@ -117,6 +117,28 @@ test('parseCliArgs：解析设备代理传入的参数', () => {
   assert.equal(args.timeoutMs, 120000);
 });
 
+test('parseCliArgs 与 sessionKeyFor：计划子任务用 taskId 隔离会话', () => {
+  const args = worker.parseCliArgs([
+    '--instruction', 'x',
+    '--thread-id', 'thread_1',
+    '--task-id', 'task_c1',
+    '--parent-task-id', 'task_p',
+  ]);
+  assert.equal(args.threadId, 'thread_1');
+  assert.equal(args.taskId, 'task_c1');
+  assert.equal(args.parentTaskId, 'task_p');
+  assert.equal(worker.sessionKeyFor(args), 'task:task_c1');
+
+  assert.equal(worker.sessionKeyFor({ threadId: 'thread_1' }), 'thread_1');
+  assert.equal(worker.sessionKeyFor({ threadId: 'thread_1', taskId: 'task_c1' }), 'thread_1');
+  assert.equal(worker.sessionKeyFor({}), '');
+  // 同一主任务的不同子任务必须使用不同会话，避免上一子任务的对话污染下一子任务。
+  assert.notEqual(
+    worker.sessionKeyFor({ threadId: 't', taskId: 'c1', parentTaskId: 'p' }),
+    worker.sessionKeyFor({ threadId: 't', taskId: 'c2', parentTaskId: 'p' }),
+  );
+});
+
 test('hermesProfileHome：hermes-<profile> 映射到 profiles 目录', () => {
   const fs = require('node:fs');
   const os = require('node:os');
@@ -178,6 +200,7 @@ test('buildHermesStreamArgs：用 chat 子命令 + stream-json 实时事件流',
   assert.deepEqual(args, [
     'chat', '-q', '调研竞品',
     '--format', 'stream-json',
+    '--source', 'cli',
     '--yolo',
     '-m', 'deepseek-chat',
     '--provider', 'deepseek',
@@ -186,7 +209,20 @@ test('buildHermesStreamArgs：用 chat 子命令 + stream-json 实时事件流',
     '--in', 'C:\\work',
   ]);
   const minimal = worker.buildHermesStreamArgs({ instruction: 'hi' });
-  assert.deepEqual(minimal, ['chat', '-q', 'hi', '--format', 'stream-json', '--yolo']);
+  assert.deepEqual(minimal, ['chat', '-q', 'hi', '--format', 'stream-json', '--source', 'cli', '--yolo']);
+  const custom = worker.buildHermesStreamArgs({ instruction: 'hi', source: 'tool' });
+  assert.equal(custom[custom.indexOf('--source') + 1], 'tool');
+});
+
+test('parseCliArgs：解析项目归属参数', () => {
+  const args = worker.parseCliArgs([
+    '--instruction', '跑一下', '--project', 'ComfyUI 工作机', '--project-folder', 'C:\\work',
+  ]);
+  assert.equal(args.project, 'ComfyUI 工作机');
+  assert.equal(args.projectFolder, 'C:\\work');
+  const none = worker.parseCliArgs(['--instruction', 'hi']);
+  assert.equal(none.project, '');
+  assert.equal(none.projectFolder, '');
 });
 
 test('parseCliArgs：stream-progress 默认开启，可用 --no-stream-progress 关闭', () => {

@@ -54,7 +54,7 @@ import java.util.Locale;
 public class MainActivity extends Activity {
 
     private static final String TAG = "SuperButler";
-    private static final String APP_VERSION = "0.1.3";
+    private static final String APP_VERSION = "0.1.4";
     private static final String SETUP_URL = "file:///android_asset/setup.html";
     private static final String ERROR_BASE = "file:///android_asset/error.html";
     private static final String ASSET_BASE = "file:///android_asset/";
@@ -82,6 +82,64 @@ public class MainActivity extends Activity {
                     + "}catch(e){return 'error';}})()";
     private static final int TASK_FILTER_RETRY_MAX = 8;
     private static final long TASK_FILTER_RETRY_MS = 400L;
+
+    /**
+     * APK 兜底：让「N 个失败任务可重试」提示与「失败」筛选里实际可见的卡片数量一致。
+     *
+     * <p>Web 控制台的提示按 state.tasks 里所有失败任务计数，但「失败」列表只渲染根任务
+     * （子任务/后续步骤属于父任务卡片），因此可能出现“提示说 N 个、点进去却没有”或数量偏多。
+     * 这里在页面里监听（包裹）控制台自己的 /api/snapshot 响应，用与列表相同的根任务/线程分组
+     * 规则重算；若失败卡片为 0 就把提示隐藏并清空，否则只校正提示开头的数字。
+     * 只改 APK 内的 WebView，桌面浏览器不受影响。</p>
+     */
+    private static final String TASK_HINT_FIX_JS = String.join("\n",
+            "(function(){try{",
+            "if(window.__butlerHintFix)return 'already';",
+            "window.__butlerHintFix='installed';",
+            "var cache=null;",
+            "var origFetch=window.fetch;",
+            "if(typeof origFetch==='function'){",
+            "window.fetch=function(){",
+            "var url='';",
+            "try{url=String(arguments[0]&&arguments[0].url?arguments[0].url:arguments[0]);}catch(e){}",
+            "var p=origFetch.apply(this,arguments);",
+            "if(url.indexOf('/api/snapshot')>=0){",
+            "try{p.then(function(r){",
+            "try{r.clone().json().then(function(d){if(d&&Array.isArray(d.tasks))cache=d.tasks;}).catch(function(){});}catch(e2){}",
+            "}).catch(function(){});}catch(e3){}",
+            "}",
+            "return p;",
+            "};",
+            "}",
+            "var RETRY={failed:1,timeout:1,cancelled:1};",
+            "function hitStatus(t){return !!RETRY[String((t&&t.status)||'').toLowerCase()];}",
+            "function failedRoots(tasks){",
+            "var roots=[];",
+            "for(var i=0;i<tasks.length;i++){var t=tasks[i];if(t&&!t.parentTaskId&&!t.replyToTaskId)roots.push(t);}",
+            "var n=0;",
+            "for(var a=0;a<roots.length;a++){",
+            "var key=roots[a].threadId||roots[a].id;",
+            "var hit=false;",
+            "for(var j=0;j<tasks.length;j++){var t2=tasks[j];if(t2&&((t2.threadId||t2.id)===key)&&!t2.archived&&hitStatus(t2)){hit=true;break;}}",
+            "if(hit)n++;",
+            "}",
+            "return n;",
+            "}",
+            "function apply(){",
+            "var host=document.getElementById('task-recovery-hint');",
+            "if(!host||host.hidden||!Array.isArray(cache))return;",
+            "var n=failedRoots(cache);",
+            "if(n<=0){host.hidden=true;try{host.replaceChildren();}catch(e){while(host.firstChild)host.removeChild(host.firstChild);}return;}",
+            "var t=host.querySelector('.recovery-hint-text');",
+            "if(!t)return;",
+            "var s=String(t.textContent||'');",
+            "if(/^\\d+/.test(s)){var next=s.replace(/^\\d+/,String(n));if(next!==s)t.textContent=next;}",
+            "}",
+            "setInterval(apply,1200);",
+            "setTimeout(apply,600);",
+            "apply();",
+            "return 'installed';",
+            "}catch(e){return 'error';}})()");
 
     private static final int BRAND_BG = Color.parseColor("#141026");
     private static final int BRAND_DARK = Color.parseColor("#0B0818");
@@ -219,6 +277,28 @@ public class MainActivity extends Activity {
             });
         } catch (Exception e) {
             Log.w(TAG, "apply default task filter failed", e);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 任务页：失败提示数量与「失败」列表对齐（APK 专属兜底）
+    // ------------------------------------------------------------------
+
+    /** 在受信 Hub 页面上安装失败提示校正脚本（幂等，重复加载仅安装一次）。 */
+    private void applyTaskHintFix() {
+        final WebView view = webView;
+        if (view == null || showingError) return;
+        String url;
+        try {
+            url = view.getUrl();
+        } catch (Exception e) {
+            return;
+        }
+        if (url == null || url.startsWith(ASSET_BASE) || !isTrustedUrl(url)) return;
+        try {
+            view.evaluateJavascript(TASK_HINT_FIX_JS, null);
+        } catch (Exception e) {
+            Log.w(TAG, "apply task hint fix failed", e);
         }
     }
 
@@ -551,6 +631,7 @@ public class MainActivity extends Activity {
             if (!showingError && url != null && !url.startsWith(ASSET_BASE)) {
                 applyPendingOpenTab();
                 applyTaskFilterDefault();
+                applyTaskHintFix();
             }
         }
 

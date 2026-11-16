@@ -105,7 +105,8 @@ test('Agnes 规划：用户显式 deviceId 优先于规划器指派', async (t) 
       ],
     }),
   });
-  const preferred = await registerDevice(env, makeManifest({ name: '指定设备', tags: [] }));
+  // 单并发设备上第二个子任务会排队，给 2 个槽位以便同时验证两个子任务的指派。
+  const preferred = await registerDevice(env, makeManifest({ name: '指定设备', tags: [], limits: { maxConcurrentTasks: 2 } }));
   const other = await registerDevice(env, makeManifest({ name: '另一台', tags: [] }));
   plannedDeviceId = other.deviceId;
 

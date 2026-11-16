@@ -731,6 +731,12 @@ function createCliExecutor(options = {}) {
   const extraEnv = isPlainObject(cfg.env) ? cfg.env : {};
   const label = '本机 CLI';
   const streamProgress = cfg.streamProgress !== false;
+  // 项目归属：任务级 requirements.project > 设备配置 cli.project/projectName > 设备名兜底。
+  // 设备级项目用工作目录作为项目文件夹（保持不变、零迁移）；任务级项目名由 worker 解析。
+  const deviceName = nonEmptyString(options.deviceName) ? options.deviceName.trim() : '';
+  const configProject = nonEmptyString(cfg.project)
+    ? cfg.project.trim()
+    : (nonEmptyString(cfg.projectName) ? cfg.projectName.trim() : '');
 
   return {
     async run(ctx = {}) {
@@ -752,9 +758,19 @@ function createCliExecutor(options = {}) {
       ];
       if (allowShell) args.push('--allow-shell');
       if (fallbackToHermes) args.push('--fallback-hermes');
+      const requestedProject = nonEmptyString(requirements.project) ? requirements.project.trim() : '';
+      const project = requestedProject || configProject || deviceName;
+      if (project) {
+        args.push('--project', String(project));
+        // 设备默认项目沿用工作目录，避免改变任务产出位置；任务显式指定的项目由 worker 解析。
+        if (!requestedProject && workdir) args.push('--project-folder', workdir);
+      }
       if (requirements.profile) args.push('--profile', String(requirements.profile));
       if (requirements.model) args.push('--model', String(requirements.model));
       if (task.threadId) args.push('--thread-id', String(task.threadId));
+      // 计划子任务用 taskId 作为独立会话键，避免多个子任务共用父任务 Hermes session 相互污染。
+      if (task.id) args.push('--task-id', String(task.id));
+      if (task.parentTaskId) args.push('--parent-task-id', String(task.parentTaskId));
       if (nonEmptyString(opencode.model)) args.push('--opencode-model', opencode.model);
       const skillList = Array.isArray(cfg.skills)
         ? cfg.skills.map((x) => nonEmptyString(x)).filter(Boolean).join(',')
@@ -1625,6 +1641,7 @@ function createExecutor(options = {}) {
     stateDir: options.stateDir,
     hubUrl: options.hubUrl,
     log: options.log,
+    deviceName: options.deviceName,
   };
 
   const implementations = {

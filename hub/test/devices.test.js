@@ -186,7 +186,8 @@ test('POST /api/devices/:id/manifest 需要设备令牌，能力变化自动重�
 
 test('命令长轮询：已有命令立即返回，空队列等待后返回空数组，挂起时可被新命令唤醒', async (t) => {
   const env = await startTestHub(t);
-  const device = await registerDevice(env, makeManifest());
+  // 两个任务会同时派发（长轮询测试不讨论并发排队），给 2 个槽位。
+  const device = await registerDevice(env, makeManifest({ limits: { maxConcurrentTasks: 2 } }));
 
   const task1 = await createTask(env, {
     instruction: '任务一',
@@ -289,7 +290,8 @@ test('PATCH / DELETE / unregister 设备', async (t) => {
 
 test('设备昵称：可设置/清除、超长拒绝、设备重报 manifest 不覆盖、任务展示名用昵称', async (t) => {
   const env = await startTestHub(t);
-  const device = await registerDevice(env, makeManifest({ name: '自报机器名' }));
+  // 前后两个任务都要同时派发以检查展示名，给 2 个槽位。
+  const device = await registerDevice(env, makeManifest({ name: '自报机器名', limits: { maxConcurrentTasks: 2 } }));
 
   const named = await request(env.base, 'PATCH', `/api/devices/${device.deviceId}`, {
     headers: adminHeaders(env),
@@ -307,9 +309,10 @@ test('设备昵称：可设置/清除、超长拒绝、设备重报 manifest 不
   assert.equal(tooLong.status, 400);
 
   // 设备重新上报 manifest（带新 name）不应覆盖用户设置的昵称
+  // 注意：manifest 全量重报会把 limits 一并覆盖，这里保持 2 个槽位供后续两个任务同时派发。
   const updated = await request(env.base, 'POST', `/api/devices/${device.deviceId}/manifest`, {
     headers: deviceHeaders(device),
-    body: makeManifest({ name: '改名后的自报机器名' }),
+    body: makeManifest({ name: '改名后的自报机器名', limits: { maxConcurrentTasks: 2 } }),
   });
   assert.equal(updated.status, 200);
   assert.equal(updated.json.device.name, '改名后的自报机器名');

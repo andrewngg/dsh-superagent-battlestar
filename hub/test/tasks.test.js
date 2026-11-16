@@ -447,8 +447,9 @@ test('failed 任务可 retry，retry 后 attempts 重置并重新派发', async 
 
 test('设备离线：assigned/running 任务在 maxAttempts 内重派其他设备，否则 failed', async (t) => {
   const env = await startTestHub(t);
-  const deviceA = await registerDevice(env, makeManifest({ name: 'A 设备' }));
-  const deviceB = await registerDevice(env, makeManifest({ name: 'B 设备' }));
+  // 离线重派用例里会同时有多个任务占用设备，给 2 个槽位，避免被并发排队干扰。
+  const deviceA = await registerDevice(env, makeManifest({ name: 'A 设备', limits: { maxConcurrentTasks: 2 } }));
+  const deviceB = await registerDevice(env, makeManifest({ name: 'B 设备', limits: { maxConcurrentTasks: 2 } }));
 
   // 先让 B 离线，确保任务落到 A
   env.hub.markDeviceOffline(env.hub.getDevice(deviceB.deviceId), 'test offline');
@@ -501,7 +502,8 @@ test('设备离线：assigned/running 任务在 maxAttempts 内重派其他设�
 
 test('任务参数校验、列表过滤与 404', async (t) => {
   const env = await startTestHub(t);
-  const device = await registerDevice(env, makeManifest());
+  // 用例要求两个任务同时处于 assigned，给 2 个槽位。
+  const device = await registerDevice(env, makeManifest({ limits: { maxConcurrentTasks: 2 } }));
 
   const missingInstruction = await request(env.base, 'POST', '/api/tasks', {
     headers: adminHeaders(env),

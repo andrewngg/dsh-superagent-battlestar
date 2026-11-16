@@ -26,6 +26,7 @@ const fsp = fs.promises;
 const os = require('node:os');
 const path = require('node:path');
 const { spawn, execFileSync } = require('node:child_process');
+const { ensureProject } = require('./lib/hermes-projects');
 
 const ANSI_RE = /\x1b\[[0-9;?]*[A-Za-z]/g;
 const CODE_RE = /(写代码|代码|脚本|实现|重构|修复|函数|类|接口|测试|编译|部署|html|css|javascript|typescript|python|node|api|\bbug\b|\bcode\b|\bfix\b|\bscript\b|\bbuild\b|\brefactor\b|\btest\b)/i;
@@ -188,9 +189,15 @@ function buildHermesArgs({ instruction, model = '', provider = '', skills = '', 
 /**
  * `hermes chat -q … --format stream-json`：stdout 每行一个 JSON 事件（system/text/tool_use/
  * tool_result/result），可以实时看到 Agent 正在调用哪些工具、派发了哪些子任务。
+ *
+ * 显式 `--source cli`：Hermes 默认把有限次运行记成 source='oneshot'（在 TUI/Desktop
+ * 会话列表里被隐藏）；加上该参数后会话会出现在 Hermes agent 的会话记录里，
+ * 并按 cwd 归入对应项目（见 lib/hermes-projects.js）。
  */
-function buildHermesStreamArgs({ instruction, model = '', provider = '', skills = '', sessionId = '', workdir = '' }) {
-  const args = ['chat', '-q', String(instruction || ''), '--format', 'stream-json', '--yolo'];
+function buildHermesStreamArgs({ instruction, model = '', provider = '', skills = '', sessionId = '', workdir = '', source = 'cli' }) {
+  const args = ['chat', '-q', String(instruction || ''), '--format', 'stream-json'];
+  if (source) args.push('--source', source);
+  args.push('--yolo');
   if (model) args.push('-m', model);
   if (provider) args.push('--provider', provider);
   if (skills) args.push('--skills', skills);
@@ -419,6 +426,18 @@ function composePrompt(prefix, instruction) {
   return head ? `${head}\n\n用户任务：\n${body}` : body;
 }
 
+/**
+ * Hermes 会话键：普通任务/继续任务按 threadId 复用会话；
+ * 计划子任务不共享父任务会话（否则兄弟子任务的对话会互相污染、越跑越偏），
+ * 改为按 taskId 隔离，只允许该子任务自己的重试/恢复复用。
+ */
+function sessionKeyFor(ctx = {}) {
+  const taskId = nonEmptyString(ctx.taskId);
+  const parentTaskId = nonEmptyString(ctx.parentTaskId);
+  if (parentTaskId && taskId) return `task:${taskId}`;
+  return nonEmptyString(ctx.threadId);
+}
+
 /** 根据模型名/显式映射选择 Hermes provider，避免把 Agnes 模型发给 DeepSeek。 */
 function providerForModel(model, modelProviders = {}) {
   const name = nonEmptyString(model);
@@ -492,6 +511,10 @@ function parseCliArgs(argv) {
     json: true,
     modelProviders: {},
     streamProgress: DEFAULTS.streamProgress,
+    project: '',
+    projectFolder: '',
+    taskId: '',
+    parentTaskId: '',
   };
   const take = (index, key) => {
     if (!argv[index + 1]) throw new Error(`${key} 缺少值`);
@@ -540,8 +563,20 @@ function parseCliArgs(argv) {
         out.taskId = value();
         if (inline === undefined) i += 1;
         break;
+      case '--parent-task-id':
+        out.parentTaskId = value();
+        if (inline === undefined) i += 1;
+        break;
       case '--workdir':
         out.workdir = value();
+        if (inline === undefined) i += 1;
+        break;
+      case '--project':
+        out.project = value();
+        if (inline === undefined) i += 1;
+        break;
+      case '--project-folder':
+        out.projectFolder = value();
         if (inline === undefined) i += 1;
         break;
       case '--timeout-ms':
@@ -697,22 +732,24 @@ async function runHermesLegacy(ctx) {
   const exe = ctx.hermesExe;
   const profileHome = hermesProfileHome(home, ctx.profile);
   const sessionMap = readSessionMap();
-  const sessionId = ctx.threadId ? sessionMap[ctx.threadId] || '' : '';
+  const sessionKey = sessionKeyFor(ctx);
+  const sessionId = sessionKey ? sessionMap[sessionKey] || '' : '';
   const env = baseEnv({ HERMES_HOME: profileHome, HERMES_PROFILE: ctx.profile || '' });
-  const beforeSessions = ctx.threadId ? listHermesSessionIds(exe, env, ctx.workdir) : new Set();
+  const targetDir = ctx.projectDir || ctx.workdir;
+  const beforeSessions = sessionKey ? listHermesSessionIds(exe, env, targetDir) : new Set();
   const buildArgs = (resumeId) => buildHermesArgs({
     instruction: composePrompt(ctx.promptPrefix, ctx.instruction),
     model: ctx.model || '',
     provider: ctx.provider || '',
     skills: ctx.skills || '',
     sessionId: resumeId,
-    workdir: ctx.workdir,
+    workdir: targetDir,
     yolo: ctx.yolo !== false,
   });
   const run = (resumeId) => runProcess({
     exe,
     args: buildArgs(resumeId),
-    cwd: ctx.workdir,
+    cwd: targetDir,
     env,
     timeoutMs: ctx.timeoutMs,
     label: 'Hermes CLI',
@@ -722,11 +759,11 @@ async function runHermesLegacy(ctx) {
   if (sessionId && res.code !== 0) res = await run('');
   const text = res.stdout.trim() || res.stderr.trim();
   const foundSession = extractHermesSessionId(`${res.stdout}\n${res.stderr}`);
-  if (foundSession && ctx.threadId) saveSessionId(ctx.threadId, foundSession);
-  if (!foundSession && ctx.threadId) {
-    const afterSessions = listHermesSessionIds(exe, env, ctx.workdir);
+  if (foundSession && sessionKey) saveSessionId(sessionKey, foundSession);
+  if (!foundSession && sessionKey) {
+    const afterSessions = listHermesSessionIds(exe, env, targetDir);
     const created = [...afterSessions].find((id) => !beforeSessions.has(id));
-    if (created) saveSessionId(ctx.threadId, created);
+    if (created) saveSessionId(sessionKey, created);
   }
   if (res.code !== 0) {
     throw new Error(describeHermesExit(res.code, text, home));
@@ -753,20 +790,21 @@ function runHermesStreamAttempt(ctx, resumeId) {
     HERMES_HOME: hermesProfileHome(ctx.hermesHome, ctx.profile),
     HERMES_PROFILE: ctx.profile || '',
   });
+  const targetDir = ctx.projectDir || ctx.workdir;
   const args = buildHermesStreamArgs({
     instruction: composePrompt(ctx.promptPrefix, ctx.instruction),
     model: ctx.model || '',
     provider: ctx.provider || '',
     skills: ctx.skills || '',
     sessionId: resumeId,
-    workdir: ctx.workdir,
+    workdir: targetDir,
   });
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
     let child;
     try {
       child = spawn(ctx.hermesExe, args, {
-        cwd: ctx.workdir,
+        cwd: targetDir,
         env,
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
@@ -847,8 +885,10 @@ async function runHermesStream(ctx) {
     HERMES_PROFILE: ctx.profile || '',
   });
   const sessionMap = readSessionMap();
-  const desiredSession = ctx.threadId ? sessionMap[ctx.threadId] || '' : '';
-  const beforeSessions = ctx.threadId ? listHermesSessionIds(exe, env, ctx.workdir) : new Set();
+  const sessionKey = sessionKeyFor(ctx);
+  const desiredSession = sessionKey ? sessionMap[sessionKey] || '' : '';
+  const targetDir = ctx.projectDir || ctx.workdir;
+  const beforeSessions = sessionKey ? listHermesSessionIds(exe, env, targetDir) : new Set();
 
   let res = await runHermesStreamAttempt(ctx, desiredSession);
   if (desiredSession && !res.sawResult && res.code !== 0) {
@@ -860,11 +900,11 @@ async function runHermesStream(ctx) {
   const effectiveCode = res.sawResult && Number.isFinite(res.exitCode) ? res.exitCode : res.code;
   const foundSession = res.sessionId
     || extractHermesSessionId(`${res.text || ''}\n${res.stderr || ''}`);
-  if (foundSession && ctx.threadId) saveSessionId(ctx.threadId, foundSession);
-  if (!foundSession && ctx.threadId) {
-    const afterSessions = listHermesSessionIds(exe, env, ctx.workdir);
+  if (foundSession && sessionKey) saveSessionId(sessionKey, foundSession);
+  if (!foundSession && sessionKey) {
+    const afterSessions = listHermesSessionIds(exe, env, targetDir);
     const created = [...afterSessions].find((id) => !beforeSessions.has(id));
-    if (created) saveSessionId(ctx.threadId, created);
+    if (created) saveSessionId(sessionKey, created);
   }
   if (effectiveCode !== 0 && !res.sawResult) {
     const err = new Error(describeHermesExit(res.code, text, home));
@@ -970,6 +1010,30 @@ async function runTask(options) {
     ? Math.min(Math.max(options.timeoutMs, 5000), 60 * 60 * 1000)
     : DEFAULTS.timeoutMs;
   const hermesHome = nonEmptyString(options.hermesHome) || defaultHermesHome();
+  // 项目归属：把任务会话记到 Hermes 的对应项目里（项目名或绝对路径）。
+  // 解析/写库失败不影响任务本身，只在输出里带 reason 便于排查。
+  let projectInfo = null;
+  if (nonEmptyString(options.project)) {
+    try {
+      projectInfo = ensureProject({
+        home: hermesProfileHome(hermesHome, nonEmptyString(options.profile)),
+        workdir,
+        project: options.project,
+        folder: options.projectFolder,
+      });
+    } catch (err) {
+      projectInfo = {
+        ok: false,
+        dir: '',
+        name: String(options.project).slice(0, 120),
+        slug: '',
+        projectId: null,
+        created: false,
+        reason: err && err.message ? err.message : String(err),
+      };
+    }
+  }
+  const projectDir = projectInfo && projectInfo.ok ? projectInfo.dir : '';
   const ctx = {
     instruction,
     profile: nonEmptyString(options.profile),
@@ -977,8 +1041,12 @@ async function runTask(options) {
     skills: nonEmptyString(options.skills),
     promptPrefix: nonEmptyString(options.promptPrefix),
     threadId: nonEmptyString(options.threadId),
+    taskId: nonEmptyString(options.taskId),
+    parentTaskId: nonEmptyString(options.parentTaskId),
     provider: nonEmptyString(options.provider) || providerForModel(options.model, options.modelProviders),
     workdir,
+    projectDir,
+    project: projectInfo,
     timeoutMs,
     hermesHome,
     hermesExe: nonEmptyString(options.hermesExe) || defaultHermesExe(hermesHome),
@@ -996,18 +1064,18 @@ async function runTask(options) {
   });
 
   if (backend === 'shell') {
-    return { ...(await runShell(ctx)), profile: ctx.profile, fallbackFrom: null };
+    return { ...(await runShell(ctx)), profile: ctx.profile, fallbackFrom: null, project: ctx.project };
   }
   if (backend === 'opencode') {
     try {
-      return { ...(await runOpencode(ctx)), profile: ctx.profile, fallbackFrom: null };
+      return { ...(await runOpencode(ctx)), profile: ctx.profile, fallbackFrom: null, project: ctx.project };
     } catch (err) {
       if (!options.fallbackHermes) throw err;
       const result = await runHermes(ctx);
-      return { ...result, profile: ctx.profile, fallbackFrom: 'opencode', fallbackReason: truncate(err.message, 300) };
+      return { ...result, profile: ctx.profile, fallbackFrom: 'opencode', fallbackReason: truncate(err.message, 300), project: ctx.project };
     }
   }
-  return { ...(await runHermes(ctx)), profile: ctx.profile, fallbackFrom: null };
+  return { ...(await runHermes(ctx)), profile: ctx.profile, fallbackFrom: null, project: ctx.project };
 }
 
 async function main(argv) {
@@ -1016,7 +1084,9 @@ async function main(argv) {
     process.stdout.write(
       '用法：node cli-worker.js --instruction <指令> [--mode auto|hermes|opencode|shell] '
       + '[--profile <profile>] [--model <model>] [--skills <skills>] [--prompt-prefix <text>] '
-      + '[--workdir <dir>] [--allow-shell] [--fallback-hermes] [--no-stream-progress]\n',
+      + '[--workdir <dir>] [--project <项目名|目录>] [--project-folder <dir>] '
+      + '[--thread-id <id>] [--task-id <id>] [--parent-task-id <id>] '
+      + '[--allow-shell] [--fallback-hermes] [--no-stream-progress]\n',
     );
     return 0;
   }
@@ -1036,6 +1106,8 @@ async function main(argv) {
   options.hermesExe = process.env.BUTLER_CLI_HERMES_EXE || options.hermesExe;
   options.opencodeExe = process.env.BUTLER_CLI_OPENCODE_EXE || options.opencodeExe;
   options.progressFile = process.env.BUTLER_CLI_PROGRESS_FILE || options.progressFile;
+  options.project = process.env.BUTLER_CLI_PROJECT || options.project;
+  options.projectFolder = process.env.BUTLER_CLI_PROJECT_FOLDER || options.projectFolder;
   if (process.env.BUTLER_CLI_STREAM_PROGRESS === '0') options.streamProgress = false;
 
   // 实时执行步骤写进度文件（魔法前缀行），由 executors.js 轮询解析后转成 Hub 进度。
@@ -1071,6 +1143,7 @@ async function main(argv) {
       commandPreview: result.commandPreview,
       fallbackFrom: result.fallbackFrom || null,
       fallbackReason: result.fallbackReason || null,
+      project: result.project || null,
       at: new Date().toISOString(),
     };
     process.stdout.write(`${JSON.stringify(payload)}\n`);
@@ -1106,6 +1179,7 @@ module.exports = {
   buildHermesStreamArgs,
   providerForModel,
   composePrompt,
+  sessionKeyFor,
   buildOpencodeArgs,
   extractOpencodeText,
   stripAnsi,

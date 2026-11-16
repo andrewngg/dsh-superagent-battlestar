@@ -262,6 +262,7 @@ function buildTaskRecordMarkdown(task, options = {}) {
     lines.push(`- 消息：${progress.message || '—'}`);
     lines.push(`- 百分比：${Number.isFinite(progress.percent) ? `${progress.percent}%` : '—'}`);
     lines.push(`- 等待回答：${progress.waiting ? '是' : '否'}${progress.question ? `（${cell(progress.question, 200)}）` : ''}`);
+    lines.push(`- 卡点暂停：${progress.blocked ? '是' : '否'}`);
     lines.push(`- 时间：${fmtAt(progress.at)}`);
     lines.push('');
   }
@@ -303,14 +304,39 @@ function buildTaskRecordMarkdown(task, options = {}) {
     lines.push('');
   }
 
+  const plan = task.plan && typeof task.plan === 'object' ? task.plan : null;
+  if (plan) {
+    const strategyLabel = { parallel: '并行执行', sequential: '按顺序执行', mixed: '并行 + 顺序依赖' }[plan.strategy] || plan.strategy || '—';
+    lines.push('## 执行计划');
+    lines.push('');
+    lines.push(`- 执行方式：${strategyLabel}`);
+    lines.push(`- 卡点处理：${plan.blockerPolicy === 'continue' ? '自动继续' : '失败/等待时暂停，等用户确认'}`);
+    const groups = Array.isArray(plan.groups) ? plan.groups : [];
+    if (groups.length) {
+      lines.push('- 分组：');
+      for (const group of groups) {
+        const steps = (group.subtaskIndexes || []).map((index) => `第 ${index + 1} 步`).join('、') || '—';
+        lines.push(`  - ${group.name || '并行组'}（${group.mode === 'sequential' ? '顺序' : '并行'}）：${steps}`);
+      }
+    }
+    lines.push('');
+  }
+
   if (children.length) {
     lines.push(`## 子任务（${children.length}）`);
     lines.push('');
-    lines.push('| 子任务 | 状态 | 耗时 | 错误 | 记录 |');
-    lines.push('| --- | --- | --- | --- | --- |');
+    lines.push('| 步骤 | 子任务 | 状态 | 并行组 | 依赖 | 耗时 | 错误 | 记录 |');
+    lines.push('| --- | --- | --- | --- | --- | --- | --- | --- |');
     for (const child of children) {
+      const step = child.planStep ? `第 ${child.planStep} 步` : '—';
+      const group = child.planGroup ? cell(child.planGroup, 40) : '—';
+      const deps = Array.isArray(child.planDependsOn) && child.planDependsOn.length
+        ? child.planDependsOn.map((index) => `第 ${index + 1} 步`).join('、')
+        : Array.isArray(child.planDependsOnTaskIds) && child.planDependsOnTaskIds.length
+          ? child.planDependsOnTaskIds.map((id) => `\`${id}\``).join('、')
+          : '—';
       lines.push(
-        `| \`${child.id}\` | ${fmtStatus(child.status)} | ${fmtDuration(taskDurationMs(child))} | ${cell(child.error || '—', 120)} | [${child.id}](${relativeLink(task, child)}) |`,
+        `| ${step} | \`${child.id}\` | ${fmtStatus(child.status)} | ${group} | ${deps} | ${fmtDuration(taskDurationMs(child))} | ${cell(child.error || '—', 120)} | [${child.id}](${relativeLink(task, child)}) |`,
       );
     }
     lines.push('');

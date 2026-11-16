@@ -303,6 +303,7 @@ function normalizeRequirements(input) {
     skills: uniqBy(arr(src.skills).map((s) => str(s, 80)).filter(Boolean), (s) => s),
     profile: str(src.profile, 80) || null,
     gateway: str(src.gateway, 80) || null,
+    project: str(src.project, 120) || null,
     tags: uniqBy(arr(src.tags).map((t) => str(t, 40)).filter(Boolean), (t) => t),
     deviceId: str(src.deviceId, 80) || null,
     hint: uniqBy(arr(src.hint).map((h) => str(h, 40)).filter(Boolean), (h) => h),

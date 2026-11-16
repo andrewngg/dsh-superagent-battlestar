@@ -5,13 +5,14 @@
 
 - 包名：`com.superbutler.app`
 - 名称：**BattleStar**
-- 版本：`versionCode 4` / `versionName 0.1.3`
+- 版本：`versionCode 5` / `versionName 0.1.4`
 - minSdk **26**（Android 8.0）/ targetSdk **36**
-- 产物：`dist/BattleStar-0.1.3.apk`（约 **0.12 MB**，远低于 5 MB 目标）
+- 产物：`dist/BattleStar-0.1.4.apk`（约 **0.12 MB**，远低于 5 MB 目标）
 - 自动发现：扫描当前 Wi-Fi `/24` 的 7317 端口，找到 Hub 后只填令牌
 - 任务通知：通知栏进度条、完成/失败提醒；设置中可开启**常驻通知**，空闲时显示在线/待命主机数
 - 提醒通知：原生 `AlarmManager` 精确/非精确闹钟 + `BroadcastReceiver`，App 被杀后仍能到点弹通知并回写 Hub
 - 任务页默认筛选：打开「任务」时默认选中「进行中」（APK 与浏览器控制台一致；用户仍可手动切到其它筛选）
+- 失败提示校正：任务页「N 个失败任务可重试」按「失败」列表实际可见的根任务重算；没有可重试失败任务时自动隐藏（仅 APK）。
 
 ---
 
@@ -39,7 +40,7 @@ android/
 └─ build/                       # 中间产物（可删除，构建时重建）
 
 dist/
-├─ BattleStar-0.1.3.apk        # 可安装 APK
+├─ BattleStar-0.1.4.apk        # 可安装 APK
 └─ icon-512.png                 # 512×512 商店/展示图
 ```
 
@@ -115,7 +116,7 @@ JDK          : ...\super-butler\toolchain\jdk
 Build-Tools  : ...\super-butler\toolchain\android-sdk\build-tools\36.0.0
 Platform JAR : ...\super-butler\toolchain\android-sdk\platforms\android-36\android.jar
 
-package: name='com.superbutler.app' versionCode='4' versionName='0.1.3' ... compileSdkVersion='36'
+package: name='com.superbutler.app' versionCode='5' versionName='0.1.4' ... compileSdkVersion='36'
 minSdkVersion:'26'
 targetSdkVersion:'36'
 uses-permission: name='android.permission.INTERNET'
@@ -130,11 +131,11 @@ launchable-activity: name='com.superbutler.app.MainActivity'  label='BattleStar'
 Signer #1 certificate DN: CN=Super Butler, OU=Home Lab, O=Super Butler, L=KL, C=MY
 Signer #1 certificate SHA-256 digest: 45658ac253be038ab8dc6da60a99743afc7a3a5ac9c6b04d9f498cb7f914bb5a
 
-APK : dist\BattleStar-0.1.3.apk
-大小: 127923 bytes (0.12 MB)    # 上限目标 5 MB
+APK : dist\BattleStar-0.1.4.apk
+大小: 127926 bytes (0.12 MB)    # 上限目标 5 MB
 ```
 
-APK 关键条目（`jar tf dist/BattleStar-0.1.3.apk`）：
+APK 关键条目（`jar tf dist/BattleStar-0.1.4.apk`）：
 
 ```
 AndroidManifest.xml
@@ -155,22 +156,22 @@ Verified using v2 scheme (APK Signature Scheme v2): true
 Verified using v3 scheme (APK Signature Scheme v3): true
 ```
 
-对齐校验：`zipalign -c -v 4 dist\BattleStar-0.1.3.apk` → `Verification successful`。
+对齐校验：`zipalign -c -v 4 dist\BattleStar-0.1.4.apk` → `Verification successful`。
 
 > 每次重新构建 APK 的 SHA-256 可能不同（zip 时间戳/签名块），以 `build-apk.ps1` 末尾打印的值为准。
 >
-> 清单校验：`aapt2 dump xmltree --file AndroidManifest.xml dist\BattleStar-0.1.3.apk` 中可见
+> 清单校验：`aapt2 dump xmltree --file AndroidManifest.xml dist\BattleStar-0.1.4.apk` 中可见
 > `.ReminderReceiver` 与 `.BootReceiver` 均声明为 `exported="false"`，并带 `BOOT_COMPLETED` /
 > `MY_PACKAGE_REPLACED` intent-filter。
 
 ## 5. 安装与使用
 
-APK 在本目录 `dist/BattleStar-0.1.3.apk`。安装方式（任选其一）：
+APK 在本目录 `dist/BattleStar-0.1.4.apk`。安装方式（任选其一）：
 
 ```powershell
 # 手机开启「开发者选项 → USB 调试」并连接后：
 adb devices
-adb install -r "dist\BattleStar-0.1.3.apk"
+adb install -r "dist\BattleStar-0.1.4.apk"
 ```
 
 - 也可以把 APK 拷到手机（微信/网盘/数据线）直接点击安装，需允许「安装未知来源应用」。
@@ -191,7 +192,7 @@ adb install -r "dist\BattleStar-0.1.3.apk"
 ## 6. 实现要点
 
 - **WebView 配置**：JS、DOM storage、database、宽视口（`useWideViewPort` + `loadWithOverviewMode`）、
-  混合内容 `MIXED_CONTENT_ALWAYS_ALLOW`、自定义 UA 追加 `SuperButlerApp/0.1.3`。
+  混合内容 `MIXED_CONTENT_ALWAYS_ALLOW`、自定义 UA 追加 `SuperButlerApp/0.1.4`。
 - **JS Bridge**（对象名 `ButlerBridge`）：`getConfig` / `saveConfig` / `clearConfig` / `openDashboard` /
   `openSetup` / `appVersion` / `toast` / `testConnection` / `setPersistentNotification` /
   `syncReminders(json)` / `getReminderStatus()`。
@@ -208,6 +209,7 @@ adb install -r "dist\BattleStar-0.1.3.apk"
   用于兼容仍默认「全部」的旧版 Hub 页面；页面尚未就绪/未找到时最多重试 8 次（每次 400ms）。
   筛选状态只存在于当前 WebView 页面会话，重开 App / 刷新会重新应用；用户手动切换筛选照常生效。
   相关常量在 `MainActivity.TASK_FILTER_DEFAULT_JS`。
+- **失败提示校正（APK 兜底）**：控制台的恢复提示按 `state.tasks` 中所有失败任务计数，而「失败」列表只渲染根任务（子任务/后续步骤归在父任务卡片下），可能出现“提示与列表不一致”。APK 在 `onPageFinished` 后安装一段脚本（`MainActivity.TASK_HINT_FIX_JS`）：包裹页面自己的 `/api/snapshot` 请求缓存任务，用与列表相同的根任务/线程分组规则重算；失败卡片为 0 时隐藏并清空提示，否则只校正开头的数字；每 1.2s 复查一次。只影响 APK 内 WebView，桌面浏览器与 Hub 前端不变。
 - **错误页**：`onReceivedError` / `onReceivedHttpError` / `onReceivedSslError` 触发本地内联错误页
   （深蓝紫卡片 + 重试 + 修改配置），按钮同样通过 Bridge 回调。
 - **edge-to-edge**：targetSdk 36 在 Android 15+ 强制 edge-to-edge，代码按系统栏 insets 给根布局加内边距。
@@ -306,6 +308,7 @@ adb install -r "dist\BattleStar-0.1.3.apk"
   与 `index.html` 的初始 `is-active` chip 决定；APK 注入仅对旧版 Hub 页面兜底。若控制台改版调整了筛选按钮的
   id/属性，注入会失效（旧版 Hub 页面回退默认「全部」，新版控制台不受影响），需要同步更新
   `MainActivity.TASK_FILTER_DEFAULT_JS`。
+- **失败提示校正依赖控制台 DOM/接口**：注入逻辑读取 `#task-recovery-hint`、`.recovery-hint-text` 与 `/api/snapshot` 的 `tasks` 字段；若控制台改版调整 id/类名/字段，校正会失效（提示恢复为控制台原生行为），需要同步更新 `MainActivity.TASK_HINT_FIX_JS`。
 - **未覆盖任务边界外的文件**：本次默认筛选改动涉及 `hub/web/assets/app.js`、`hub/web/index.html`
   以及 `android/**`、`dist/**`、`toolchain/**`。
 

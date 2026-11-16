@@ -24,6 +24,10 @@ const MAX_TITLE = 120;
 const MAX_NICKNAME = 40;
 const MAX_DESCRIPTION = 4000;
 const MAX_SUMMARY = 4000;
+const MAX_GUIDANCE_ENTRIES = 20;
+const MAX_GUIDANCE_TEXT = 2000;
+/** 「暂停到某个时间」的最长跨度（自动恢复）。 */
+const MAX_PAUSE_MS = 366 * 24 * 60 * 60 * 1000;
 
 function bad(errors) {
   return { ok: false, errors };
@@ -88,8 +92,63 @@ function computeNextCheckAt(schedule, fromMs = Date.now()) {
   return next.toISOString();
 }
 
+/**
+ * 跳过下一次自动跟进：把 nextCheckAt 推进一个计划周期，目标保持 active。
+ * - daily：nextCheckAt 的次日同一时刻；
+ * - interval：nextCheckAt + N 分钟。
+ * nextCheckAt 缺失或已过期时，先按「现在」重新计算，再推进一个周期。
+ * @param {{type:'daily',time:string}|{type:'interval',minutes:number}} schedule
+ * @param {string|null} nextCheckAt
+ * @param {number} fromMs
+ * @returns {string} ISO 时间
+ */
+function computeSkipNextCheckAt(schedule, nextCheckAt = null, fromMs = Date.now()) {
+  const normalized = normalizeSchedule(schedule);
+  const from = Number.isFinite(Number(fromMs)) ? Number(fromMs) : Date.now();
+  const base = Date.parse(nextCheckAt);
+  const anchor = Number.isFinite(base) && base > from ? base : from;
+  if (normalized.type === 'interval') {
+    return new Date(anchor + normalized.minutes * 60 * 1000).toISOString();
+  }
+  return computeNextCheckAt(normalized, anchor);
+}
+
+/**
+ * 归一化「暂停到某个时间」。
+ * - 未提供（undefined）：返回 {ok:true, value:undefined}，调用方保留原值；
+ * - null / ''：手动暂停，返回 {ok:true, value:null}；
+ * - 字符串 / 毫秒数：必须晚于当前时间且不超过 366 天。
+ * @returns {{ok:true, value:string|null|undefined}|{ok:false, error:string}}
+ */
+function normalizePausedUntil(value, fromMs = Date.now()) {
+  if (value === undefined) return { ok: true, value: undefined };
+  if (value === null || value === '') return { ok: true, value: null };
+  const from = Number.isFinite(Number(fromMs)) ? Number(fromMs) : Date.now();
+  const ms = typeof value === 'number'
+    ? value
+    : (typeof value === 'string' ? Date.parse(value) : NaN);
+  if (!Number.isFinite(ms)) return { ok: false, error: '暂停结束时间格式不正确' };
+  if (ms <= from) return { ok: false, error: '暂停结束时间必须晚于当前时间' };
+  if (ms - from > MAX_PAUSE_MS) return { ok: false, error: '暂停最长 366 天' };
+  return { ok: true, value: new Date(ms).toISOString() };
+}
+
+/**
+ * 归一化「新的指导指令」：用户给目标追加的一条方向性说明，会加入之后的跟进任务。
+ * @returns {{ok:true, value:{text:string}}|{ok:false, error:string}}
+ */
+function normalizeGuidanceEntry(input) {
+  const src = util.isPlainObject(input) ? input : {};
+  const text = typeof src.text === 'string' ? src.text.trim() : '';
+  if (!text) return { ok: false, error: '指导指令不能为空' };
+  if ([...text].length > MAX_GUIDANCE_TEXT) {
+    return { ok: false, error: `指导指令最多 ${MAX_GUIDANCE_TEXT} 字` };
+  }
+  return { ok: true, value: { text } };
+}
+
 /** 归一化目标创建/更新请求；partial=true 时只校验出现的字段（PATCH 语义）。 */
-function normalizeGoalRequest(input, { partial = false, base = null } = {}) {
+function normalizeGoalRequest(input, { partial = false, base = null, nowMs = Date.now() } = {}) {
   const src = util.isPlainObject(input) ? input : {};
   const prev = util.isPlainObject(base) ? base : {};
   const errors = [];
@@ -128,6 +187,16 @@ function normalizeGoalRequest(input, { partial = false, base = null } = {}) {
     }
   }
 
+  if (src.pausedUntil !== undefined) {
+    const parsed = normalizePausedUntil(src.pausedUntil, nowMs);
+    if (!parsed.ok) errors.push(parsed.error);
+    else value.pausedUntil = parsed.value;
+  }
+  const resultingStatus = value.status !== undefined ? value.status : (prev.status || 'active');
+  if (value.pausedUntil && resultingStatus !== 'paused') {
+    errors.push('只有已暂停的目标可以设置暂停结束时间');
+  }
+
   let requirements;
   if (src.requirements !== undefined) {
     if (!util.isPlainObject(src.requirements)) {
@@ -154,6 +223,11 @@ function restoreGoal(raw) {
   const id = util.str(raw.id, 80);
   if (!id) return null;
   const status = GOAL_STATUS_SET.has(raw.status) ? raw.status : 'active';
+  const pausedUntil = status === 'paused'
+    && typeof raw.pausedUntil === 'string'
+    && Number.isFinite(Date.parse(raw.pausedUntil))
+    ? new Date(Date.parse(raw.pausedUntil)).toISOString()
+    : null;
   const schedule = normalizeSchedule(raw.schedule, null);
   const checks = (Array.isArray(raw.checks) ? raw.checks : [])
     .filter(util.isPlainObject)
@@ -166,6 +240,15 @@ function restoreGoal(raw) {
       error: check.error ? util.str(check.error, MAX_SUMMARY) : null,
     }));
   const nextCheckAt = typeof raw.nextCheckAt === 'string' ? raw.nextCheckAt : null;
+  const guidance = (Array.isArray(raw.guidance) ? raw.guidance : [])
+    .filter(util.isPlainObject)
+    .map((entry) => ({
+      id: util.str(entry.id, 80) || protocol.randomId('gd'),
+      text: util.str(entry.text, MAX_GUIDANCE_TEXT),
+      createdAt: typeof entry.createdAt === 'string' ? entry.createdAt : protocol.nowIso(),
+    }))
+    .filter((entry) => entry.text)
+    .slice(-MAX_GUIDANCE_ENTRIES);
   const pendingApproval = (() => {
     const pending = util.isPlainObject(raw.pendingApproval) ? raw.pendingApproval : null;
     if (!pending) return null;
@@ -188,6 +271,8 @@ function restoreGoal(raw) {
     schedule,
     requirements: util.isPlainObject(raw.requirements) ? { ...raw.requirements } : null,
     nextCheckAt: status === 'active' ? nextCheckAt || computeNextCheckAt(schedule) : null,
+    pausedUntil,
+    guidance,
     lastCheckAt: typeof raw.lastCheckAt === 'string' ? raw.lastCheckAt : null,
     lastCheckStatus: util.str(raw.lastCheckStatus, 40) || null,
     lastSummary: util.str(raw.lastSummary, MAX_SUMMARY) || '',
@@ -215,6 +300,8 @@ function goalToJson(goal) {
     schedule: { ...goal.schedule },
     requirements: goal.requirements ? { ...goal.requirements } : null,
     nextCheckAt: goal.nextCheckAt,
+    pausedUntil: goal.pausedUntil || null,
+    guidance: (goal.guidance || []).map((entry) => ({ ...entry })),
     lastCheckAt: goal.lastCheckAt,
     lastCheckStatus: goal.lastCheckStatus,
     lastSummary: goal.lastSummary,
@@ -246,11 +333,16 @@ function buildGoalCheckInstruction(goal) {
     .slice(-3)
     .map((check) => `- ${check.at}（${check.status}）：${util.truncate(check.summary || check.error || '', 200)}`)
     .join('\n');
+  const guidance = (goal.guidance || [])
+    .slice(-6)
+    .map((entry) => `- ${entry.createdAt}：${util.truncate(entry.text, 300)}`)
+    .join('\n');
   const lines = [
     '【长期目标跟进】',
     `目标：${goalDisplayName(goal)}`,
     goal.nickname ? `正式标题：${goal.title}` : '',
     `描述：${goal.description || '（未填写）'}`,
+    guidance ? `用户指导（按时间顺序，越靠后越新；请优先遵守）：\n${guidance}` : '',
     `计划：${scheduleText}`,
     `上次检查：${goal.lastCheckAt || '尚未检查'}（${goal.lastCheckStatus || '无'}）`,
     goal.lastSummary ? `上次建议：\n${goal.lastSummary}` : '上次建议：无',
@@ -272,8 +364,14 @@ module.exports = {
   DEFAULT_SCHEDULE,
   MAX_CHECKS,
   MAX_NICKNAME,
+  MAX_PAUSE_MS,
+  MAX_GUIDANCE_ENTRIES,
+  MAX_GUIDANCE_TEXT,
   normalizeSchedule,
   computeNextCheckAt,
+  computeSkipNextCheckAt,
+  normalizePausedUntil,
+  normalizeGuidanceEntry,
   normalizeGoalRequest,
   restoreGoal,
   goalToJson,

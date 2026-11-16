@@ -21,7 +21,12 @@ const {
 const {
   normalizeSchedule,
   computeNextCheckAt,
+  computeSkipNextCheckAt,
+  normalizePausedUntil,
+  normalizeGuidanceEntry,
   normalizeGoalRequest,
+  restoreGoal,
+  goalToJson,
   buildGoalCheckInstruction,
 } = require('../lib/goals.js');
 
@@ -547,4 +552,304 @@ test('每晚总结：关闭开关不自动触发，手动运行接口可强制�
 
   // 手动运行创建的任务执行中：再次触发不重复创建
   assert.equal(env.hub.runNightlyReview(), null);
+});
+
+test('目标暂停止纯函数：跳过下一次与暂停结束时间校验', () => {
+  const noon = new Date(2026, 0, 5, 12, 0, 0, 0);
+  const tomorrowNine = computeNextCheckAt({ type: 'daily', time: '09:00' }, noon.getTime());
+  assert.equal(new Date(tomorrowNine).getDate(), 6);
+  const skipped = computeSkipNextCheckAt({ type: 'daily', time: '09:00' }, tomorrowNine, noon.getTime());
+  assert.equal(new Date(skipped).getDate(), 7);
+  assert.equal(new Date(skipped).getHours(), 9);
+  assert.ok(Date.parse(skipped) > Date.parse(tomorrowNine));
+
+  // interval：在 nextCheckAt 基础上再推一个周期
+  const intervalBase = new Date(noon.getTime() + 3600 * 1000).toISOString();
+  assert.equal(
+    computeSkipNextCheckAt({ type: 'interval', minutes: 60 }, intervalBase, noon.getTime()),
+    new Date(noon.getTime() + 2 * 3600 * 1000).toISOString(),
+  );
+
+  // nextCheckAt 缺失或过期：从 now 开始重排，再推进一个周期
+  const stale = new Date(noon.getTime() - 86400 * 1000).toISOString();
+  const fromNow = computeSkipNextCheckAt({ type: 'daily', time: '09:00' }, stale, noon.getTime());
+  assert.ok(Date.parse(fromNow) > noon.getTime());
+  assert.equal(new Date(fromNow).getHours(), 9);
+
+  // 暂停结束时间：null/空 表示手动恢复；非法/过期/超过 366 天报错
+  assert.deepEqual(normalizePausedUntil(undefined, noon.getTime()), { ok: true, value: undefined });
+  assert.deepEqual(normalizePausedUntil(null, noon.getTime()), { ok: true, value: null });
+  assert.deepEqual(normalizePausedUntil('', noon.getTime()), { ok: true, value: null });
+  const invalid = normalizePausedUntil('not-a-date', noon.getTime());
+  assert.equal(invalid.ok, false);
+  assert.match(invalid.error, /格式/);
+  assert.equal(normalizePausedUntil(new Date(noon.getTime() - 1000).toISOString(), noon.getTime()).ok, false);
+  assert.match(normalizePausedUntil(new Date(noon.getTime() + 400 * 86400 * 1000).toISOString(), noon.getTime()).error, /366/);
+  const okUntil = new Date(noon.getTime() + 3600 * 1000).toISOString();
+  assert.deepEqual(normalizePausedUntil(okUntil, noon.getTime()), { ok: true, value: okUntil });
+
+  // PATCH 语义：暂停中的目标可以单独更新 pausedUntil
+  const partial = normalizeGoalRequest({ pausedUntil: okUntil }, { partial: true, base: { status: 'paused' }, nowMs: noon.getTime() });
+  assert.equal(partial.ok, true);
+  assert.equal(partial.value.pausedUntil, okUntil);
+  const activeUntil = normalizeGoalRequest({ pausedUntil: okUntil }, { partial: true, base: { status: 'active' }, nowMs: noon.getTime() });
+  assert.equal(activeUntil.ok, false);
+  assert.match(activeUntil.errors.join('；'), /只有已暂停/);
+
+  // 持久化：restoreGoal / goalToJson 保留 pausedUntil，非 paused 状态清除
+  const restored = restoreGoal({
+    id: 'goal_restore',
+    title: '恢复测试',
+    status: 'paused',
+    pausedUntil: okUntil,
+    schedule: { type: 'daily', time: '09:00' },
+  });
+  assert.equal(restored.pausedUntil, okUntil);
+  assert.equal(restored.nextCheckAt, null);
+  assert.equal(goalToJson(restored).pausedUntil, okUntil);
+  const restoredActive = restoreGoal({
+    id: 'goal_restore_active',
+    title: '恢复测试 2',
+    status: 'active',
+    pausedUntil: okUntil,
+    schedule: { type: 'daily', time: '09:00' },
+  });
+  assert.equal(restoredActive.pausedUntil, null);
+});
+
+test('目标暂停止 API：暂停到指定时间自动恢复、跳过下一次自动跟进', async (t) => {
+  const env = await startTestHub(t);
+  const goal = await createGoal(env, {
+    title: '临时暂停演练',
+    schedule: { type: 'daily', time: '09:00' },
+  });
+
+  // 非法 pausedUntil / 未暂停时设置 pausedUntil
+  const bad = await request(env.base, 'PATCH', `/api/goals/${goal.id}`, {
+    headers: adminHeaders(env),
+    body: { status: 'paused', pausedUntil: 'not-a-date' },
+  });
+  assert.equal(bad.status, 400);
+  assert.match(bad.json.error.message, /暂停结束时间/);
+
+  const invalidActive = await request(env.base, 'PATCH', `/api/goals/${goal.id}`, {
+    headers: adminHeaders(env),
+    body: { pausedUntil: new Date(Date.now() + 3600 * 1000).toISOString() },
+  });
+  assert.equal(invalidActive.status, 400);
+  assert.match(invalidActive.json.error.message, /只有已暂停/);
+
+  // 暂停到指定时间：清空 nextCheckAt，保留 pausedUntil
+  const until = new Date(Date.now() + 86400 * 1000).toISOString();
+  const paused = await request(env.base, 'PATCH', `/api/goals/${goal.id}`, {
+    headers: adminHeaders(env),
+    body: { status: 'paused', pausedUntil: until },
+  });
+  assert.equal(paused.status, 200, paused.text);
+  assert.equal(paused.json.goal.status, 'paused');
+  assert.equal(paused.json.goal.pausedUntil, until);
+  assert.equal(paused.json.goal.nextCheckAt, null);
+
+  // 未到期不恢复
+  env.hub.runDueGoalChecks();
+  assert.equal((await getGoal(env, goal.id)).status, 'paused');
+
+  // 到期后调度器自动恢复，重新排下一次跟进
+  env.hub.goals.get(goal.id).pausedUntil = new Date(Date.now() - 1000).toISOString();
+  env.hub.runDueGoalChecks();
+  const resumed = await getGoal(env, goal.id);
+  assert.equal(resumed.status, 'active');
+  assert.equal(resumed.pausedUntil, null);
+  assert.ok(Date.parse(resumed.nextCheckAt) > Date.now());
+
+  // 跳过下一次自动跟进：nextCheckAt 前进一个周期
+  const before = Date.parse(resumed.nextCheckAt);
+  const skip = await request(env.base, 'POST', `/api/goals/${goal.id}/skip`, {
+    headers: adminHeaders(env),
+    body: {},
+  });
+  assert.equal(skip.status, 200, skip.text);
+  assert.equal(skip.json.goal.status, 'active');
+  assert.ok(Date.parse(skip.json.goal.nextCheckAt) > before);
+
+  // 到点生成待确认提案后，跳过会同时取消提案
+  const pendingGoal = await createGoal(env, {
+    title: '待确认跳过',
+    schedule: { type: 'interval', minutes: 60 },
+  });
+  env.hub.goals.get(pendingGoal.id).nextCheckAt = new Date(Date.now() - 1000).toISOString();
+  assert.deepEqual(env.hub.runDueGoalChecks(), [pendingGoal.id]);
+  assert.ok((await getGoal(env, pendingGoal.id)).pendingApproval);
+  const skippedPending = await request(env.base, 'POST', `/api/goals/${pendingGoal.id}/skip`, {
+    headers: adminHeaders(env),
+    body: {},
+  });
+  assert.equal(skippedPending.status, 200, skippedPending.text);
+  assert.equal(skippedPending.json.goal.pendingApproval, null);
+  assert.ok(Date.parse(skippedPending.json.goal.nextCheckAt) > Date.now());
+
+  // 暂停中的目标不能跳过
+  await request(env.base, 'PATCH', `/api/goals/${goal.id}`, {
+    headers: adminHeaders(env),
+    body: { status: 'paused' },
+  });
+  const conflict = await request(env.base, 'POST', `/api/goals/${goal.id}/skip`, {
+    headers: adminHeaders(env),
+    body: {},
+  });
+  assert.equal(conflict.status, 409);
+  assert.match(conflict.json.error.message, /跳过/);
+
+  // 暂停到指定时间 → 一直暂停：显式传 null 清除自动恢复时间
+  const repause = await request(env.base, 'PATCH', `/api/goals/${goal.id}`, {
+    headers: adminHeaders(env),
+    body: { status: 'paused', pausedUntil: new Date(Date.now() + 86400 * 1000).toISOString() },
+  });
+  assert.equal(repause.status, 200, repause.text);
+  assert.ok(repause.json.goal.pausedUntil);
+  const manual = await request(env.base, 'PATCH', `/api/goals/${goal.id}`, {
+    headers: adminHeaders(env),
+    body: { status: 'paused', pausedUntil: null },
+  });
+  assert.equal(manual.status, 200, manual.text);
+  assert.equal(manual.json.goal.pausedUntil, null);
+  assert.equal(manual.json.goal.status, 'paused');
+});
+
+test('目标指导指令纯函数：校验、恢复、指令注入', () => {
+  assert.deepEqual(normalizeGuidanceEntry({ text: '  优先处理 A 项目  ' }), { ok: true, value: { text: '优先处理 A 项目' } });
+  assert.equal(normalizeGuidanceEntry({ text: '   ' }).ok, false);
+  assert.match(normalizeGuidanceEntry({ text: '   ' }).error, /不能为空/);
+  assert.equal(normalizeGuidanceEntry({ text: 'x'.repeat(2001) }).ok, false);
+  assert.match(normalizeGuidanceEntry({ text: 'x'.repeat(2001) }).error, /2000/);
+
+  // 恢复与序列化：补 id/时间、过滤空文本、条数上限
+  const restored = restoreGoal({
+    id: 'goal_guidance',
+    title: '指导指令测试',
+    status: 'active',
+    schedule: { type: 'daily', time: '09:00' },
+    guidance: [
+      { text: '第一条' },
+      { text: '   ' },
+      { text: '第二条', createdAt: '2026-11-02T01:02:03.000Z' },
+    ],
+  });
+  assert.equal(restored.guidance.length, 2);
+  assert.ok(restored.guidance[0].id.startsWith('gd_'));
+  assert.equal(restored.guidance[1].createdAt, '2026-11-02T01:02:03.000Z');
+  const json = goalToJson(restored);
+  assert.equal(json.guidance.length, 2);
+  assert.equal(json.guidance[1].text, '第二条');
+
+  // 指令注入：出现在跟进任务指令里，且按时间顺序
+  const instruction = buildGoalCheckInstruction(restored);
+  assert.match(instruction, /用户指导/);
+  assert.ok(instruction.includes('第一条'));
+  assert.ok(instruction.indexOf('第一条') < instruction.indexOf('第二条'));
+
+  // 超过上限时只保留最近 N 条
+  const many = restoreGoal({
+    id: 'goal_many',
+    title: '很多指导',
+    status: 'active',
+    guidance: Array.from({ length: 30 }, (_, i) => ({ text: `指令 ${i + 1}` })),
+  });
+  assert.equal(many.guidance.length, 20);
+  assert.equal(many.guidance[19].text, '指令 30');
+});
+
+test('目标指导指令 API：追加即生效、空文本报错、恢复自动跟进（stopped/paused）', async (t) => {
+  const env = await startTestHub(t);
+  const goal = await createGoal(env, {
+    title: '指导指令演练',
+    schedule: { type: 'daily', time: '09:00' },
+  });
+
+  // 追加指导指令
+  const added = await request(env.base, 'POST', `/api/goals/${goal.id}/guidance`, {
+    headers: adminHeaders(env),
+    body: { text: '从明天起优先推进 A 项目，B 项目暂缓' },
+  });
+  assert.equal(added.status, 200, added.text);
+  assert.equal(added.json.goal.guidance.length, 1);
+  assert.match(added.json.goal.guidance[0].id, /^gd_/);
+  assert.ok(added.json.goal.guidance[0].createdAt);
+  assert.equal(added.json.goal.guidance[0].text, '从明天起优先推进 A 项目，B 项目暂缓');
+
+  // 列表与详情都带指导指令
+  const list = await request(env.base, 'GET', '/api/goals', { headers: adminHeaders(env) });
+  assert.equal(list.status, 200, list.text);
+  assert.equal(list.json.goals.find((item) => item.id === goal.id).guidance.length, 1);
+
+  // 空文本 / 超长文本报 400
+  const empty = await request(env.base, 'POST', `/api/goals/${goal.id}/guidance`, {
+    headers: adminHeaders(env),
+    body: { text: '   ' },
+  });
+  assert.equal(empty.status, 400);
+  assert.match(empty.json.error.message, /不能为空/);
+  const tooLong = await request(env.base, 'POST', `/api/goals/${goal.id}/guidance`, {
+    headers: adminHeaders(env),
+    body: { text: 'x'.repeat(2001) },
+  });
+  assert.equal(tooLong.status, 400);
+  assert.match(tooLong.json.error.message, /2000/);
+  assert.equal((await getGoal(env, goal.id)).guidance.length, 1);
+
+  // 立即跟进的任务指令已包含新指导
+  const check = await request(env.base, 'POST', `/api/goals/${goal.id}/check`, {
+    headers: adminHeaders(env),
+    body: {},
+  });
+  assert.equal(check.status, 200, check.text);
+  assert.match(check.json.task.instruction, /优先推进 A 项目/);
+  assert.match(check.json.task.instruction, /用户指导/);
+
+  // 待确认提案：追加指导后会刷新提案指令
+  const pendingGoal = await createGoal(env, {
+    title: '提案刷新指导',
+    schedule: { type: 'interval', minutes: 60 },
+  });
+  env.hub.goals.get(pendingGoal.id).nextCheckAt = new Date(Date.now() - 1000).toISOString();
+  env.hub.runDueGoalChecks();
+  const pendingBefore = await getGoal(env, pendingGoal.id);
+  assert.ok(pendingBefore.pendingApproval);
+  const addedPending = await request(env.base, 'POST', `/api/goals/${pendingGoal.id}/guidance`, {
+    headers: adminHeaders(env),
+    body: { text: '批准时优先做 X' },
+  });
+  assert.equal(addedPending.status, 200, addedPending.text);
+  assert.match(addedPending.json.goal.pendingApproval.instruction, /批准时优先做 X/);
+
+  // stopped → active：恢复自动跟进
+  const stopped = await request(env.base, 'PATCH', `/api/goals/${goal.id}`, {
+    headers: adminHeaders(env),
+    body: { status: 'stopped' },
+  });
+  assert.equal(stopped.status, 200, stopped.text);
+  assert.equal(stopped.json.goal.status, 'stopped');
+  assert.equal(stopped.json.goal.nextCheckAt, null);
+  const resumed = await request(env.base, 'PATCH', `/api/goals/${goal.id}`, {
+    headers: adminHeaders(env),
+    body: { status: 'active' },
+  });
+  assert.equal(resumed.status, 200, resumed.text);
+  assert.equal(resumed.json.goal.status, 'active');
+  assert.equal(resumed.json.goal.stoppedAt, null);
+  assert.ok(Date.parse(resumed.json.goal.nextCheckAt) > Date.now());
+  assert.equal(resumed.json.goal.guidance.length, 1);
+
+  // paused → active 也恢复自动跟进
+  await request(env.base, 'PATCH', `/api/goals/${goal.id}`, {
+    headers: adminHeaders(env),
+    body: { status: 'paused', pausedUntil: new Date(Date.now() + 3600 * 1000).toISOString() },
+  });
+  const resumedPaused = await request(env.base, 'PATCH', `/api/goals/${goal.id}`, {
+    headers: adminHeaders(env),
+    body: { status: 'active' },
+  });
+  assert.equal(resumedPaused.status, 200, resumedPaused.text);
+  assert.equal(resumedPaused.json.goal.status, 'active');
+  assert.equal(resumedPaused.json.goal.pausedUntil, null);
 });

@@ -153,5 +153,12 @@ test('normalizeRequirements 空对象安全', () => {
   assert.equal(req.model, null);
   assert.deepEqual(req.skills, []);
   assert.deepEqual(req.tags, []);
+  assert.equal(req.project, null);
   assert.equal(req.deviceId, null);
+});
+
+test('normalizeRequirements 保留合法项目名并截断超长值', () => {
+  assert.equal(normalizeRequirements({ project: 'ComfyUI 工作机' }).project, 'ComfyUI 工作机');
+  assert.equal(normalizeRequirements({ project: 'C:\\work\\proj' }).project, 'C:\\work\\proj');
+  assert.equal(normalizeRequirements({ project: 'x'.repeat(300) }).project.length, 120);
 });

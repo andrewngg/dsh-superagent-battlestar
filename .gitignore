@@ -22,6 +22,7 @@ android/keystore/*.jks.tmp
 
 # Personal local-only files (never publish)
 docs/FIRST-MACHINE.md
+docs/RESUME-DESIGN.md
 device-agent/configs/first-machine.json
 
 # Local env

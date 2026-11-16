@@ -40,6 +40,43 @@
     timeout: '检查超时',
     cancelled: '检查已取消',
   };
+  /** 自主大脑：模式 / 触发方式 / 白名单动作的展示文案。 */
+  const BRAIN_MODE_LABEL = { auto: '自动执行', suggest: '只给建议' };
+  const BRAIN_TRIGGER_LABEL = { manual: '手动', schedule: '定时' };
+  const BRAIN_ACTION_LABEL = {
+    retry_task: '重试任务',
+    resume_thread: '继续任务',
+    create_task: '新建任务',
+    link_task: '关联任务',
+    none: '无动作',
+  };
+  /** 自主大脑六步思考：assessment 字段 → 展示文案（顺序即思考协议顺序）。 */
+  const BRAIN_STEPS = [
+    { key: 'goals', i18n: 'brain.stepGoals' },
+    { key: 'progress', i18n: 'brain.stepProgress' },
+    { key: 'betterWay', i18n: 'brain.stepBetterWay' },
+    { key: 'improvement', i18n: 'brain.stepImprovement' },
+    { key: 'myMove', i18n: 'brain.stepMyMove' },
+    { key: 'ownerAsk', i18n: 'brain.stepOwnerAsk' },
+  ];
+  /** 卡片只展示最关键的三步，其余步骤放在大脑抽屉里。 */
+  const BRAIN_CARD_STEPS = ['goals', 'progress', 'myMove'];
+  /** 管家心路：条目种类与筛选器。 */
+  const JOURNAL_KIND_META = {
+    thought: { i18n: 'journal.kindThought', tone: 'thought', iconName: 'spark' },
+    work: { i18n: 'journal.kindWork', tone: 'work', iconName: 'check' },
+    milestone: { i18n: 'journal.kindMilestone', tone: 'milestone', iconName: 'flag' },
+    daily: { i18n: 'journal.kindDaily', tone: 'daily', iconName: 'activity' },
+  };
+  const JOURNAL_FILTERS = [
+    { id: 'all', i18n: 'journal.filterAll' },
+    { id: 'thought', i18n: 'journal.filterThought' },
+    { id: 'work', i18n: 'journal.filterWork' },
+    { id: 'milestone', i18n: 'journal.filterMilestone' },
+    { id: 'daily', i18n: 'journal.filterDaily' },
+  ];
+  /** 头脑风暴：空态时给用户的建议问题（i18n 键）。 */
+  const BRAINSTORM_SUGGESTIONS = ['brainstorm.suggest1', 'brainstorm.suggest2', 'brainstorm.suggest3'];
 
   const DEVICE_STATUS = { idle: '空闲', busy: '忙碌', degraded: '降级', offline: '离线', disabled: '已禁用' };
   const PLATFORM_LABEL = { windows: 'Windows', macos: 'macOS', linux: 'Linux', android: 'Android', other: '其他' };
@@ -67,9 +104,15 @@
     retry: '重试',
     retried: '重新提交',
     requeued: '重新排队',
+    blocked: '卡点',
     device: '设备',
   };
-  const TABS = new Set(['status', 'tasks', 'command', 'goals', 'reminders', 'developer', 'settings']);
+  /** Agnes 执行计划里的策略/并行组文案。 */
+  const PLAN_STRATEGY_LABEL = { parallel: '并行执行', sequential: '按顺序执行', mixed: '并行 + 顺序依赖' };
+  const planStrategyLabel = (plan) => (plan && PLAN_STRATEGY_LABEL[plan.strategy]) || '';
+  const TABS = new Set(['status', 'tasks', 'command', 'goals', 'journal', 'brainstorm', 'mind', 'reminders', 'developer', 'settings']);
+  /** 心智（Soul / Skill）字段上限缺省值；服务端 limits 优先。 */
+  const MIND_FIELD_LIMITS = { soul: 6000, skill: 12000 };
 
   /* 多语言：ButlerI18n 由 assets/i18n.js 提供（默认中文时不做任何处理） */
   const I18N = window.ButlerI18n || null;
@@ -246,6 +289,7 @@
    * 声明放在模块顶部，避免早期异步回调里访问到 TDZ。
    */
   let deviceNicknameDraft = null;
+  let taskRecoveryBusy = false;
   /** 上一次渲染设备抽屉时设备数据的指纹：没变化就不重建，避免无谓闪动。 */
   let deviceDrawerSig = '';
 
@@ -267,6 +311,29 @@
     goalsError: '',
     goalsSupported: false,
     goalsHubTime: '',
+    brain: null,
+    brainBusy: false,
+    brainError: '',
+    brainDecisions: [],
+    goalDetail: null,
+    journal: null,
+    journalBusy: false,
+    journalError: '',
+    journalFilter: 'all',
+    journalDays: 60,
+    journalDirty: false,
+    brainstorm: null,
+    brainstormBusy: false,
+    brainstormSending: false,
+    brainstormError: '',
+    brainstormSessions: [],
+    brainstormSession: null,
+    mind: null,
+    mindLoaded: false,
+    mindBusy: false,
+    mindDirty: false,
+    mindError: '',
+    mindServerUpdated: false,
     reminders: [],
     remindersLoaded: false,
     remindersLoading: false,
@@ -300,6 +367,13 @@
   };
   const taskNotifyState = new Map();
   const goalBusy = new Set();
+  /** 目标关联任务刷新防抖定时器（SSE 事件很密）。 */
+  let goalDetailTimer = 0;
+  /** 心路 SSE 刷新防抖定时器。 */
+  let journalReloadTimer = 0;
+  /** 头脑风暴 SSE 刷新防抖定时器 / 加载序号（用于丢弃过期响应）。 */
+  let brainstormRefreshTimer = 0;
+  let brainstormLoadSeq = 0;
   const reminderBusy = new Set();
   /** 上次同步给 APK 的提醒指纹：内容没变就不重复调用桥，避免反复重排闹钟。 */
   let reminderSyncSig = '';
@@ -584,6 +658,34 @@
     state.goalsSupported = false;
     goalBusy.clear();
     state.sigs.goals = '';
+    state.brain = null;
+    state.brainBusy = false;
+    state.brainError = '';
+    state.brainDecisions = [];
+    state.goalDetail = null;
+    clearTimeout(goalDetailTimer);
+    goalDetailTimer = 0;
+    state.journal = null;
+    state.journalBusy = false;
+    state.journalError = '';
+    state.journalDirty = false;
+    clearTimeout(journalReloadTimer);
+    journalReloadTimer = 0;
+    state.brainstorm = null;
+    state.brainstormBusy = false;
+    state.brainstormSending = false;
+    state.brainstormError = '';
+    state.brainstormSessions = [];
+    state.brainstormSession = null;
+    clearTimeout(brainstormRefreshTimer);
+    brainstormRefreshTimer = 0;
+    brainstormLoadSeq += 1;
+    state.mind = null;
+    state.mindLoaded = false;
+    state.mindBusy = false;
+    state.mindDirty = false;
+    state.mindError = '';
+    state.mindServerUpdated = false;
     state.reminders = [];
     state.remindersLoaded = false;
     state.remindersLoading = false;
@@ -627,6 +729,34 @@
     state.goalsSupported = false;
     goalBusy.clear();
     state.sigs.goals = '';
+    state.brain = null;
+    state.brainBusy = false;
+    state.brainError = '';
+    state.brainDecisions = [];
+    state.goalDetail = null;
+    clearTimeout(goalDetailTimer);
+    goalDetailTimer = 0;
+    state.journal = null;
+    state.journalBusy = false;
+    state.journalError = '';
+    state.journalDirty = false;
+    clearTimeout(journalReloadTimer);
+    journalReloadTimer = 0;
+    state.brainstorm = null;
+    state.brainstormBusy = false;
+    state.brainstormSending = false;
+    state.brainstormError = '';
+    state.brainstormSessions = [];
+    state.brainstormSession = null;
+    clearTimeout(brainstormRefreshTimer);
+    brainstormRefreshTimer = 0;
+    brainstormLoadSeq += 1;
+    state.mind = null;
+    state.mindLoaded = false;
+    state.mindBusy = false;
+    state.mindDirty = false;
+    state.mindError = '';
+    state.mindServerUpdated = false;
     state.reminders = [];
     state.remindersLoaded = false;
     state.remindersLoading = false;
@@ -702,7 +832,7 @@
       'device.updated', 'device.online', 'device.offline',
       'task.created', 'task.updated', 'task.completed', 'task.failed',
       'goal.created', 'goal.updated', 'goal.deleted', 'goal.approval',
-      'nightly.review.updated',
+      'nightly.review.updated', 'brain.updated', 'journal.updated', 'brainstorm.updated', 'mind.updated',
       'log', 'ping',
     ];
     for (const name of named) {
@@ -810,6 +940,10 @@
     if (name.startsWith('goal.')) return onGoalEvent(name, payload);
     if (name.startsWith('reminder.')) return onReminderEvent(name, payload);
     if (name === 'nightly.review.updated') return onNightlyReviewUpdated(payload.review);
+    if (name === 'brain.updated') return onBrainUpdated(payload);
+    if (name === 'journal.updated') return onJournalUpdated(payload);
+    if (name === 'brainstorm.updated') return onBrainstormUpdated(payload);
+    if (name === 'mind.updated') return onMindUpdated(payload);
     if (name === 'settings.updated') return onSettingsUpdated(payload);
     if (name === 'log') return onLogEvent(payload);
     if (name === 'ping') return;
@@ -854,6 +988,7 @@
       state.goalsError = '';
       state.sigs.goals = '';
     }
+    if (data.brain && typeof data.brain === 'object') state.brain = data.brain;
     if (Array.isArray(data.reminders)) {
       state.reminders = data.reminders.filter((item) => item && item.id);
       sortReminders();
@@ -974,6 +1109,7 @@
     }
     renderAll();
     if (state.drawer.open && state.drawer.kind === 'task' && state.drawer.id === current.id) refreshOpenDrawer();
+    if (isGoalDrawerOpen()) scheduleGoalDetailRefresh(state.drawer.id);
     syncTaskNotifications();
   }
 
@@ -1454,6 +1590,7 @@
         const iso = node.dataset.relFuture;
         if (iso) node.textContent = tx(fmtRelFuture(iso, now));
       });
+      if (state.brain && state.tab === 'goals') renderBrainCard();
     }, 15000);
   }
 
@@ -1824,10 +1961,13 @@
     const requirements = {};
     const model = $('#req-model').value;
     const deviceId = $('#target-device').value;
+    const projectInput = $('#req-project');
+    const project = projectInput ? projectInput.value.trim() : '';
     const skills = Array.from(state.selectedSkills);
     if (model) requirements.model = model;
     if (skills.length) requirements.skills = skills;
     if (deviceId) requirements.deviceId = deviceId;
+    if (project) requirements.project = project;
 
     const payload = {
       instruction,
@@ -1854,6 +1994,7 @@
       renderTasks();
       setRouteResult(task);
       textarea.value = '';
+      if (projectInput) projectInput.value = '';
       cancelFollowUp();
       clearPendingAttachments();
       updateComposerTarget();
@@ -1977,15 +2118,44 @@
     );
   }
 
+  /** 子任务在第几步、属于哪个并行组、依赖哪些步骤（Agnes 执行计划）。 */
+  function subtaskPlanBits(child) {
+    const bits = [];
+    if (Number.isFinite(child.planStep) && child.planStep > 0) bits.push(`第 ${child.planStep} 步`);
+    if (child.planGroup) bits.push(String(child.planGroup));
+    const deps = arr(child.planDependsOn);
+    if (deps.length) bits.push(`依赖第 ${deps.map((i) => i + 1).join('、')} 步`);
+    return bits;
+  }
+
+  /** 计划元信息按片段渲染成独立文本节点，英文模式下每段都能被翻译。 */
+  function planMetaNode(child, className) {
+    const bits = subtaskPlanBits(child);
+    if (!bits.length) return null;
+    return el('span', { className },
+      ...bits.flatMap((text, i) => (i
+        ? [el('span', { text: ' · ' }), el('span', { text })]
+        : [el('span', { text })])));
+  }
+
   function subtaskRow(child) {
     const status = normStatus(child.status);
+    const planBits = subtaskPlanBits(child);
+    // 依赖还没完成的子任务会停在排队里，提示“等待前置步骤”比“等待设备”更准确。
+    const waitingDeps = status === 'queued' && arr(child.planDependsOnTaskIds).length > 0;
+    const deviceText = child.assignedDeviceName || (waitingDeps ? '等待前置步骤' : ACTIVE_STATUS.has(status) ? '等待设备' : '');
+    const routeReason = child.route && child.route.reason ? String(child.route.reason) : '';
     const row = el('button', {
       type: 'button', className: 'subtask-row', dataset: { action: 'open-child', taskId: child.id },
-      attrs: { 'aria-label': `子任务 ${TASK_STATUS[status].label}：${shorten(child.instruction, 36)}` },
+      attrs: {
+        'aria-label': `子任务${planBits.length ? `（${planBits.join(' · ')}）` : ''} ${TASK_STATUS[status].label}：${shorten(child.instruction, 36)}`,
+        title: routeReason,
+      },
     },
       statusBadge(status),
       el('span', { className: 'subtask-title', text: shorten(child.instruction, 70) }),
-      el('span', { className: 'subtask-meta', text: child.assignedDeviceName || (ACTIVE_STATUS.has(status) ? '等待设备' : '') }),
+      planMetaNode(child, 'subtask-plan'),
+      el('span', { className: 'subtask-meta', text: deviceText }),
     );
     return row;
   }
@@ -1994,14 +2164,182 @@
     const children = childTasksOf(parent);
     if (!children.length) return null;
     const done = children.filter((item) => ['completed', 'failed', 'timeout', 'cancelled'].includes(normStatus(item.status))).length;
+    const strategy = planStrategyLabel(parent.plan);
+    const blocked = Boolean(parent.progress && parent.progress.blocked);
     const wrap = el('div', { className: 'subtask-wrap' },
       el('div', { className: 'subtask-head' },
         icon('queue'),
         el('span', { text: `Agnes 拆分的子任务 ${done}/${children.length}` }),
+        strategy
+          ? el('span', { className: 'subtask-strategy' },
+            el('span', { text: '（' }),
+            el('span', { text: strategy }),
+            el('span', { text: '）' }))
+          : null,
+        blocked ? el('span', { className: 'strip-bad', text: '卡点' }) : null,
       ),
       el('div', { className: 'subtask-list' }, ...children.map(subtaskRow)),
     );
     return wrap;
+  }
+
+  function childRecoveryStats(children) {
+    const finished = children.filter((item) => ['completed', 'failed', 'timeout', 'cancelled'].includes(normStatus(item.status)));
+    const failed = finished.filter((item) => normStatus(item.status) !== 'completed');
+    return { finished, failed, done: finished.length - failed.length };
+  }
+
+  /** 可重试/可继续的失败子任务（不含已归档）。 */
+  function retryableChildrenOf(task) {
+    if (!task || !task.isPlan) return [];
+    return childTasksOf(task)
+      .filter((item) => !item.archived)
+      .filter((item) => RETRYABLE_STATUS.has(normStatus(item.status)));
+  }
+
+  /**
+   * 卡片收起时（手机端默认）仍保持可见的「恢复条」：
+   * 子任务进度 + 失败子任务重试 + 本任务重试/继续，避免收起后找不到恢复入口。
+   */
+  function taskRecoveryStrip(task, status) {
+    if (task.archived) return null;
+    const children = task.isPlan ? childTasksOf(task).filter((item) => !item.archived) : [];
+    const stats = childRecoveryStats(children);
+    const canRetry = RETRYABLE_STATUS.has(status);
+    const canContinue = !ACTIVE_STATUS.has(status);
+    if (!children.length && !canRetry && !canContinue) return null;
+    const wrap = el('div', { className: 'task-strip' });
+    if (children.length) {
+      wrap.appendChild(el('button', {
+        type: 'button',
+        className: 'strip-btn strip-btn-main',
+        dataset: { action: 'open' },
+        attrs: { 'aria-label': '查看子任务' },
+      },
+        icon('queue'),
+        el('span', { text: `子任务 ${stats.done}/${children.length}` }),
+        stats.failed.length ? el('span', { className: 'strip-bad', text: `${stats.failed.length} 失败` }) : null,
+        task.progress && task.progress.blocked ? el('span', { className: 'strip-bad', text: '卡点' }) : null,
+      ));
+    }
+    const actions = el('div', { className: 'strip-actions' });
+    if (stats.failed.length) {
+      actions.appendChild(el('button', {
+        type: 'button', className: 'strip-btn is-warn', dataset: { action: 'retry-failed-children' },
+      }, icon('refresh'), el('span', { text: '重试失败子任务' })));
+    }
+    if (canRetry) {
+      actions.appendChild(el('button', {
+        type: 'button', className: 'strip-btn', dataset: { action: 'retry' },
+      }, icon('refresh'), el('span', { text: '重试' })));
+    }
+    if (canContinue) {
+      actions.appendChild(el('button', {
+        type: 'button', className: 'strip-btn is-primary', dataset: { action: 'follow-up' },
+      }, icon('send'), el('span', { text: '继续任务' })));
+    }
+    if (actions.childElementCount) wrap.appendChild(actions);
+    return wrap.childElementCount ? wrap : null;
+  }
+
+  /** 任务详情里的子任务行：可打开详情、单条重试、从该子任务继续。 */
+  function childTaskDetailRow(child, parentId) {
+    const status = normStatus(child.status);
+    const duration = durationView(child);
+    const row = el('div', { className: 'subtask-detail', dataset: { status } });
+    row.appendChild(el('div', { className: 'subtask-detail-top' },
+      statusBadge(status),
+      el('button', {
+        type: 'button', className: 'subtask-detail-title',
+        attrs: { 'aria-label': '打开子任务详情' },
+        onclick: () => openTaskDrawer(child.id),
+      }, el('span', { text: shorten(child.instruction || '（无指令内容）', 140) })),
+    ));
+    const meta = el('div', { className: 'subtask-detail-meta' });
+    const planMeta = planMetaNode(child, '');
+    if (planMeta) meta.appendChild(planMeta);
+    if (child.assignedDeviceName) meta.appendChild(el('span', { text: child.assignedDeviceName }));
+    if (duration) meta.appendChild(el('span', { text: duration.text }));
+    if (child.error && status !== 'completed') {
+      meta.appendChild(el('span', { className: 'is-error', text: shorten(child.error, 70), title: child.error }));
+    }
+    if (meta.childElementCount) row.appendChild(meta);
+    const actions = el('div', { className: 'subtask-detail-actions' },
+      el('button', { type: 'button', className: 'strip-btn', onclick: () => openTaskDrawer(child.id) },
+        el('span', { text: '详情' })));
+    if (RETRYABLE_STATUS.has(status)) {
+      actions.appendChild(el('button', {
+        type: 'button', className: 'strip-btn is-warn',
+        onclick: async () => {
+          await retryTask(child.id);
+          refreshTaskDrawer(parentId);
+        },
+      }, icon('refresh'), el('span', { text: '重试' })));
+    } else if (!ACTIVE_STATUS.has(status)) {
+      actions.appendChild(el('button', {
+        type: 'button', className: 'strip-btn is-primary',
+        onclick: () => { hideDrawer(); startFollowUp(child.id); },
+      }, icon('send'), el('span', { text: '从此步继续' })));
+    }
+    row.appendChild(actions);
+    return row;
+  }
+
+  /** 详情抽屉中的「子任务」区块（含一键重试失败子任务）。 */
+  function childTasksSection(parent) {
+    const children = childTasksOf(parent);
+    if (!children.length) return null;
+    const stats = childRecoveryStats(children);
+    const retryableCount = children.filter((item) => !item.archived && RETRYABLE_STATUS.has(normStatus(item.status))).length;
+    return el('section', { className: 'detail-section' },
+      el('div', { className: 'detail-section-head' },
+        el('h3', { text: '子任务' }),
+        el('span', { className: 'count', text: `${stats.done}/${children.length} 完成${stats.failed.length ? ` · ${stats.failed.length} 失败` : ''}` }),
+        retryableCount
+          ? el('button', {
+            type: 'button', className: 'strip-btn is-warn', onclick: () => retryFailedChildren(parent.id),
+          }, icon('refresh'), el('span', { text: '重试失败子任务' }))
+          : null,
+      ),
+      el('div', { className: 'subtask-detail-list' }, ...children.map((item) => childTaskDetailRow(item, parent.id))),
+    );
+  }
+
+  /** 详情抽屉中的「任务线程」区块（继续任务的后续步骤）。 */
+  function threadStepsSection(task) {
+    const steps = threadTasksOf(task);
+    if (!steps.length) return null;
+    const baseStep = Number.isFinite(task.threadStep) ? task.threadStep : 1;
+    return el('section', { className: 'detail-section' },
+      el('div', { className: 'detail-section-head' },
+        el('h3', { text: '任务线程' }),
+        el('span', { className: 'count', text: `${steps.length} 个后续步骤` }),
+      ),
+      el('div', { className: 'subtask-detail-list' }, ...steps.map((step, index) => {
+        const status = normStatus(step.status);
+        const stepNo = Number.isFinite(step.threadStep) ? step.threadStep : baseStep + index + 1;
+        const actions = el('div', { className: 'subtask-detail-actions' },
+          el('button', { type: 'button', className: 'strip-btn', onclick: () => openTaskDrawer(step.id) },
+            el('span', { text: '详情' })));
+        if (!ACTIVE_STATUS.has(status)) {
+          actions.appendChild(el('button', {
+            type: 'button', className: 'strip-btn is-primary',
+            onclick: () => { hideDrawer(); startFollowUp(step.id); },
+          }, icon('send'), el('span', { text: '从此步继续' })));
+        }
+        return el('div', { className: 'subtask-detail', dataset: { status } },
+          el('div', { className: 'subtask-detail-top' },
+            statusBadge(status),
+            el('span', { className: 'subtask-detail-step', text: `第 ${stepNo} 步` }),
+            el('button', {
+              type: 'button', className: 'subtask-detail-title',
+              attrs: { 'aria-label': '打开该步骤详情' },
+              onclick: () => openTaskDrawer(step.id),
+            }, el('span', { text: shorten(step.instruction || '（无指令内容）', 140) })),
+          ),
+          actions);
+      })),
+    );
   }
 
   function taskCard(task) {
@@ -2033,6 +2371,11 @@
     card.appendChild(top);
     card.appendChild(el('p', { className: 'task-instruction', text: task.instruction || '（无指令内容）' }));
     card.appendChild(el('div', { className: 'task-collapsed-meta', text: `创建于 ${fmtDateTime(task.createdAt)}` }));
+    // 收起状态下仍保留恢复入口（手机端默认收起，避免看不到子任务 / 无法继续）。
+    if (state.tasksCollapsed) {
+      const strip = taskRecoveryStrip(task, status);
+      if (strip) card.appendChild(strip);
+    }
     const waitingQuestion = status === 'waiting' && task.progress && task.progress.question ? String(task.progress.question) : '';
     if (waitingQuestion) {
       card.appendChild(el('div', { className: 'task-question' },
@@ -2183,6 +2526,31 @@
     );
   }
 
+  /** 任务列表上方的「可恢复失败任务」提示，避免手机端停在「进行中」时找不到失败任务。 */
+  function renderRecoveryHint() {
+    const host = $('#task-recovery-hint');
+    if (!host) return;
+    const failed = state.tasks.filter((item) => !item.archived && RETRYABLE_STATUS.has(normStatus(item.status)));
+    const hidden = !failed.length || state.taskFilter === 'failed' || state.taskFilter === 'archived';
+    host.hidden = hidden;
+    if (hidden) {
+      host.replaceChildren();
+      return;
+    }
+    const jump = el('button', { type: 'button', className: 'btn btn-ghost btn-sm' },
+      icon('alert'), el('span', { text: '查看失败任务' }));
+    jump.addEventListener('click', () => {
+      state.taskFilter = 'failed';
+      state.sigs.tasks = '';
+      renderTasks();
+    });
+    host.replaceChildren(
+      icon('alert'),
+      el('span', { className: 'recovery-hint-text', text: `${failed.length} 个失败任务可重试或继续` }),
+      jump,
+    );
+  }
+
   function renderTasks() {
     const list = $('#task-list');
     const tasks = filteredTasks();
@@ -2195,6 +2563,7 @@
     });
     if (sig === state.sigs.tasks && list.childElementCount) {
       renderFilterCounts();
+      renderRecoveryHint();
       return;
     }
     state.sigs.tasks = sig;
@@ -2215,6 +2584,7 @@
     }
     setText('#tasks-sub', `${state.tasks.length} 个任务 · 进行中 ${state.tasks.filter((t) => ACTIVE_STATUS.has(normStatus(t.status))).length}`);
     renderFilterCounts();
+    renderRecoveryHint();
   }
 
   /* ==================================================================
@@ -2295,13 +2665,25 @@
       goalRawText('span', 'goal-compact-text', progressText),
     ));
 
+    const linkedStats = goal.linkedStats && typeof goal.linkedStats === 'object' ? goal.linkedStats : null;
+    if (linkedStats && num(linkedStats.total) > 0) {
+      const parts = [`关联任务 ${num(linkedStats.total)}`];
+      if (num(linkedStats.planTotal) > 0) parts.push(`计划 ${num(linkedStats.planCompleted)}/${num(linkedStats.planTotal)}`);
+      parts.push(`${num(linkedStats.running)} 进行中`);
+      card.appendChild(el('p', { className: 'goal-compact-line goal-linked-line' },
+        el('span', { className: 'goal-compact-text', text: parts.join(' · ') }),
+      ));
+    }
+
     let nextText;
     if (goal.pendingApproval) {
       nextText = `${str(goal.pendingApproval.reason) || '到点跟进'} · 等你同意后才执行`;
     } else if (status === 'active' && goal.nextCheckAt) {
       nextText = `${fmtRelFuture(goal.nextCheckAt)}（${goalPlanText(goal.schedule)}）· 到点先征求你的同意`;
     } else if (status === 'paused') {
-      nextText = '已暂缓 · 等你的下一步指令';
+      nextText = goal.pausedUntil
+        ? `已暂停至 ${fmtDateTime(goal.pausedUntil)} · 到点自动恢复`
+        : '已暂停 · 等你手动恢复';
     } else if (status === 'stopped') {
       nextText = '已停止 · 不再自动执行';
     } else if (status === 'completed') {
@@ -2318,6 +2700,7 @@
     if (goal.pendingApproval) {
       nextRow.appendChild(el('span', { className: 'goal-compact-actions' },
         goalPendingAction('approve', '同意', 'check'),
+        goalPendingAction('skip', '跳过这次', 'refresh'),
         goalPendingAction('reject', '否决', 'x'),
       ));
     }
@@ -2534,6 +2917,7 @@
       if (!goalId) return;
       removeGoal(goalId);
       if (state.drawer.open && state.drawer.kind === 'goal' && state.drawer.id === goalId) hideDrawer();
+      if (state.goalDetail && state.goalDetail.goalId === goalId) state.goalDetail = null;
       renderGoals();
       return;
     }
@@ -2543,8 +2927,9 @@
     upsertGoal(goal);
     if (isNew) toast(`目标已创建：${goal.title || ''}`, 'success');
     renderGoals();
-    if (state.drawer.open && state.drawer.kind === 'goal' && state.drawer.id === goal.id) {
+    if (isGoalDrawerOpen(goal.id)) {
       renderGoalDrawer({ preserveScroll: true });
+      scheduleGoalDetailRefresh(goal.id);
     }
   }
 
@@ -2709,7 +3094,8 @@
     return goalApproval(goalId, 'reject');
   }
 
-  async function goalSetStatus(goalId, status) {    const goal = goalById(goalId);
+  async function goalSetStatus(goalId, status, options = {}) {
+    const goal = goalById(goalId);
     if (!goal || goalBusy.has(goalId)) return;
     if (status === 'stopped') {
       const ok = await confirmDialog({
@@ -2723,16 +3109,18 @@
     state.sigs.goals = '';
     renderGoals();
     try {
+      const body = { status };
+      if (status === 'paused' && options.pausedUntil !== undefined) body.pausedUntil = options.pausedUntil;
       const res = await api(`/api/goals/${encodeURIComponent(goalId)}`, {
         method: 'PATCH',
-        body: { status },
+        body,
         timeout: 12000,
       });
       if (res && res.goal) upsertGoal(res.goal);
       const doneText = status === 'active'
-        ? '目标已恢复'
+        ? '目标已恢复自动跟进'
         : status === 'paused'
-          ? '目标已暂停'
+          ? (options.pausedUntil ? '目标已暂停（到点自动恢复）' : '目标已暂停')
           : status === 'completed'
             ? '目标已标记为达成'
             : '目标已停止';
@@ -2751,6 +3139,172 @@
         renderGoalDrawer({ preserveScroll: true });
       }
     }
+  }
+
+  /** 跳过下一次自动跟进（保持进行中）：到点不生成待确认提案。 */
+  async function goalSkipNext(goalId) {
+    const goal = goalById(goalId);
+    if (!goal || goalBusy.has(goalId)) return;
+    if (goal.status !== 'active') {
+      toast('只有进行中的目标可以跳过下一次', 'warn');
+      return;
+    }
+    goalBusy.add(goalId);
+    state.sigs.goals = '';
+    renderGoals();
+    try {
+      const res = await api(`/api/goals/${encodeURIComponent(goalId)}/skip`, {
+        method: 'POST',
+        body: {},
+        timeout: 12000,
+      });
+      if (res && res.goal) upsertGoal(res.goal);
+      toast('已跳过下一次自动跟进', 'success');
+    } catch (err) {
+      if (err.status === 401) {
+        handleAuthLost(err.message);
+        return;
+      }
+      toast(err.message || '跳过失败', 'error');
+    } finally {
+      goalBusy.delete(goalId);
+      state.sigs.goals = '';
+      renderGoals();
+      if (state.drawer.open && state.drawer.kind === 'goal' && state.drawer.id === goalId) {
+        renderGoalDrawer({ preserveScroll: true });
+      }
+    }
+  }
+
+  /** 追加一条「新的指导指令」：会加入之后的自动跟进任务。 */
+  async function addGoalGuidance(goalId, text) {
+    const goal = goalById(goalId);
+    if (!goal) return false;
+    if (goalBusy.has(goalId)) return false;
+    goalBusy.add(goalId);
+    try {
+      const res = await api(`/api/goals/${encodeURIComponent(goalId)}/guidance`, {
+        method: 'POST',
+        body: { text },
+        timeout: 12000,
+      });
+      if (res && res.goal) upsertGoal(res.goal);
+      else await loadGoals({ silent: true });
+      toast('指导指令已添加，将在下次自动跟进时生效', 'success');
+      return true;
+    } catch (err) {
+      if (err.status === 401) {
+        handleAuthLost(err.message);
+        return false;
+      }
+      toast(err.message || '添加指导指令失败', 'error');
+      return false;
+    } finally {
+      goalBusy.delete(goalId);
+      state.sigs.goals = '';
+      renderGoals();
+      if (state.drawer.open && state.drawer.kind === 'goal' && state.drawer.id === goalId) {
+        renderGoalDrawer({ preserveScroll: true });
+      }
+    }
+  }
+
+  /** datetime-local 输入框取值（本地时间，格式 YYYY-MM-DDTHH:mm）。 */
+  function localDatetimeInputValue(ms) {
+    const date = new Date(ms);
+    const offset = date.getTimezoneOffset() * 60000;
+    return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+  }
+
+  /** 「暂停止」抽屉：跳过下一次 / 暂停 1 天 / 暂停到指定时间 / 一直暂停。 */
+  function openGoalPauseDrawer(goalId) {
+    const goal = goalById(goalId);
+    if (!goal) return;
+    const paused = goal.status === 'paused';
+    const modeSelect = el('select', { attrs: { 'aria-label': '暂停止方式' } });
+    const modes = paused
+      ? [
+        ['day', '暂停 1 天（自动恢复）'],
+        ['until', '暂停到指定时间（自动恢复）'],
+        ['manual', '一直暂停（手动恢复）'],
+      ]
+      : [
+        ['skip', '跳过下一次（保持进行中）'],
+        ['day', '暂停 1 天（自动恢复）'],
+        ['until', '暂停到指定时间（自动恢复）'],
+        ['manual', '一直暂停（手动恢复）'],
+      ];
+    for (const [value, label] of modes) {
+      modeSelect.appendChild(el('option', { value, text: label }));
+    }
+    if (paused && goal.pausedUntil) modeSelect.value = 'until';
+    const untilInput = el('input', {
+      type: 'datetime-local',
+      value: localDatetimeInputValue(
+        goal.pausedUntil ? Date.parse(goal.pausedUntil) : Date.now() + 24 * 3600 * 1000,
+      ),
+    });
+    const untilRow = el('div', { className: 'field' },
+      el('label', { text: '暂停结束时间' }),
+      untilInput,
+      el('span', { className: 'field-hint', text: '到点后自动恢复，并按计划重新排下一次跟进' }),
+    );
+    const syncRows = () => {
+      untilRow.hidden = modeSelect.value !== 'until';
+    };
+    modeSelect.addEventListener('change', syncRows);
+    syncRows();
+
+    const body = el('div', { className: 'goal-pause' },
+      el('div', { className: 'field' }, el('label', { text: '暂停止方式' }), modeSelect),
+      untilRow,
+      el('p', { className: 'goal-form-hint', text: '暂停期间不会自动创建跟进任务；「立即跟进」仍可手动执行。' }),
+    );
+
+    const confirmBtn = el('button', { type: 'button', className: 'btn btn-primary btn-sm' },
+      icon('clock'), el('span', { text: paused ? '保存暂停设置' : '确认暂停' }));
+    let busy = false;
+    confirmBtn.addEventListener('click', async () => {
+      if (busy) return;
+      const mode = modeSelect.value;
+      if (mode === 'until') {
+        const ms = Date.parse(untilInput.value);
+        if (!Number.isFinite(ms)) {
+          toast('请选择暂停结束时间', 'warn');
+          return;
+        }
+        if (ms <= Date.now()) {
+          toast('暂停结束时间必须晚于当前时间', 'warn');
+          return;
+        }
+        busy = true;
+        hideDrawer();
+        await goalSetStatus(goalId, 'paused', { pausedUntil: new Date(ms).toISOString() });
+        return;
+      }
+      busy = true;
+      hideDrawer();
+      if (mode === 'skip') await goalSkipNext(goalId);
+      else if (mode === 'day') {
+        await goalSetStatus(goalId, 'paused', { pausedUntil: new Date(Date.now() + 24 * 3600 * 1000).toISOString() });
+      } else if (mode === 'manual') {
+        // 显式传 null：把「暂停到指定时间」改成一直暂停（未传时 Hub 会保留原 pausedUntil）。
+        await goalSetStatus(goalId, 'paused', { pausedUntil: null });
+      }
+    });
+
+    openDrawer({
+      kind: 'goal-pause',
+      id: goal.id,
+      title: paused ? '修改暂停设置' : '暂停止目标',
+      subNodes: [el('span', { text: '「暂停止」只影响自动跟进，不会删除目标。' })],
+      body,
+      footerNodes: [
+        el('button', { type: 'button', className: 'btn btn-ghost btn-sm', text: '取消', onclick: hideDrawer }),
+        el('span', { className: 'spacer' }),
+        confirmBtn,
+      ],
+    });
   }
 
   async function goalDelete(goalId) {
@@ -2935,6 +3489,9 @@
       else void loadGoals();
       return;
     }
+    if (!state.goalDetail || state.goalDetail.goalId !== goal.id) {
+      state.goalDetail = { goalId: goal.id, goal, tasks: null, linkedStats: null, loading: true, error: '' };
+    }
     openDrawer({
       kind: 'goal',
       id: goal.id,
@@ -2944,6 +3501,7 @@
       footerNodes: [el('button', { type: 'button', className: 'btn btn-ghost btn-sm', text: '关闭', onclick: hideDrawer })],
     });
     renderGoalDrawer();
+    void refreshGoalDetail(goal.id);
   }
 
   function renderGoalDrawer({ preserveScroll = false } = {}) {
@@ -2979,8 +3537,15 @@
       const rejectBtn = addAction('否决并暂缓', () => void goalReject(goal.id), 'ghost');
       rejectBtn.prepend(icon('x'));
     }
-    if (status === 'active') addAction('暂停', () => void goalSetStatus(goal.id, 'paused'));
-    else if (status === 'paused') addAction('恢复', () => void goalSetStatus(goal.id, 'active'));
+    if (status === 'active') {
+      const pauseBtn = addAction('暂停止', () => openGoalPauseDrawer(goal.id));
+      pauseBtn.prepend(icon('clock'));
+    } else if (status === 'paused') {
+      addAction('修改暂停设置', () => openGoalPauseDrawer(goal.id));
+      addAction('恢复自动跟进', () => void goalSetStatus(goal.id, 'active'));
+    } else if (status === 'stopped') {
+      addAction('恢复自动跟进', () => void goalSetStatus(goal.id, 'active'));
+    }
     if (status === 'active' || status === 'paused') {
       addAction('标记已达成', () => void goalSetStatus(goal.id, 'completed'));
       addAction('停止', () => void goalSetStatus(goal.id, 'stopped'));
@@ -3009,9 +3574,12 @@
       kv('最近更新', goal.updatedAt ? fmtDateTime(goal.updatedAt) : '—'),
     );
     if (goal.status === 'stopped' && goal.stoppedAt) grid.appendChild(kv('停止时间', fmtDateTime(goal.stoppedAt)));
-    grid.appendChild(kv('目标 ID', goal.id, true));
+    if (goal.pausedUntil) grid.appendChild(kv('自动恢复时间', fmtDateTime(goal.pausedUntil)));
+    grid.appendChild(kvCopy('目标 ID', goal.id, '目标 ID 已复制'));
     info.appendChild(grid);
     wrap.appendChild(info);
+
+    wrap.appendChild(goalLinkedSection(goal));
 
     if (str(goal.description)) {
       wrap.appendChild(el('section', { className: 'detail-section' },
@@ -3019,6 +3587,66 @@
         goalRawText('p', 'goal-detail-desc', goal.description),
       ));
     }
+
+    const guidanceEntries = arr(goal.guidance)
+      .filter((entry) => str(entry && entry.text))
+      .slice()
+      .sort((a, b) => (parseIso(b.createdAt) || 0) - (parseIso(a.createdAt) || 0));
+    const guidanceSection = el('section', { className: 'detail-section' },
+      el('div', { className: 'detail-section-head' }, el('h3', { text: '指导指令' })),
+    );
+    if (guidanceEntries.length) {
+      const guidanceList = el('div', { className: 'goal-guidance-list' });
+      for (const entry of guidanceEntries.slice(0, 8)) {
+        guidanceList.appendChild(el('article', { className: 'goal-guidance' },
+          el('div', { className: 'goal-guidance-head' },
+            el('span', { className: 'goal-guidance-time', text: entry.createdAt ? fmtDateTime(entry.createdAt) : '—' }),
+          ),
+          goalRawText('p', 'goal-guidance-text', entry.text),
+        ));
+      }
+      guidanceSection.appendChild(guidanceList);
+    } else {
+      guidanceSection.appendChild(el('p', {
+        className: 'goal-checks-empty',
+        text: '还没有指导指令。写下新的方向后，会加入之后的自动跟进。',
+      }));
+    }
+    const guidanceInput = el('textarea', {
+      className: 'goal-guidance-input',
+      attrs: { rows: '3', placeholder: '例如：优先处理 A 项目；输出时多给具体行动；暂缓 B 项目。' },
+    });
+    const guidanceBtn = el('button', {
+      type: 'button',
+      className: 'btn btn-primary btn-sm goal-guidance-submit',
+      text: '添加指令',
+    });
+    guidanceBtn.addEventListener('click', async () => {
+      const text = guidanceInput.value.trim();
+      if (!text) {
+        toast('请先输入指导指令', 'warn');
+        guidanceInput.focus();
+        return;
+      }
+      if (guidanceBtn.disabled) return;
+      guidanceBtn.disabled = true;
+      guidanceBtn.textContent = tx('添加中…');
+      try {
+        const added = await addGoalGuidance(goal.id, text);
+        if (added) guidanceInput.value = '';
+      } finally {
+        guidanceBtn.disabled = false;
+        guidanceBtn.textContent = tx('添加指令');
+      }
+    });
+    guidanceSection.appendChild(el('div', { className: 'goal-guidance-form' },
+      guidanceInput,
+      el('div', { className: 'goal-guidance-form-foot' },
+        el('span', { className: 'goal-guidance-hint', text: '指导指令会附加到之后的每一次自动跟进。' }),
+        guidanceBtn,
+      ),
+    ));
+    wrap.appendChild(guidanceSection);
 
     const suggestion = el('section', { className: 'detail-section' },
       el('div', { className: 'detail-section-head' },
@@ -3087,9 +3715,2182 @@
         el('span', { className: 'mono', text: goal.id }),
       ],
       body: wrap,
-      footerNodes: [el('button', { type: 'button', className: 'btn btn-ghost btn-sm', text: '关闭', onclick: hideDrawer })],
+      footerNodes: [
+        el('button', { type: 'button', className: 'btn btn-ghost btn-sm', text: '关闭', onclick: hideDrawer }),
+        el('span', { className: 'spacer' }),
+        el('button', {
+          type: 'button', className: 'btn btn-ghost btn-sm',
+          onclick: () => copyText(goal.id, '目标 ID 已复制'),
+        }, icon('copy'), '复制目标 ID'),
+      ],
     });
     if (preserveScroll && bodyNode) bodyNode.scrollTop = scroll;
+  }
+
+  /* ==================================================================
+   * 目标 ↔ 任务关联
+   * ================================================================== */
+  function goalDisplayName(goal) {
+    if (!goal || typeof goal !== 'object') return '';
+    return str(goal.nickname) || str(goal.title) || '未命名目标';
+  }
+
+  /** 是否打开了目标详情抽屉（传 goalId 时限定某个目标）。 */
+  function isGoalDrawerOpen(goalId) {
+    if (!state.drawer.open || state.drawer.kind !== 'goal') return false;
+    return goalId ? state.drawer.id === goalId : true;
+  }
+
+  function goalDetailFor(goalId) {
+    return state.goalDetail && state.goalDetail.goalId === goalId ? state.goalDetail : null;
+  }
+
+  /** 拉取单个目标详情（含关联任务），结果缓存到 state.goalDetail。 */
+  async function refreshGoalDetail(goalId) {
+    const id = str(goalId);
+    if (!id || !state.connected) return;
+    if (!state.goalDetail || state.goalDetail.goalId !== id) {
+      state.goalDetail = { goalId: id, goal: goalById(id), tasks: null, linkedStats: null, loading: true, error: '' };
+    } else {
+      state.goalDetail.loading = true;
+      state.goalDetail.error = '';
+    }
+    if (isGoalDrawerOpen(id)) renderGoalDrawer({ preserveScroll: true });
+    try {
+      const res = await api(`/api/goals/${encodeURIComponent(id)}`, { timeout: 12000 });
+      if (!state.goalDetail || state.goalDetail.goalId !== id) return;
+      const goal = res && res.goal && typeof res.goal === 'object' ? res.goal : goalById(id);
+      const tasks = arr(res && res.tasks).filter((task) => task && task.id);
+      const linkedStats = res && res.linkedStats && typeof res.linkedStats === 'object'
+        ? res.linkedStats
+        : (goal && goal.linkedStats) || null;
+      state.goalDetail = { goalId: id, goal, tasks, linkedStats, loading: false, error: '' };
+      if (goal && goal.id) {
+        const idx = state.goals.findIndex((item) => item && item.id === goal.id);
+        if (idx >= 0) state.goals[idx] = { ...state.goals[idx], ...goal };
+        state.sigs.goals = '';
+      }
+    } catch (err) {
+      if (err.status === 401) return handleAuthLost(err.message);
+      if (!state.goalDetail || state.goalDetail.goalId !== id) return;
+      state.goalDetail.loading = false;
+      state.goalDetail.error = err.status === 404 ? '目标不存在或已删除' : (err.message || '关联任务载入失败');
+    } finally {
+      if (state.goalDetail && state.goalDetail.goalId === id) {
+        renderGoals();
+        if (isGoalDrawerOpen(id)) renderGoalDrawer({ preserveScroll: true });
+      }
+    }
+  }
+
+  /** SSE 触发刷新：任务事件常成批到达，做 400ms 防抖。 */
+  function scheduleGoalDetailRefresh(goalId) {
+    if (!goalId) return;
+    clearTimeout(goalDetailTimer);
+    goalDetailTimer = setTimeout(() => {
+      goalDetailTimer = 0;
+      const openId = isGoalDrawerOpen() ? state.drawer.id : goalId;
+      if (openId) void refreshGoalDetail(openId);
+    }, 400);
+  }
+
+  function openLinkedTask(task) {
+    if (!task || !str(task.id)) return;
+    if (!state.tasks.some((item) => item && item.id === task.id)) upsertTask(task);
+    openTaskDrawer(task.id);
+  }
+
+  async function linkGoalTask(goalId, taskId) {
+    const gid = str(goalId);
+    const tid = str(taskId);
+    if (!gid || !tid) return false;
+    try {
+      const res = await api(`/api/goals/${encodeURIComponent(gid)}/link`, {
+        method: 'POST', body: { taskId: tid }, timeout: 12000,
+      });
+      if (res && res.goal) upsertGoal(res.goal);
+      if (res && res.task) upsertTask(res.task);
+      else {
+        const local = state.tasks.find((item) => item && item.id === tid);
+        if (local) local.goalId = gid;
+      }
+      if (state.goalDetail && state.goalDetail.goalId === gid) state.goalDetail = null;
+      state.sigs.goals = '';
+      renderGoals();
+      toast('任务已关联到目标', 'success');
+      void refreshGoalDetail(gid);
+      if (state.drawer.open && state.drawer.kind === 'task' && state.drawer.id === tid) refreshOpenDrawer();
+      return true;
+    } catch (err) {
+      if (err.status === 401) {
+        handleAuthLost(err.message);
+        return false;
+      }
+      toast(err.message || '关联任务失败', 'error');
+      return false;
+    }
+  }
+
+  async function unlinkGoalTask(goalId, taskId) {
+    const gid = str(goalId);
+    const tid = str(taskId);
+    if (!gid || !tid || goalBusy.has(gid)) return;
+    goalBusy.add(gid);
+    try {
+      const res = await api(`/api/goals/${encodeURIComponent(gid)}/unlink`, {
+        method: 'POST', body: { taskId: tid }, timeout: 12000,
+      });
+      if (res && res.goal) upsertGoal(res.goal);
+      if (res && res.task) upsertTask(res.task);
+      else {
+        const local = state.tasks.find((item) => item && item.id === tid);
+        if (local && local.goalId === gid) local.goalId = '';
+      }
+      if (state.goalDetail && state.goalDetail.goalId === gid) {
+        state.goalDetail.tasks = arr(state.goalDetail.tasks).filter((item) => item && item.id !== tid);
+      }
+      toast('已取消关联', 'success');
+    } catch (err) {
+      if (err.status === 401) return handleAuthLost(err.message);
+      toast(err.message || '取消关联失败', 'error');
+    } finally {
+      goalBusy.delete(gid);
+      state.sigs.goals = '';
+      renderGoals();
+      if (isGoalDrawerOpen(gid)) renderGoalDrawer({ preserveScroll: true });
+      if (state.drawer.open && state.drawer.kind === 'task' && state.drawer.id === tid) refreshOpenDrawer();
+      if (isGoalDrawerOpen(gid) || goalDetailFor(gid)) void refreshGoalDetail(gid);
+    }
+  }
+
+  function linkedTaskRow(goalId, task) {
+    const status = normStatus(task.status);
+    const instruction = str(task.instruction) || '（无指令内容）';
+    const row = el('article', { className: 'linked-task-row', dataset: { id: task.id } });
+    row.appendChild(el('div', { className: 'link-row-head' },
+      statusBadge(status),
+      el('span', { className: 'linked-task-text', text: shorten(instruction, 100), title: instruction }),
+    ));
+    const meta = el('div', { className: 'linked-task-meta' });
+    if (task.isPlan && task.childProgress && typeof task.childProgress === 'object') {
+      const child = task.childProgress;
+      const total = Math.max(0, num(child.total));
+      const completed = Math.max(0, num(child.completed));
+      const parts = [`子任务 ${completed}/${total}`];
+      if (num(child.failed) > 0) parts.push(`失败 ${num(child.failed)}`);
+      if (num(child.running) > 0) parts.push(`进行中 ${num(child.running)}`);
+      meta.appendChild(el('span', { className: 'linked-task-plan', text: parts.join(' · ') }));
+    }
+    const progressMessage = task.progress && str(task.progress.message) ? str(task.progress.message) : '';
+    if (progressMessage) {
+      meta.appendChild(el('span', { className: 'linked-task-progress', text: shorten(progressMessage, 60), title: progressMessage }));
+    } else if (str(task.assignedDeviceName)) {
+      meta.appendChild(el('span', { className: 'linked-task-device', text: task.assignedDeviceName }));
+    } else if (str(task.planTitle)) {
+      meta.appendChild(el('span', { className: 'linked-task-device', text: task.planTitle }));
+    }
+    if (meta.childElementCount) row.appendChild(meta);
+    row.appendChild(el('div', { className: 'link-row-actions' },
+      el('button', { type: 'button', className: 'link-btn', onclick: () => openLinkedTask(task) }, el('span', { text: '打开' })),
+      el('button', { type: 'button', className: 'link-btn', onclick: () => void unlinkGoalTask(goalId, task.id) }, el('span', { text: '取消关联' })),
+    ));
+    return row;
+  }
+
+  /** 目标详情里的「关联任务」区块：先展示缓存，SSE 到达后刷新。 */
+  function goalLinkedSection(goal) {
+    const detail = goalDetailFor(goal.id);
+    const section = el('section', { className: 'detail-section' },
+      el('div', { className: 'detail-section-head' },
+        el('h3', { text: '关联任务' }),
+        el('div', { className: 'detail-head-actions' },
+          el('button', { type: 'button', className: 'link-btn', onclick: () => openGoalTaskPicker(goal.id) },
+            icon('link'), el('span', { text: '关联任务' })),
+        ),
+      ),
+    );
+    if (!detail || (detail.loading && !detail.tasks)) {
+      section.appendChild(el('p', { className: 'goal-checks-empty', text: '正在载入关联任务…' }));
+      return section;
+    }
+    if (detail.error && !arr(detail.tasks).length) {
+      section.appendChild(el('div', { className: 'goal-checks-empty linked-error' },
+        el('span', { text: detail.error }),
+        el('button', { type: 'button', className: 'link-btn', onclick: () => void refreshGoalDetail(goal.id) }, el('span', { text: '重试' })),
+      ));
+      return section;
+    }
+    const tasks = arr(detail.tasks);
+    const stats = detail.linkedStats
+      || (goal.linkedStats && typeof goal.linkedStats === 'object' ? goal.linkedStats : null);
+    if (stats && num(stats.total) > 0) {
+      const bits = [`共 ${num(stats.total)} 个`];
+      const active = num(stats.running) + num(stats.waiting);
+      if (active > 0) bits.push(`进行中 ${active}`);
+      if (num(stats.completed) > 0) bits.push(`已完成 ${num(stats.completed)}`);
+      if (num(stats.failed) > 0) bits.push(`失败 ${num(stats.failed)}`);
+      if (num(stats.planTotal) > 0) bits.push(`计划 ${num(stats.planCompleted)}/${num(stats.planTotal)}`);
+      section.appendChild(el('p', { className: 'linked-summary', text: bits.join(' · ') }));
+    }
+    if (!tasks.length) {
+      section.appendChild(el('p', {
+        className: 'goal-checks-empty',
+        text: '还没有关联任务。把正在进行的任务关联进来，目标页就能看到它的进度。',
+      }));
+      return section;
+    }
+    const list = el('div', { className: 'linked-task-list' });
+    for (const task of tasks.slice(0, 40)) list.appendChild(linkedTaskRow(goal.id, task));
+    section.appendChild(list);
+    if (detail.loading) section.appendChild(el('p', { className: 'goal-checks-empty', text: '正在刷新关联任务…' }));
+    return section;
+  }
+
+  function openGoalTaskPicker(goalId) {
+    const goal = goalById(goalId);
+    if (!goal) return;
+    const candidates = state.tasks
+      .filter((task) => task && task.id && !task.archived && !task.parentTaskId
+        && (!task.goalId || task.goalId !== goal.id))
+      .sort((a, b) => (parseIso(b.createdAt) || 0) - (parseIso(a.createdAt) || 0))
+      .slice(0, 50);
+    const body = el('div', { className: 'link-picker' },
+      el('p', { className: 'goal-form-hint', text: '选择要关联到此目标的任务。已经关联其它目标的任务会被移动过来。' }),
+    );
+    if (!candidates.length) {
+      body.appendChild(el('p', { className: 'goal-checks-empty', text: '没有可关联的任务。先在「任务」页创建一个吧。' }));
+    } else {
+      const list = el('div', { className: 'link-picker-list' });
+      for (const task of candidates) list.appendChild(taskPickRow(goal.id, task));
+      body.appendChild(list);
+    }
+    openDrawer({
+      kind: 'goal-link-task',
+      id: goal.id,
+      title: '关联任务',
+      subNodes: [el('span', { className: 'goal-plan' }, icon('target'), el('span', { text: goalDisplayName(goal) }))],
+      body,
+      footerNodes: [el('button', { type: 'button', className: 'btn btn-ghost btn-sm', text: '关闭', onclick: hideDrawer })],
+    });
+  }
+
+  function taskPickRow(goalId, task) {
+    const row = el('button', { type: 'button', className: 'link-row link-row-button', dataset: { id: task.id } },
+      el('span', { className: 'link-row-main' },
+        el('span', { className: 'link-row-title', text: shorten(str(task.instruction) || '（无指令内容）', 90) }),
+        el('span', { className: 'link-row-meta-line' },
+          statusBadge(normStatus(task.status)),
+          el('span', { className: 'link-row-time', text: fmtDateTime(task.createdAt) }),
+          task.goalId ? el('span', { className: 'link-row-note', text: '已关联其它目标' }) : null,
+        ),
+      ),
+      el('span', { className: 'link-row-action' }, icon('link'), el('span', { text: '关联' })),
+    );
+    let busy = false;
+    row.addEventListener('click', async () => {
+      if (busy) return;
+      busy = true;
+      row.disabled = true;
+      const linked = await linkGoalTask(goalId, task.id);
+      busy = false;
+      if (linked) {
+        hideDrawer();
+        openGoalDrawer(goalId);
+      } else {
+        row.disabled = false;
+      }
+    });
+    return row;
+  }
+
+  function openTaskGoalPicker(taskId) {
+    const task = state.tasks.find((item) => item && item.id === taskId);
+    if (!task) {
+      toast('任务不存在或已被清理', 'warn');
+      return;
+    }
+    const goals = state.goals
+      .filter((goal) => goal && goal.id && goal.id !== task.goalId)
+      .sort((a, b) => (parseIso(b.updatedAt) || 0) - (parseIso(a.updatedAt) || 0));
+    const body = el('div', { className: 'link-picker' },
+      el('p', { className: 'goal-form-hint' },
+        el('span', { text: '把任务关联到哪个目标？' }),
+        el('span', { className: 'link-picker-task', text: shorten(str(task.instruction) || '（无指令内容）', 60) }),
+      ),
+    );
+    if (!goals.length) {
+      body.appendChild(el('p', {
+        className: 'goal-checks-empty',
+        text: task.goalId ? '没有其它可关联的目标。' : '还没有长期目标。先在「目标」页创建一个。',
+      }));
+    } else {
+      const list = el('div', { className: 'link-picker-list' });
+      for (const goal of goals) list.appendChild(goalPickRow(task.id, goal));
+      body.appendChild(list);
+    }
+    openDrawer({
+      kind: 'task-link-goal',
+      id: task.id,
+      title: '关联到目标',
+      subNodes: [el('span', { className: 'mono', text: task.id })],
+      body,
+      footerNodes: [el('button', { type: 'button', className: 'btn btn-ghost btn-sm', text: '关闭', onclick: hideDrawer })],
+    });
+  }
+
+  function goalPickRow(taskId, goal) {
+    const row = el('button', { type: 'button', className: 'link-row link-row-button', dataset: { id: goal.id } },
+      el('span', { className: 'link-row-main' },
+        el('span', { className: 'link-row-title', text: goalDisplayName(goal) }),
+        el('span', { className: 'link-row-meta-line' },
+          goalStatusBadge(goal),
+          el('span', { className: 'link-row-time', text: goalPlanText(goal.schedule) }),
+        ),
+      ),
+      el('span', { className: 'link-row-action' }, icon('link'), el('span', { text: '关联' })),
+    );
+    let busy = false;
+    row.addEventListener('click', async () => {
+      if (busy) return;
+      busy = true;
+      row.disabled = true;
+      const linked = await linkGoalTask(goal.id, taskId);
+      busy = false;
+      if (linked) {
+        hideDrawer();
+        if (state.tasks.some((item) => item && item.id === taskId)) openTaskDrawer(taskId);
+      } else {
+        row.disabled = false;
+      }
+    });
+    return row;
+  }
+
+  async function unlinkTaskGoal(task) {
+    if (!task || !task.id) return;
+    const goalId = str(task.goalId);
+    if (!goalId) return;
+    await unlinkGoalTask(goalId, task.id);
+  }
+
+  /** 任务详情里的「关联目标」区块。 */
+  function taskGoalSectionNode(task) {
+    const goalId = str(task.goalId);
+    const goal = goalId ? goalById(goalId) : null;
+    const section = el('section', { className: 'detail-section' },
+      el('div', { className: 'detail-section-head' },
+        el('h3', { text: '关联目标' }),
+        el('div', { className: 'detail-head-actions' },
+          el('button', { type: 'button', className: 'link-btn', onclick: () => openTaskGoalPicker(task.id) },
+            icon('link'), el('span', { text: '关联到目标' })),
+        ),
+      ),
+    );
+    if (!goalId) {
+      section.appendChild(el('p', {
+        className: 'goal-checks-empty',
+        text: '还没有关联目标。关联后能在目标页看到这个任务的进度。',
+      }));
+      return section;
+    }
+    const displayName = goal ? goalDisplayName(goal) : goalId;
+    section.appendChild(el('div', { className: 'link-row goal-link-row' },
+      el('span', { className: 'link-row-main' },
+        el('span', { className: 'link-row-title', text: displayName, title: displayName }),
+        el('span', { className: 'link-row-meta-line' },
+          goal ? goalStatusBadge(goal) : null,
+          el('span', { className: 'mono', text: goalId }),
+        ),
+      ),
+      el('span', { className: 'link-row-actions' },
+        el('button', { type: 'button', className: 'link-btn', onclick: () => openGoalDrawer(goalId) },
+          icon('target'), el('span', { text: '打开目标' })),
+        el('button', { type: 'button', className: 'link-btn', onclick: () => copyText(goalId, '目标 ID 已复制') },
+          icon('copy'), el('span', { text: '复制目标 ID' })),
+      ),
+    ));
+    return section;
+  }
+
+  /* ==================================================================
+   * 自主大脑：状态卡 + 设置/历史抽屉
+   * ================================================================== */
+  function brainChipView(brain) {
+    if (!brain || !brain.enabled) return { text: '已暂停', tone: 'paused' };
+    if (brain.mode === 'suggest') return { text: '建议', tone: 'suggest' };
+    return { text: '自动', tone: 'auto' };
+  }
+
+  function brainNextIso(brain) {
+    if (!brain || !brain.enabled) return '';
+    if (brain.nextThinkAt) return brain.nextThinkAt;
+    if (!brain.lastThinkAt) return '';
+    const last = parseIso(brain.lastThinkAt);
+    if (last === null) return '';
+    return new Date(last + Math.max(60, num(brain.intervalSec, 180)) * 1000).toISOString();
+  }
+
+  /** 兼容两种来源：大脑对象用 lastAssessment，决策记录用 assessment。 */
+  function brainAssessmentOf(source) {
+    if (!source || typeof source !== 'object') return null;
+    if (source.assessment && typeof source.assessment === 'object') return source.assessment;
+    if (source.lastAssessment && typeof source.lastAssessment === 'object') return source.lastAssessment;
+    return null;
+  }
+
+  function brainStepText(assessment, key) {
+    return assessment && typeof assessment[key] === 'string' ? assessment[key].trim() : '';
+  }
+
+  /** 渲染六步思考（compact 时只取卡片三步并截断长文本）。 */
+  function brainAssessmentNode(assessment, { compact = false } = {}) {
+    if (!assessment || typeof assessment !== 'object') return null;
+    const steps = compact ? BRAIN_STEPS.filter((step) => BRAIN_CARD_STEPS.includes(step.key)) : BRAIN_STEPS;
+    const wrap = el('div', { className: `brain-assessment${compact ? ' is-compact' : ''}` });
+    let hasAny = false;
+    for (const step of steps) {
+      const value = brainStepText(assessment, step.key);
+      if (!value) continue;
+      hasAny = true;
+      const textNode = goalRawText('p', 'brain-step-text', compact ? shorten(value, 160) : value);
+      textNode.title = value;
+      wrap.appendChild(el('div', { className: 'brain-step' },
+        el('span', { className: 'brain-step-label', text: tr(step.i18n) }),
+        textNode,
+      ));
+    }
+    return hasAny ? wrap : null;
+  }
+
+  /** 节律行文案：基准 → 实际 · 空闲 · 跳过 · 下次。 */
+  function brainRhythmText(brain) {
+    const base = Math.max(0, Math.round(num(brain && brain.intervalSec, 180)));
+    const effectiveRaw = Number(brain && brain.effectiveIntervalSec);
+    const effective = Math.max(0, Math.round(Number.isFinite(effectiveRaw) ? effectiveRaw : base));
+    const idle = Math.max(0, Math.round(num(brain && brain.idleStreak, 0)));
+    const skipped = Math.max(0, Math.round(num(brain && brain.skippedCycles, 0)));
+    const nextIso = brainNextIso(brain);
+    let nextText;
+    if (!brain || !brain.enabled) nextText = tr('brain.paused');
+    else if (nextIso) nextText = fmtRelFuture(nextIso);
+    else nextText = tr('brain.waiting');
+    return tr('brain.rhythm', {
+      base: `${base}s`,
+      effective: `${effective}s`,
+      idle,
+      skipped,
+      next: nextText,
+    });
+  }
+
+  function renderBrainCard() {
+    const card = $('#brain-card');
+    if (!card) return;
+    const brain = state.brain;
+    if (!brain || typeof brain !== 'object') {
+      card.hidden = true;
+      return;
+    }
+    const scrollY = window.scrollY;
+    card.hidden = false;
+    const chipView = brainChipView(brain);
+    const chip = $('#brain-chip');
+    if (chip) {
+      chip.textContent = tx(chipView.text);
+      chip.dataset.tone = chipView.tone;
+    }
+    const summary = $('#brain-summary');
+    if (summary) {
+      const text = str(brain.lastSummary);
+      summary.textContent = tx(text || '还没有思考记录');
+      summary.title = text || '';
+      summary.classList.toggle('is-empty', !text);
+    }
+    const last = $('#brain-last');
+    if (last) {
+      last.textContent = tx(brain.lastThinkAt ? fmtRel(brain.lastThinkAt) : '—');
+      last.title = brain.lastThinkAt ? fmtDateTime(brain.lastThinkAt) : '';
+    }
+    const next = $('#brain-next');
+    if (next) {
+      const nextIso = brainNextIso(brain);
+      next.textContent = tx(nextIso ? fmtRelFuture(nextIso) : (brain.enabled ? '等待安排' : '已暂停'));
+      next.title = nextIso ? fmtDateTime(nextIso) : '';
+    }
+    const think = $('#brain-think');
+    if (think) {
+      const busy = Boolean(state.brainBusy) || Boolean(brain.thinking);
+      think.disabled = busy;
+      const label = $('#brain-think-label');
+      if (label) label.textContent = tx(busy ? '思考中…' : '立即思考');
+    }
+    const toggleLabel = $('#brain-toggle-label');
+    if (toggleLabel) toggleLabel.textContent = tx(brain.enabled ? '暂停' : '启用');
+    const errorNode = $('#brain-error');
+    if (errorNode) {
+      const text = str(state.brainError) || str(brain.lastError);
+      errorNode.hidden = !text;
+      errorNode.textContent = text ? shorten(text, 80) : '';
+      errorNode.title = text || '';
+    }
+    // 需要主人参与的事项：横幅 + 「知道了」确认（PATCH ownerAskAck）
+    const ask = brain.ownerAsk && typeof brain.ownerAsk === 'object' ? brain.ownerAsk : null;
+    const askText = ask ? str(ask.text) : '';
+    const askBox = $('#brain-owner-ask');
+    if (askBox) {
+      askBox.hidden = !askText;
+      const askLabel = $('#brain-owner-ask-label');
+      if (askLabel) askLabel.textContent = tr('brain.ownerAskLabel');
+      const askTextNode = $('#brain-owner-ask-text');
+      if (askTextNode) {
+        askTextNode.textContent = askText;
+        askTextNode.title = askText;
+      }
+      const ackBtn = $('#brain-owner-ack');
+      if (ackBtn) {
+        ackBtn.textContent = tr('brain.ownerAskAck');
+        ackBtn.disabled = Boolean(state.brainBusy);
+      }
+    }
+    // 六步思考摘要：卡片上展示 目标 / 进度 / 我来推进 三步
+    const assessBox = $('#brain-assessment');
+    if (assessBox) {
+      assessBox.replaceChildren();
+      const assessmentNode = brainAssessmentNode(brainAssessmentOf(brain), { compact: true });
+      assessBox.hidden = !assessmentNode;
+      if (assessmentNode) assessBox.appendChild(assessmentNode);
+    }
+    // 自适应节律行
+    const rhythmNode = $('#brain-rhythm');
+    if (rhythmNode) {
+      rhythmNode.hidden = false;
+      rhythmNode.textContent = brainRhythmText(brain);
+      rhythmNode.title = tr('brain.rhythmHint');
+    }
+    if (window.scrollY !== scrollY) window.scrollTo({ top: scrollY, behavior: 'auto' });
+  }
+
+  /** 拉取大脑状态与决策历史（设计文档约定的统一入口）。 */
+  async function refreshBrain() {
+    if (!state.connected) return;
+    try {
+      const res = await api('/api/brain', { timeout: 12000 });
+      if (res && res.brain && typeof res.brain === 'object') state.brain = res.brain;
+      if (res && Array.isArray(res.decisions)) state.brainDecisions = res.decisions.slice(0, 20);
+      if (state.brain) state.brainError = '';
+    } catch (err) {
+      if (err.status === 401) return handleAuthLost(err.message);
+      // 旧版 Hub 没有大脑接口：静默忽略，卡片保持隐藏
+      if (err.status === 404) state.brain = null;
+    } finally {
+      renderBrainCard();
+    }
+  }
+
+  function onBrainUpdated(payload) {
+    const brain = payload && payload.brain && typeof payload.brain === 'object' ? payload.brain : payload;
+    if (!brain || typeof brain !== 'object') return;
+    state.brain = brain;
+    if (Array.isArray(brain.decisions)) state.brainDecisions = brain.decisions.slice(0, 20);
+    state.brainError = '';
+    if (state.tab === 'goals') renderBrainCard();
+    if (state.drawer.open && state.drawer.kind === 'brain' && !state.brainBusy) {
+      void loadBrainDrawer({ preserveScroll: true });
+    }
+  }
+
+  async function runBrainThink() {
+    if (state.brainBusy) return;
+    state.brainBusy = true;
+    state.brainError = '';
+    renderBrainCard();
+    try {
+      const res = await api('/api/brain/think', { method: 'POST', timeout: 120000 });
+      if (res && res.brain && typeof res.brain === 'object') state.brain = res.brain;
+      if (res && res.decision) {
+        const decision = res.decision;
+        state.brainDecisions = [decision, ...arr(state.brainDecisions).filter((item) => item && item.id !== decision.id)].slice(0, 20);
+        const summaryText = str(decision.summary);
+        toast(summaryText ? `大脑：${shorten(summaryText, 70)}` : '大脑已完成一次思考', 'success', 5200);
+      } else {
+        const message = str(res && res.error) || '大脑没有返回决策';
+        state.brainError = message;
+        toast(message, 'warn', 5200);
+      }
+    } catch (err) {
+      if (err.status === 401) return handleAuthLost(err.message);
+      const message = err && err.message ? err.message : '立即思考失败';
+      state.brainError = message;
+      toast(message, 'error', 5200);
+    } finally {
+      state.brainBusy = false;
+      renderBrainCard();
+      if (state.drawer.open && state.drawer.kind === 'brain') void loadBrainDrawer({ preserveScroll: true });
+    }
+  }
+
+  async function toggleBrain() {
+    const brain = state.brain;
+    if (!brain || state.brainBusy) return;
+    const next = !brain.enabled;
+    try {
+      const res = await api('/api/brain', { method: 'PATCH', body: { enabled: next }, timeout: 12000 });
+      if (res && res.brain && typeof res.brain === 'object') state.brain = res.brain;
+      state.brainError = '';
+      toast(next ? '自主大脑已启用' : '自主大脑已暂停', 'success');
+    } catch (err) {
+      if (err.status === 401) return handleAuthLost(err.message);
+      toast(err.message || '操作失败', 'error');
+    } finally {
+      renderBrainCard();
+      if (state.drawer.open && state.drawer.kind === 'brain') void loadBrainDrawer({ preserveScroll: true });
+    }
+  }
+
+  /** 确认「需要主人」提醒：PATCH ownerAskAck 后刷新卡片与抽屉。 */
+  async function ackBrainOwnerAsk() {
+    if (state.brainBusy) return;
+    state.brainBusy = true;
+    renderBrainCard();
+    try {
+      const res = await api('/api/brain', { method: 'PATCH', body: { ownerAskAck: true }, timeout: 15000 });
+      if (res && res.brain && typeof res.brain === 'object') state.brain = res.brain;
+      state.brainError = '';
+      toast(tr('brain.ownerAskCleared'), 'success');
+    } catch (err) {
+      if (err.status === 401) return handleAuthLost(err.message);
+      toast(str(err && err.message) || tr('brain.ownerAskFailed'), 'error');
+    } finally {
+      state.brainBusy = false;
+      renderBrainCard();
+      if (state.drawer.open && state.drawer.kind === 'brain') void loadBrainDrawer({ preserveScroll: true });
+    }
+  }
+
+  function openBrainDrawer() {
+    openDrawer({
+      kind: 'brain',
+      id: 'brain',
+      title: '自主大脑',
+      subNodes: [el('span', { text: '后台定时分析目标与任务，按设置给出建议或执行白名单动作。' })],
+      body: el('p', { className: 'goal-checks-empty', text: '正在载入大脑设置…' }),
+      footerNodes: [el('button', { type: 'button', className: 'btn btn-ghost btn-sm', text: '关闭', onclick: hideDrawer })],
+    });
+    void loadBrainDrawer();
+  }
+
+  async function loadBrainDrawer({ preserveScroll = false } = {}) {
+    if (!state.drawer.open || state.drawer.kind !== 'brain') return;
+    const bodyNode = $('#drawer-body');
+    const scroll = preserveScroll && bodyNode ? bodyNode.scrollTop : 0;
+    try {
+      const res = await api('/api/brain', { timeout: 15000 });
+      if (res && res.brain && typeof res.brain === 'object') state.brain = res.brain;
+      if (res && Array.isArray(res.decisions)) state.brainDecisions = res.decisions.slice(0, 20);
+      state.brainError = '';
+    } catch (err) {
+      if (err.status === 401) return handleAuthLost(err.message);
+      state.brainError = err.message || '大脑状态载入失败';
+    }
+    if (!state.drawer.open || state.drawer.kind !== 'brain') return;
+    renderBrainDrawerBody();
+    const nextBody = $('#drawer-body');
+    if (nextBody) nextBody.scrollTop = scroll;
+    renderBrainCard();
+  }
+
+  function brainErrorBox(message, label) {
+    const text = str(message);
+    if (!text) return null;
+    return el('div', { className: 'task-error brain-error-box' },
+      icon('alert'),
+      el('span', { className: 'brain-error-label', text: label }),
+      goalRawText('span', 'brain-error-text', text),
+    );
+  }
+
+  function brainActionNode(action) {
+    if (!action || typeof action !== 'object') return null;
+    const executed = action.executed === true;
+    const skipped = str(action.skippedReason);
+    const failed = str(action.error);
+    let stateText;
+    if (executed) stateText = '已执行';
+    else if (skipped) stateText = `跳过：${shorten(skipped, 46)}`;
+    else if (failed) stateText = `失败：${shorten(failed, 46)}`;
+    else stateText = '未执行';
+    const refText = str(action.taskId)
+      ? `任务 ${shorten(action.taskId, 12)}`
+      : (str(action.goalId) ? `目标 ${shorten(action.goalId, 12)}` : '');
+    let confidenceText = '';
+    if (Number.isFinite(action.confidence)) {
+      const value = action.confidence <= 1 ? action.confidence * 100 : action.confidence;
+      confidenceText = `置信度 ${Math.round(value)}%`;
+    }
+    const row = el('div', { className: 'brain-action-row' },
+      el('span', { className: 'brain-action-name', text: BRAIN_ACTION_LABEL[action.action] || str(action.action) || '无动作' }),
+      refText ? el('span', { className: 'brain-action-ref', text: refText }) : null,
+      el('span', {
+        className: 'brain-action-state',
+        dataset: { state: executed ? 'executed' : (skipped || failed ? 'skipped' : 'pending') },
+        text: stateText,
+      }),
+      confidenceText ? el('span', { className: 'brain-action-confidence', text: confidenceText }) : null,
+    );
+    if (str(action.reason)) row.title = action.reason;
+    return row;
+  }
+
+  function brainDecisionNode(decision) {
+    const item = el('article', { className: 'brain-decision' });
+    item.appendChild(el('div', { className: 'brain-decision-head' },
+      el('span', { className: 'brain-decision-time', text: str(decision.at) ? fmtDateTime(decision.at) : '—' }),
+      el('span', { className: 'brain-decision-tag', text: BRAIN_TRIGGER_LABEL[decision.trigger] || str(decision.trigger) || '—' }),
+      el('span', { className: 'brain-decision-tag', text: BRAIN_MODE_LABEL[decision.mode] || str(decision.mode) || '—' }),
+      Number.isFinite(decision.durationMs) ? el('span', { className: 'brain-decision-duration', text: fmtDuration(decision.durationMs) }) : null,
+    ));
+    if (str(decision.summary)) item.appendChild(goalRawText('p', 'brain-decision-summary', decision.summary));
+    if (str(decision.error)) item.appendChild(goalRawText('p', 'brain-decision-error', decision.error));
+    const assessmentNode = brainAssessmentNode(brainAssessmentOf(decision), { compact: true });
+    if (assessmentNode) {
+      item.appendChild(el('div', { className: 'brain-decision-assessment' },
+        el('span', { className: 'brain-decision-assessment-label', text: tr('brain.decisionAssessment') }),
+        assessmentNode,
+      ));
+    }
+    const decisionAsk = decision.ownerAsk && typeof decision.ownerAsk === 'object' ? decision.ownerAsk : null;
+    if (decisionAsk && str(decisionAsk.text)) {
+      item.appendChild(el('div', { className: 'brain-decision-owner-ask' },
+        icon('bell'),
+        goalRawText('span', '', str(decisionAsk.text)),
+      ));
+    }
+    const actions = arr(decision.actions);
+    if (actions.length) {
+      const list = el('div', { className: 'brain-decision-actions' });
+      for (const action of actions) {
+        const row = brainActionNode(action);
+        if (row) list.appendChild(row);
+      }
+      item.appendChild(list);
+    }
+    return item;
+  }
+
+  function renderBrainDrawerBody() {
+    const brain = state.brain;
+    if (!brain) {
+      const body = el('div', { className: 'link-picker' },
+        brainErrorBox(state.brainError || '当前 Hub 暂不支持自主大脑，请更新后端后再试。', '无法载入'),
+        el('p', {
+          className: 'goal-form-hint',
+          text: '自主大脑依赖 Hub 后端的 /api/brain 接口（BRAIN_API_KEY / AGNES_API_KEY 配置模型后可用）。',
+        }),
+      );
+      updateDrawerContent({
+        title: '自主大脑',
+        subNodes: [el('span', { text: '大脑状态载入失败。' })],
+        body,
+        footerNodes: [el('button', { type: 'button', className: 'btn btn-ghost btn-sm', text: '关闭', onclick: hideDrawer })],
+      });
+      return;
+    }
+    const body = el('div');
+    const chipView = brainChipView(brain);
+
+    body.appendChild(el('div', { className: 'brain-drawer-status' },
+      el('span', { className: 'brain-chip', dataset: { tone: chipView.tone }, text: chipView.text }),
+      el('span', {
+        className: 'brain-drawer-model',
+        text: brain.configured ? `模型 ${str(brain.model) || '默认'}` : '未配置模型（需要 BRAIN_API_KEY / AGNES_API_KEY）',
+      }),
+    ));
+    const errorBox = brainErrorBox(str(brain.lastError) || state.brainError, '上次错误');
+    if (errorBox) body.appendChild(errorBox);
+
+    // 六步思考（完整六行）
+    const assessment = brainAssessmentOf(brain);
+    const assessmentSection = el('section', { className: 'detail-section' },
+      el('div', { className: 'detail-section-head' },
+        el('h3', { text: tr('brain.assessmentTitle') }),
+        el('span', { className: 'count', text: brain.lastThinkAt ? fmtDateTime(brain.lastThinkAt) : '' }),
+      ),
+    );
+    const fullAssessment = brainAssessmentNode(assessment);
+    assessmentSection.appendChild(fullAssessment || el('p', { className: 'goal-checks-empty', text: tr('brain.assessmentEmpty') }));
+    body.appendChild(assessmentSection);
+
+    // 需要主人参与
+    const drawerAsk = brain.ownerAsk && typeof brain.ownerAsk === 'object' ? brain.ownerAsk : null;
+    if (drawerAsk && str(drawerAsk.text)) {
+      const askAckBtn = el('button', { type: 'button', className: 'btn btn-ghost btn-sm', text: tr('brain.ownerAskAck') });
+      askAckBtn.addEventListener('click', () => {
+        askAckBtn.disabled = true;
+        void ackBrainOwnerAsk();
+      });
+      body.appendChild(el('section', { className: 'detail-section' },
+        el('div', { className: 'detail-section-head' }, el('h3', { text: tr('brain.ownerAskTitle') })),
+        el('div', { className: 'brain-owner-ask is-drawer' },
+          el('span', { className: 'brain-owner-ask-icon' }, icon('bell')),
+          el('div', { className: 'brain-owner-ask-main' },
+            el('strong', { text: tr('brain.ownerAskLabel') }),
+            goalRawText('p', 'brain-owner-ask-text', drawerAsk.text),
+            str(drawerAsk.goalId)
+              ? el('span', { className: 'brain-owner-ask-goal', text: tr('brain.ownerAskGoal', { id: shorten(str(drawerAsk.goalId), 16) }) })
+              : null,
+          ),
+          askAckBtn,
+        ),
+      ));
+    }
+
+    const form = el('form', { className: 'brain-form', attrs: { novalidate: 'novalidate' } });
+    const modeSelect = el('select', { attrs: { 'aria-label': '执行模式' } },
+      el('option', { value: 'auto', text: '自动执行' }),
+      el('option', { value: 'suggest', text: '只给建议' }),
+    );
+    modeSelect.value = brain.mode === 'suggest' ? 'suggest' : 'auto';
+    const intervalMinutes = Math.max(1, Math.min(60, Math.round(num(brain.intervalSec, 180) / 60)));
+    const intervalInput = el('input', {
+      type: 'number', value: String(intervalMinutes),
+      attrs: { min: '1', max: '60', step: '1', inputmode: 'numeric', 'aria-label': '思考间隔（分钟）' },
+    });
+    const actionsValue = Math.max(1, Math.min(3, Math.round(num(brain.maxActions, 2))));
+    const maxActionsInput = el('input', {
+      type: 'number', value: String(actionsValue),
+      attrs: { min: '1', max: '3', step: '1', inputmode: 'numeric', 'aria-label': '每次最多动作数' },
+    });
+    form.appendChild(el('div', { className: 'field' },
+      el('label', { text: '执行模式' }),
+      modeSelect,
+      el('span', { className: 'field-hint', text: '自动执行会真的改动任务；只给建议只记录决策，不动任何任务。' }),
+    ));
+    form.appendChild(el('div', { className: 'field-row brain-form-row' },
+      el('div', { className: 'field' },
+        el('label', { text: '思考间隔（分钟）' }),
+        intervalInput,
+        el('span', { className: 'field-hint', text: '范围 1–60 分钟（后端限制 60–3600 秒）。' }),
+      ),
+      el('div', { className: 'field' },
+        el('label', { text: '每次最多动作数' }),
+        maxActionsInput,
+        el('span', { className: 'field-hint', text: '取值范围 1–3。' }),
+      ),
+    ));
+    const adaptiveInput = el('input', { type: 'checkbox' });
+    adaptiveInput.checked = brain.adaptive !== false;
+    form.appendChild(el('div', { className: 'field' },
+      el('label', { className: 'brain-adaptive-toggle' }, adaptiveInput, el('span', { text: tr('brain.adaptiveLabel') })),
+      el('span', { className: 'field-hint', text: tr('brain.adaptiveHint') }),
+    ));
+    const saveBtn = el('button', { type: 'button', className: 'btn btn-primary btn-sm' }, icon('check'), el('span', { text: '保存设置' }));
+    saveBtn.addEventListener('click', async () => {
+      if (saveBtn.disabled) return;
+      const minutes = Math.max(1, Math.min(60, Math.round(Number(intervalInput.value) || intervalMinutes)));
+      const actions = Math.max(1, Math.min(3, Math.round(Number(maxActionsInput.value) || actionsValue)));
+      intervalInput.value = String(minutes);
+      maxActionsInput.value = String(actions);
+      saveBtn.disabled = true;
+      const label = saveBtn.querySelector('span');
+      if (label) label.textContent = tx('保存中…');
+      try {
+        const res = await api('/api/brain', {
+          method: 'PATCH',
+          body: { mode: modeSelect.value, intervalSec: minutes * 60, maxActions: actions, adaptive: Boolean(adaptiveInput.checked) },
+          timeout: 15000,
+        });
+        if (res && res.brain && typeof res.brain === 'object') state.brain = res.brain;
+        state.brainError = '';
+        toast('大脑设置已保存', 'success');
+        await loadBrainDrawer({ preserveScroll: true });
+      } catch (err) {
+        if (err.status === 401) return handleAuthLost(err.message);
+        state.brainError = err.message || '保存设置失败';
+        toast(state.brainError, 'error');
+        if (state.drawer.open && state.drawer.kind === 'brain') renderBrainDrawerBody();
+      } finally {
+        saveBtn.disabled = false;
+        if (label) label.textContent = tx('保存设置');
+      }
+    });
+    body.appendChild(el('section', { className: 'detail-section' },
+      el('div', { className: 'detail-section-head' },
+        el('h3', { text: '大脑设置' }),
+        el('span', { className: 'count', text: tr(!brain.enabled ? 'brain.paused' : (brain.adaptive === false ? 'brain.adaptiveOff' : 'brain.adaptiveOn')) }),
+      ),
+      el('p', { className: 'brain-rhythm is-drawer', text: brainRhythmText(brain) }),
+      el('p', { className: 'goal-form-hint', text: tr('brain.rhythmHint') }),
+      form,
+      el('div', { className: 'brain-form-actions' }, saveBtn),
+    ));
+
+    if (str(brain.lastSummary)) {
+      body.appendChild(el('section', { className: 'detail-section' },
+        el('div', { className: 'detail-section-head' },
+          el('h3', { text: '最近思考摘要' }),
+          el('span', { className: 'count', text: brain.lastThinkAt ? fmtDateTime(brain.lastThinkAt) : '' }),
+        ),
+        goalRawText('p', 'brain-last-summary', brain.lastSummary),
+      ));
+    }
+
+    const decisions = arr(state.brainDecisions).slice(0, 20);
+    const history = el('section', { className: 'detail-section' },
+      el('div', { className: 'detail-section-head' },
+        el('h3', { text: '思考记录' }),
+        el('span', { className: 'count', text: `${decisions.length} 条` }),
+      ),
+    );
+    if (!decisions.length) {
+      history.appendChild(el('p', { className: 'goal-checks-empty', text: '还没有思考记录。点「立即思考」让大脑分析一次。' }));
+    } else {
+      const list = el('div', { className: 'brain-decisions' });
+      for (const decision of decisions) list.appendChild(brainDecisionNode(decision));
+      history.appendChild(list);
+    }
+    body.appendChild(history);
+
+    const thinkBtn = el('button', {
+      type: 'button', className: 'btn btn-primary btn-sm', text: '立即思考',
+    });
+    thinkBtn.prepend(icon('spark'));
+    const busy = Boolean(state.brainBusy) || Boolean(brain.thinking);
+    thinkBtn.disabled = busy;
+    if (busy) {
+      const label = thinkBtn.querySelector('span');
+      if (label) label.textContent = tx('思考中…');
+    }
+    thinkBtn.addEventListener('click', async () => {
+      if (thinkBtn.disabled) return;
+      thinkBtn.disabled = true;
+      const label = thinkBtn.querySelector('span');
+      if (label) label.textContent = tx('思考中…');
+      await runBrainThink();
+    });
+
+    updateDrawerContent({
+      title: '自主大脑',
+      subNodes: [el('span', { text: '后台定时分析目标与任务，按设置给出建议或执行白名单动作。' })],
+      body,
+      footerNodes: [
+        el('button', { type: 'button', className: 'btn btn-ghost btn-sm', text: '关闭', onclick: hideDrawer }),
+        el('span', { className: 'spacer' }),
+        thinkBtn,
+      ],
+    });
+  }
+
+  /* ==================================================================
+   * 管家心路（思考、动作与每日实质推进）
+   * ================================================================== */
+
+  function journalTz() {
+    const journal = state.journal || {};
+    return str(journal.timeZone) || 'Asia/Kuala_Lumpur';
+  }
+
+  function journalDateInTz(value) {
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) return '';
+    try {
+      return new Intl.DateTimeFormat('en-CA', {
+        timeZone: journalTz(),
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).format(date);
+    } catch {
+      return date.toISOString().slice(0, 10);
+    }
+  }
+
+  function journalToday() {
+    const journal = state.journal || {};
+    return str(journal.today) || journalDateInTz(Date.now());
+  }
+
+  function journalDateKey(entry) {
+    if (!entry) return '';
+    return str(entry.date) || journalDateInTz(entry.at);
+  }
+
+  function journalTimeLabel(iso) {
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) return '--:--';
+    try {
+      return new Intl.DateTimeFormat('zh-CN', {
+        timeZone: journalTz(),
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      }).format(date);
+    } catch {
+      return `${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+    }
+  }
+
+  function journalDayLabel(dateStr) {
+    if (!dateStr) return '';
+    if (dateStr === journalToday()) return tr('journal.today');
+    const date = new Date(`${dateStr}T12:00:00`);
+    if (Number.isNaN(date.getTime())) return dateStr;
+    let label = fmtDate(date.toISOString());
+    try {
+      const week = new Intl.DateTimeFormat('zh-CN', { weekday: 'short' }).format(date);
+      if (week) label += ` ${week}`;
+    } catch {
+      /* 时区数据缺失时只显示日期 */
+    }
+    return label;
+  }
+
+  function journalGroups() {
+    const journal = state.journal || {};
+    const days = Array.isArray(journal.days) ? journal.days : [];
+    const entries = Array.isArray(journal.entries) ? journal.entries : [];
+    const byDate = new Map();
+    for (const day of days) {
+      if (day && day.date) byDate.set(str(day.date), { day, entries: [] });
+    }
+    for (const entry of entries) {
+      if (!entry) continue;
+      const key = journalDateKey(entry);
+      if (!key) continue;
+      let group = byDate.get(key);
+      if (!group) {
+        group = { day: null, entries: [] };
+        byDate.set(key, group);
+      }
+      group.entries.push(entry);
+    }
+    const keys = Array.from(byDate.keys()).sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
+    for (const key of keys) {
+      const group = byDate.get(key);
+      group.entries.sort((a, b) => {
+        const ta = Date.parse(a.at) || 0;
+        const tb = Date.parse(b.at) || 0;
+        return tb - ta;
+      });
+    }
+    return keys.map((key) => ({ key, ...byDate.get(key) }));
+  }
+
+  function journalVisibleGroups() {
+    const filter = JOURNAL_FILTERS.some((item) => item.id === state.journalFilter) ? state.journalFilter : 'all';
+    const today = journalToday();
+    const groups = journalGroups();
+    return groups
+      .map((group) => {
+        const day = group.day;
+        if (filter === 'all') return group;
+        if (filter === 'daily') {
+          if (!(day && day.summary) && group.key !== today) return null;
+          return { ...group, entries: group.entries.filter((entry) => str(entry.kind) === 'daily') };
+        }
+        const entries = group.entries.filter((entry) => str(entry.kind) === filter);
+        if (!entries.length && !(day && day.summary)) return null;
+        return { ...group, entries };
+      })
+      .filter(Boolean);
+  }
+
+  function ensureJournalLoaded() {
+    if (!state.connected) return;
+    if (state.journalBusy) return;
+    if (state.journal && !state.journalDirty) {
+      renderJournal();
+      return;
+    }
+    void loadJournal({ silent: Boolean(state.journal) });
+  }
+
+  async function loadJournal({ silent = false } = {}) {
+    if (state.journalBusy) return;
+    if (!state.connected) {
+      renderJournal();
+      return;
+    }
+    state.journalBusy = true;
+    renderJournal();
+    try {
+      const params = `days=${encodeURIComponent(state.journalDays || 60)}&entries=300`;
+      const res = await api(`/api/journal?${params}`, { timeout: 15000 });
+      const journal = res && res.journal && typeof res.journal === 'object' ? res.journal : {};
+      let entries = res && Array.isArray(res.entries) ? res.entries : null;
+      if (!entries) entries = Array.isArray(journal.entries) ? journal.entries : [];
+      state.journal = {
+        ...journal,
+        days: Array.isArray(journal.days) ? journal.days : [],
+        entries,
+      };
+      state.journalError = '';
+      state.journalDirty = false;
+    } catch (err) {
+      if (err && err.status === 401) {
+        handleAuthLost(err.message);
+        return;
+      }
+      if (err && err.status === 404) {
+        state.journalError = tr('journal.unsupported');
+      } else if (!silent || !state.journal) {
+        state.journalError = `${tr('journal.loadFailed')}：${str(err && err.message) || '未知错误'}`;
+      }
+    } finally {
+      state.journalBusy = false;
+      renderJournal();
+    }
+  }
+
+  function scheduleJournalReload() {
+    clearTimeout(journalReloadTimer);
+    journalReloadTimer = setTimeout(() => {
+      journalReloadTimer = 0;
+      void loadJournal({ silent: Boolean(state.journal) });
+    }, 500);
+  }
+
+  function onJournalUpdated(payload) {
+    // Hub 在设置变化/追加条目时可能带上整份 journal 快照，能直接用时就不必再拉接口。
+    if (payload && payload.journal && typeof payload.journal === 'object'
+      && Array.isArray(payload.journal.entries) && Array.isArray(payload.journal.days)) {
+      state.journal = {
+        ...(state.journal || {}),
+        ...payload.journal,
+        days: payload.journal.days,
+        entries: payload.journal.entries,
+      };
+      state.journalError = '';
+      state.journalDirty = false;
+      if (state.tab === 'journal') renderJournal();
+      return;
+    }
+    state.journalDirty = true;
+    if (state.tab === 'journal') scheduleJournalReload();
+  }
+
+  function journalRefChip(kind, id) {
+    const text = shorten(id, 16);
+    const keys = { task: 'journal.refTask', goal: 'journal.refGoal', decision: 'journal.refDecision' };
+    const label = tr(keys[kind] || keys.decision, { id: text });
+    if (kind === 'task') {
+      return el('button', {
+        type: 'button',
+        className: 'journal-ref',
+        attrs: { title: id },
+        text: label,
+        onclick: () => openTaskDrawer(id),
+      });
+    }
+    if (kind === 'goal') {
+      return el('button', {
+        type: 'button',
+        className: 'journal-ref',
+        attrs: { title: id },
+        text: label,
+        onclick: () => openGoalDrawer(id),
+      });
+    }
+    return el('span', { className: 'journal-ref is-static', attrs: { title: id }, text: label });
+  }
+
+  function journalEntryNode(entry) {
+    const kind = JOURNAL_KIND_META[entry.kind] ? entry.kind : 'thought';
+    const meta = JOURNAL_KIND_META[kind];
+    const node = el('article', { className: 'journal-entry', dataset: { kind } });
+    const head = el('div', { className: 'journal-entry-head' });
+    const kindNode = el('span', { className: `journal-kind is-${meta.tone}` });
+    kindNode.appendChild(icon(meta.iconName));
+    kindNode.appendChild(el('span', { text: tr(meta.i18n) }));
+    head.appendChild(kindNode);
+    head.appendChild(el('span', { className: 'journal-entry-time', text: journalTimeLabel(entry.at) }));
+    const refs = entry.refs && typeof entry.refs === 'object' ? entry.refs : {};
+    if (str(refs.taskId)) head.appendChild(journalRefChip('task', str(refs.taskId)));
+    if (str(refs.goalId)) head.appendChild(journalRefChip('goal', str(refs.goalId)));
+    if (str(refs.decisionId)) head.appendChild(journalRefChip('decision', str(refs.decisionId)));
+    node.appendChild(head);
+    if (str(entry.title)) node.appendChild(goalRawText('h4', 'journal-entry-title', str(entry.title)));
+    const text = str(entry.text);
+    if (text) {
+      const bodyNode = goalRawText('div', 'journal-entry-text', '');
+      bodyNode.innerHTML = renderMarkdownHtml(text);
+      node.appendChild(bodyNode);
+    }
+    return node;
+  }
+
+  function journalSummaryCard(day) {
+    const card = el('article', { className: 'journal-summary-card' });
+    const head = el('div', { className: 'journal-summary-head' });
+    head.appendChild(el('h4', { className: 'journal-summary-title', text: tr('journal.summaryTitle') }));
+    const meta = el('div', { className: 'journal-summary-meta' });
+    if (str(day.generatedAt)) meta.appendChild(el('span', { text: tr('journal.generatedAt', { time: journalTimeLabel(day.generatedAt) }) }));
+    if (str(day.model)) meta.appendChild(el('span', { text: tr('journal.model', { model: day.model }) }));
+    if (num(day.entryCount, 0) > 0) meta.appendChild(el('span', { text: tr('journal.dayCount', { n: day.entryCount }) }));
+    if (meta.childElementCount) head.appendChild(meta);
+    if (str(day.date)) {
+      head.appendChild(el('button', {
+        type: 'button',
+        className: 'btn btn-ghost btn-sm',
+        text: tr('journal.regenerate'),
+        dataset: { journalDaySummary: str(day.date) },
+        onclick: () => void generateJournalSummary(str(day.date)),
+      }));
+    }
+    card.appendChild(head);
+    if (str(day.error)) card.appendChild(el('p', { className: 'journal-summary-error', text: str(day.error) }));
+    const highlights = Array.isArray(day.highlights) ? day.highlights.filter(Boolean) : [];
+    if (highlights.length) {
+      const chips = el('div', { className: 'journal-highlights' });
+      for (const item of highlights) {
+        const text = typeof item === 'string' ? item : str(item && item.text);
+        if (!text) continue;
+        chips.appendChild(el('span', { className: 'journal-highlight', text }));
+      }
+      if (chips.childElementCount) card.appendChild(chips);
+    }
+    const stats = day.stats && typeof day.stats === 'object' ? day.stats : null;
+    if (stats) {
+      const pieces = [];
+      if (num(stats.thought, 0) > 0) pieces.push(tr('journal.statsThought', { n: stats.thought }));
+      if (num(stats.work, 0) > 0) pieces.push(tr('journal.statsWork', { n: stats.work }));
+      if (num(stats.milestone, 0) > 0) pieces.push(tr('journal.statsMilestone', { n: stats.milestone }));
+      pieces.push(tr('journal.statsTotal', { n: num(stats.total, 0) }));
+      if (num(stats.completedTasks, 0) > 0) pieces.push(tr('journal.statsCompleted', { n: stats.completedTasks }));
+      if (num(stats.failedTasks, 0) > 0) pieces.push(tr('journal.statsFailed', { n: stats.failedTasks }));
+      card.appendChild(el('p', { className: 'journal-stats', text: pieces.join(' · ') }));
+    }
+    if (str(day.summary)) {
+      const md = el('div', { className: 'journal-summary-md' });
+      md.innerHTML = renderMarkdownHtml(str(day.summary));
+      card.appendChild(md);
+    }
+    return card;
+  }
+
+  function journalSummaryMissing(dateStr) {
+    const box = el('div', { className: 'journal-summary-missing' });
+    box.appendChild(el('span', { text: tr('journal.noSummary') }));
+    box.appendChild(el('button', {
+      type: 'button',
+      className: 'btn btn-ghost btn-sm',
+      text: tr('journal.generate'),
+      dataset: { journalDaySummary: dateStr },
+      onclick: () => void generateJournalSummary(dateStr),
+    }));
+    return box;
+  }
+
+  function journalDayNode(group) {
+    const day = group.day;
+    const dateStr = str(day && day.date) || group.key;
+    const node = el('section', { className: 'journal-day' });
+    const count = group.entries.length || num(day && day.entryCount, 0) || 0;
+    node.appendChild(el('div', { className: 'journal-day-head' },
+      el('h3', { className: 'journal-day-date', text: journalDayLabel(dateStr) }),
+      el('span', { className: 'journal-day-count', text: tr('journal.dayCount', { n: count }) }),
+    ));
+    const filter = state.journalFilter || 'all';
+    if (day && str(day.summary)) {
+      node.appendChild(journalSummaryCard(day));
+    } else if (day && (filter === 'all' || filter === 'daily')) {
+      node.appendChild(journalSummaryMissing(dateStr));
+    } else if (filter === 'daily') {
+      node.appendChild(journalSummaryMissing(dateStr));
+    }
+    if (group.entries.length) {
+      const list = el('div', { className: 'journal-entries' });
+      for (const entry of group.entries) list.appendChild(journalEntryNode(entry));
+      node.appendChild(list);
+    }
+    return node;
+  }
+
+  function journalErrorState() {
+    const box = el('div', { className: 'journal-load-error' });
+    box.appendChild(el('p', { text: state.journalError || tr('journal.loadFailed') }));
+    box.appendChild(el('button', {
+      type: 'button',
+      className: 'btn btn-ghost btn-sm',
+      text: tr('journal.retry'),
+      onclick: () => {
+        state.journalError = '';
+        void loadJournal({ silent: false });
+      },
+    }));
+    return box;
+  }
+
+  function renderJournalControls() {
+    const box = $('#journal-controls');
+    if (!box) return;
+    const lang = currentLang();
+    if (box.dataset.lang !== lang || !box.childElementCount) {
+      box.dataset.lang = lang;
+      box.replaceChildren();
+      const filters = el('div', { className: 'journal-filters' });
+      for (const item of JOURNAL_FILTERS) {
+        filters.appendChild(el('button', {
+          type: 'button',
+          className: 'journal-filter',
+          text: tr(item.i18n),
+          dataset: { journalFilter: item.id },
+        }));
+      }
+      box.appendChild(filters);
+      const journal = state.journal || {};
+      const settings = el('div', { className: 'journal-settings', attrs: { title: tr('journal.settingsHint') } });
+      const toggle = el('label', { className: 'journal-toggle' });
+      const checkbox = el('input', { type: 'checkbox', attrs: { id: 'journal-enabled' } });
+      checkbox.checked = Boolean(journal.enabled);
+      toggle.appendChild(checkbox);
+      toggle.appendChild(el('span', { text: tr('journal.autoRecord') }));
+      settings.appendChild(toggle);
+      const timeWrap = el('label', { className: 'journal-time' });
+      timeWrap.appendChild(el('span', { text: tr('journal.summaryTime') }));
+      const timeInput = el('input', { type: 'time', attrs: { id: 'journal-time' } });
+      timeInput.value = str(journal.summaryTime) || '23:30';
+      timeWrap.appendChild(timeInput);
+      settings.appendChild(timeWrap);
+      settings.appendChild(el('button', {
+        type: 'button',
+        className: 'btn btn-ghost btn-sm',
+        attrs: { id: 'journal-save' },
+        text: tr('journal.save'),
+      }));
+      box.appendChild(settings);
+      box.appendChild(el('p', { className: 'journal-counts', attrs: { id: 'journal-counts' } }));
+    }
+    const filter = state.journalFilter || 'all';
+    box.querySelectorAll('[data-journal-filter]').forEach((btn) => {
+      const active = btn.dataset.journalFilter === filter;
+      btn.classList.toggle('is-active', active);
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+    const journal = state.journal || {};
+    const enabledBox = $('#journal-enabled');
+    if (enabledBox) enabledBox.checked = Boolean(journal.enabled);
+    const timeInput = $('#journal-time');
+    if (timeInput && document.activeElement !== timeInput) timeInput.value = str(journal.summaryTime) || '23:30';
+    const saveBtn = $('#journal-save');
+    if (saveBtn) {
+      saveBtn.disabled = Boolean(state.journalBusy);
+      saveBtn.textContent = tr(state.journalBusy ? 'journal.saving' : 'journal.save');
+    }
+    const counts = $('#journal-counts');
+    if (counts) {
+      counts.textContent = state.journal
+        ? tr('journal.sub', {
+          entries: (state.journal.entries || []).length,
+          days: (state.journal.days || []).length,
+        })
+        : '';
+    }
+  }
+
+  function renderJournal() {
+    const body = $('#journal-body');
+    if (!body) return;
+    renderJournalControls();
+    const errBox = $('#journal-error');
+    if (errBox) {
+      errBox.textContent = state.journalError || '';
+      errBox.hidden = !state.journalError;
+    }
+    const nowBtn = $('#journal-summary-now');
+    if (nowBtn) {
+      nowBtn.disabled = Boolean(state.journalBusy);
+      const label = nowBtn.querySelector('span');
+      if (label) label.textContent = tr(state.journalBusy ? 'journal.generating' : 'journal.generateToday');
+    }
+    const scrollTop = body.scrollTop;
+    body.replaceChildren();
+    if (!state.journal) {
+      if (state.journalError) {
+        body.appendChild(journalErrorState());
+      } else {
+        body.appendChild(el('p', { className: 'journal-loading', text: tr('journal.loading') }));
+      }
+      body.scrollTop = scrollTop;
+      return;
+    }
+    const groups = journalVisibleGroups();
+    if (!groups.length) {
+      body.appendChild(emptyState({
+        iconName: 'activity',
+        title: tr('journal.emptyTitle'),
+        desc: tr('journal.emptyDesc'),
+      }));
+    } else {
+      for (const group of groups) body.appendChild(journalDayNode(group));
+      if (state.journalBusy) body.appendChild(el('p', { className: 'journal-loading', text: tr('journal.loading') }));
+    }
+    body.scrollTop = scrollTop;
+  }
+
+  async function generateJournalSummary(date) {
+    if (state.journalBusy) return;
+    state.journalBusy = true;
+    renderJournal();
+    try {
+      const payload = { force: true };
+      if (str(date)) payload.date = str(date);
+      const res = await api('/api/journal/summary', { method: 'POST', body: payload, timeout: 120000 });
+      const day = res && res.day;
+      const error = str(res && res.error) || str(day && day.error);
+      if (error) toast(tr('journal.summaryFailed', { message: error }), 'error');
+      else toast(tr('journal.summaryDone'), 'success');
+    } catch (err) {
+      if (err && err.status === 401) {
+        handleAuthLost(err.message);
+        return;
+      }
+      if (err && err.status === 404) state.journalError = tr('journal.unsupported');
+      toast(tr('journal.summaryFailed', { message: str(err && err.message) || '未知错误' }), 'error');
+    } finally {
+      state.journalBusy = false;
+      void loadJournal({ silent: true });
+    }
+  }
+
+  async function saveJournalSettings() {
+    if (state.journalBusy) return;
+    const enabledBox = $('#journal-enabled');
+    const timeInput = $('#journal-time');
+    const time = timeInput ? str(timeInput.value).trim() : '';
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) {
+      toast(tr('journal.invalidTime'), 'error');
+      return;
+    }
+    state.journalBusy = true;
+    renderJournal();
+    try {
+      await api('/api/journal', {
+        method: 'PATCH',
+        body: { enabled: Boolean(enabledBox && enabledBox.checked), summaryTime: time },
+        timeout: 15000,
+      });
+      toast(tr('journal.settingsSaved'), 'success');
+    } catch (err) {
+      if (err && err.status === 401) {
+        handleAuthLost(err.message);
+        return;
+      }
+      if (err && err.status === 404) state.journalError = tr('journal.unsupported');
+      toast(str(err && err.message) || tr('journal.loadFailed'), 'error');
+    } finally {
+      state.journalBusy = false;
+      void loadJournal({ silent: true });
+    }
+  }
+
+  /* ==================================================================
+   * 头脑风暴（对话大脑）
+   * ================================================================== */
+  function brainstormTextOf(message) {
+    return message && typeof message.text === 'string' ? message.text : '';
+  }
+
+  function brainstormCurrentId() {
+    if (state.brainstormSession && state.brainstormSession.id) return state.brainstormSession.id;
+    if (state.brainstorm && state.brainstorm.activeId) return state.brainstorm.activeId;
+    return '';
+  }
+
+  function brainstormSessionSummaryFrom(session) {
+    const messages = arr(session && session.messages);
+    const last = messages.length ? messages[messages.length - 1] : null;
+    const firstUser = messages.find((item) => item && item.role === 'user') || null;
+    return {
+      id: str(session && session.id),
+      title: str(session && session.title)
+        || (firstUser ? shorten(brainstormTextOf(firstUser), 40) : tr('brainstorm.sessionTitleFallback')),
+      createdAt: session && session.createdAt,
+      updatedAt: str(session && session.updatedAt) || (last ? str(last.at) : ''),
+      messageCount: messages.length,
+      lastMessageAt: last ? str(last.at) : '',
+      preview: last ? shorten(brainstormTextOf(last), 60) : '',
+    };
+  }
+
+  function brainstormUpsertSummary(summary) {
+    if (!summary || !summary.id) return;
+    const exists = state.brainstormSessions.some((item) => item && item.id === summary.id);
+    state.brainstormSessions = exists
+      ? state.brainstormSessions.map((item) => (item.id === summary.id ? { ...item, ...summary } : item))
+      : [summary, ...state.brainstormSessions];
+  }
+
+  function ensureBrainstormLoaded() {
+    if (!state.connected) return;
+    if (state.brainstorm && state.brainstorm.supported === false) {
+      renderBrainstorm();
+      return;
+    }
+    if (!state.brainstorm && !state.brainstormBusy) {
+      void loadBrainstorm();
+      return;
+    }
+    renderBrainstorm();
+  }
+
+  async function loadBrainstorm({ sessionId = '', silent = false } = {}) {
+    if (!state.connected) return;
+    const seq = ++brainstormLoadSeq;
+    if (!silent) {
+      state.brainstormBusy = true;
+      renderBrainstorm();
+    }
+    const targetId = str(sessionId) || brainstormCurrentId();
+    try {
+      const query = `messages=200${targetId ? `&session=${encodeURIComponent(targetId)}` : ''}`;
+      const res = await api(`/api/brainstorm?${query}`, { timeout: 20000 });
+      if (seq !== brainstormLoadSeq) return;
+      const data = res && res.brainstorm && typeof res.brainstorm === 'object' ? res.brainstorm : {};
+      state.brainstormSessions = arr(data.sessions);
+      state.brainstormSession = res && res.session ? res.session : null;
+      state.brainstorm = {
+        activeId: str(data.activeId) || str(state.brainstormSession && state.brainstormSession.id) || targetId || '',
+        supported: true,
+      };
+      if (state.brainstormSession) {
+        state.brainstorm.activeId = state.brainstormSession.id;
+        brainstormUpsertSummary(brainstormSessionSummaryFrom(state.brainstormSession));
+      }
+      state.brainstormError = '';
+      state.brainstormBusy = false;
+    } catch (err) {
+      if (seq !== brainstormLoadSeq) return;
+      state.brainstormBusy = false;
+      if (err && err.status === 401) {
+        handleAuthLost(err.message);
+        return;
+      }
+      if (!silent) {
+        if (err && err.status === 404) {
+          state.brainstorm = { activeId: '', supported: false };
+          state.brainstormError = tr('brainstorm.unsupported');
+        } else {
+          state.brainstormError = str(err && err.message) || tr('brainstorm.loadFailed');
+        }
+      }
+    }
+    renderBrainstorm(!silent);
+  }
+
+  function scheduleBrainstormRefresh() {
+    clearTimeout(brainstormRefreshTimer);
+    brainstormRefreshTimer = setTimeout(() => {
+      brainstormRefreshTimer = 0;
+      if (state.tab === 'brainstorm' && state.connected) void loadBrainstorm({ silent: true });
+    }, 500);
+  }
+
+  function onBrainstormUpdated(payload) {
+    const session = payload && payload.session && typeof payload.session === 'object' ? payload.session : null;
+    if (!session || !session.id) {
+      scheduleBrainstormRefresh();
+      return;
+    }
+    // 发送请求自己会带回同一会话的最新状态，避免和 SSE 交叉覆盖
+    if (state.brainstormSending) return;
+    const summary = brainstormSessionSummaryFrom(session);
+    const isCurrent = Boolean(state.brainstormSession && state.brainstormSession.id === session.id);
+    if (isCurrent) {
+      state.brainstormSession = session;
+      state.brainstorm = { ...(state.brainstorm || {}), activeId: session.id, supported: true };
+    } else if (!state.brainstorm) {
+      state.brainstorm = { activeId: session.id, supported: true };
+    }
+    brainstormUpsertSummary(summary);
+    if (state.tab === 'brainstorm') renderBrainstorm();
+  }
+
+  function selectBrainstormSession(id) {
+    const sid = str(id);
+    if (!sid) return;
+    if (state.brainstormSession && state.brainstormSession.id === sid) return;
+    state.brainstormSending = false;
+    state.brainstormSession = null;
+    state.brainstormBusy = true;
+    renderBrainstorm();
+    void loadBrainstorm({ sessionId: sid });
+  }
+
+  async function newBrainstormSession() {
+    if (state.brainstormBusy || !state.connected) return;
+    state.brainstormBusy = true;
+    state.brainstormError = '';
+    renderBrainstorm();
+    try {
+      const res = await api('/api/brainstorm/sessions', { method: 'POST', body: {}, timeout: 20000 });
+      const sessions = arr(res && res.brainstorm && res.brainstorm.sessions);
+      if (sessions.length) state.brainstormSessions = sessions;
+      if (res && res.session) {
+        state.brainstormSession = res.session;
+        state.brainstorm = { activeId: res.session.id, supported: true };
+        brainstormUpsertSummary(brainstormSessionSummaryFrom(res.session));
+      }
+      state.brainstormError = '';
+    } catch (err) {
+      if (err && err.status === 401) {
+        handleAuthLost(err.message);
+        return;
+      }
+      state.brainstormError = str(err && err.message) || tr('brainstorm.newFailed');
+      toast(state.brainstormError, 'error');
+    } finally {
+      state.brainstormBusy = false;
+      renderBrainstorm(true);
+      const input = $('#brainstorm-input');
+      if (input) input.focus();
+    }
+  }
+
+  async function deleteBrainstormSession(id) {
+    const sid = str(id);
+    if (!sid) return;
+    const ok = await confirmDialog({
+      title: tr('brainstorm.delete'),
+      message: tr('brainstorm.deleteConfirm'),
+      okText: tr('brainstorm.delete'),
+    });
+    if (!ok) return;
+    try {
+      const res = await api(`/api/brainstorm/sessions/${encodeURIComponent(sid)}`, { method: 'DELETE', timeout: 15000 });
+      const data = res && res.brainstorm && typeof res.brainstorm === 'object' ? res.brainstorm : {};
+      state.brainstormSessions = arr(data.sessions);
+      state.brainstorm = { activeId: str(data.activeId), supported: true };
+      if (state.brainstormSession && state.brainstormSession.id === sid) state.brainstormSession = null;
+      toast(tr('brainstorm.deleted'), 'success');
+      const activeId = str(data.activeId) || str(state.brainstormSessions[0] && state.brainstormSessions[0].id);
+      if (activeId) await loadBrainstorm({ sessionId: activeId });
+      else renderBrainstorm();
+    } catch (err) {
+      if (err && err.status === 401) {
+        handleAuthLost(err.message);
+        return;
+      }
+      if (err && err.status === 404) {
+        void loadBrainstorm({ silent: true });
+        return;
+      }
+      toast(str(err && err.message) || tr('brainstorm.deleteFailed'), 'error');
+    }
+  }
+
+  async function sendBrainstorm() {
+    if (state.brainstormSending || !state.connected) return;
+    const input = $('#brainstorm-input');
+    if (!input) return;
+    const message = str(input.value).trim();
+    if (!message) return;
+    const sessionId = brainstormCurrentId();
+    const now = new Date().toISOString();
+    const previous = state.brainstormSession;
+    const optimisticMessages = previous && sessionId
+      ? arr(previous.messages).concat([{ id: `local_${Date.now()}`, role: 'user', at: now, text: message }])
+      : [{ id: `local_${Date.now()}`, role: 'user', at: now, text: message }];
+    state.brainstormSession = previous && sessionId
+      ? { ...previous, messages: optimisticMessages }
+      : { id: '', title: tr('brainstorm.sessionTitleFallback'), createdAt: now, updatedAt: now, messages: optimisticMessages };
+    state.brainstormSending = true;
+    state.brainstormError = '';
+    input.value = '';
+    renderBrainstorm(true);
+    try {
+      const body = sessionId ? { sessionId, message } : { message };
+      const res = await api('/api/brainstorm/chat', { method: 'POST', body, timeout: 130000 });
+      if (res && res.session) {
+        state.brainstormSession = res.session;
+        state.brainstorm = { activeId: res.session.id, supported: true };
+        brainstormUpsertSummary(brainstormSessionSummaryFrom(res.session));
+      }
+      if (!res || !res.session) state.brainstormSession = previous;
+    } catch (err) {
+      state.brainstormSession = previous;
+      if (err && err.status === 401) {
+        handleAuthLost(err.message);
+        return;
+      }
+      state.brainstormError = err && err.status === 404
+        ? tr('brainstorm.unsupported')
+        : (str(err && err.message) || tr('brainstorm.sendFailed'));
+      toast(state.brainstormError, 'error');
+      if (!input.value) input.value = message;
+    } finally {
+      state.brainstormSending = false;
+      renderBrainstorm(true);
+      if (input) input.focus();
+    }
+  }
+
+  async function brainstormToTask(sessionId, messageId, goalId) {
+    const sid = str(sessionId);
+    const mid = str(messageId);
+    if (!sid || !mid) return;
+    try {
+      const body = { sessionId: sid, messageId: mid };
+      if (str(goalId)) body.goalId = str(goalId);
+      const res = await api('/api/brainstorm/to-task', { method: 'POST', body, timeout: 30000 });
+      if (res && res.session) {
+        if (state.brainstormSession && state.brainstormSession.id === res.session.id) {
+          state.brainstormSession = res.session;
+        }
+        brainstormUpsertSummary(brainstormSessionSummaryFrom(res.session));
+      }
+      toast(tr('brainstorm.toTaskCreated'), 'success');
+      if (res && res.task && res.task.id) {
+        upsertTask(res.task);
+        openTaskDrawer(res.task.id);
+      }
+    } catch (err) {
+      if (err && err.status === 401) {
+        handleAuthLost(err.message);
+        return;
+      }
+      toast(tr('brainstorm.toTaskFailed', { message: str(err && err.message) || 'unknown' }), 'error');
+    }
+  }
+
+  function openBrainstormGoalPicker(sessionId, messageId) {
+    const sid = str(sessionId);
+    const mid = str(messageId);
+    if (!sid || !mid) return;
+    if (!state.goalsLoaded) ensureGoalsLoaded();
+    const goals = arr(state.goals).filter((goal) => goal && goal.id && goal.status !== 'completed');
+    const list = el('div', { className: 'link-picker-list' });
+    const addRow = (title, note, goalId) => {
+      const row = el('button', {
+        type: 'button',
+        className: 'link-row link-row-button',
+        onClick: () => {
+          hideDrawer();
+          void brainstormToTask(sid, mid, goalId);
+        },
+      },
+        el('div', { className: 'link-row-main' },
+          el('span', { className: 'link-row-title' }, title),
+          el('span', { className: 'link-row-note' }, note)));
+      list.appendChild(row);
+    };
+    addRow(tr('brainstorm.noGoal'), tr('brainstorm.noGoalHint'), '');
+    goals.forEach((goal) => {
+      const row = el('button', {
+        type: 'button',
+        className: 'link-row link-row-button',
+        onClick: () => {
+          hideDrawer();
+          void brainstormToTask(sid, mid, goal.id);
+        },
+      },
+        el('div', { className: 'link-row-main' },
+          el('span', { className: 'link-row-title' }, goalDisplayName(goal)),
+          el('div', { className: 'link-row-meta-line' },
+            goalStatusBadge(goal),
+            el('span', { className: 'link-row-time' }, goalPlanText(goal.schedule)))));
+      list.appendChild(row);
+    });
+    openDrawer({
+      kind: 'brainstorm-goal',
+      id: 'brainstorm-goal',
+      title: tr('brainstorm.selectGoal'),
+      body: el('div', { className: 'link-picker' },
+        el('p', { className: 'link-picker-task' }, tr('brainstorm.selectGoalHint')),
+        list),
+      footerNodes: [el('button', { type: 'button', className: 'btn btn-ghost', onClick: hideDrawer }, tr('common.close'))],
+    });
+  }
+
+  function brainstormSessionRow(session, activeId) {
+    const id = str(session && session.id);
+    const title = str(session && session.title) || tr('brainstorm.sessionTitleFallback');
+    const main = el('button', {
+      type: 'button',
+      className: 'brainstorm-session-main',
+      dataset: { brainstormSession: id },
+      attrs: { 'aria-current': id === activeId ? 'true' : 'false' },
+    });
+    main.appendChild(goalRawText('span', 'brainstorm-session-title', title));
+    if (str(session && session.preview)) {
+      main.appendChild(goalRawText('span', 'brainstorm-session-preview', str(session.preview)));
+    }
+    main.appendChild(el('span', { className: 'brainstorm-session-meta' },
+      el('span', {}, fmtRel(str(session && (session.updatedAt || session.lastMessageAt)))),
+      el('span', {}, tr('brainstorm.messagesCount', { n: num(session && session.messageCount) }))));
+    const del = el('button', {
+      type: 'button',
+      className: 'icon-btn brainstorm-session-del',
+      dataset: { brainstormDelete: id },
+      attrs: { 'aria-label': tr('brainstorm.delete'), title: tr('brainstorm.delete') },
+    }, icon('trash'));
+    return el('div', { className: `brainstorm-session${id === activeId ? ' is-active' : ''}` }, main, del);
+  }
+
+  function brainstormEmptyNode() {
+    const wrap = el('div', { className: 'brainstorm-empty' });
+    wrap.appendChild(el('div', { className: 'brainstorm-empty-icon' }, icon('spark')));
+    wrap.appendChild(el('h3', { className: 'brainstorm-empty-title' }, tr('brainstorm.emptyTitle')));
+    wrap.appendChild(el('p', { className: 'brainstorm-empty-desc' }, tr('brainstorm.emptyDesc')));
+    const suggestions = el('div', { className: 'brainstorm-suggestions' });
+    BRAINSTORM_SUGGESTIONS.forEach((key) => {
+      suggestions.appendChild(el('button', {
+        type: 'button',
+        className: 'brainstorm-suggest-btn',
+        dataset: { brainstormSuggest: key },
+      }, tr(key)));
+    });
+    wrap.appendChild(suggestions);
+    return wrap;
+  }
+
+  function brainstormTypingNode() {
+    return el('div', { className: 'brainstorm-msg brainstorm-msg-bot brainstorm-typing' },
+      el('div', { className: 'brainstorm-msg-head' },
+        el('span', { className: 'brainstorm-avatar' }, icon('spark')),
+        el('span', { className: 'brainstorm-msg-name' }, tr('brainstorm.brain'))),
+      el('p', { className: 'brainstorm-typing-text' }, tr('brainstorm.thinking')));
+  }
+
+  function brainstormMessageNode(sessionId, message) {
+    const role = str(message && message.role) === 'user' ? 'user' : 'assistant';
+    if (role === 'user') {
+      return el('div', { className: 'brainstorm-msg brainstorm-msg-user' },
+        el('div', { className: 'brainstorm-bubble' },
+          goalRawText('div', 'brainstorm-bubble-text', brainstormTextOf(message))));
+    }
+    const text = brainstormTextOf(message);
+    const messageId = str(message && message.id);
+    const actions = el('div', { className: 'brainstorm-msg-actions' },
+      el('button', {
+        type: 'button',
+        className: 'link-btn',
+        dataset: { action: 'brainstorm-copy', brainstormMessage: messageId },
+      }, icon('copy'), el('span', {}, tr('brainstorm.copy'))),
+      el('button', {
+        type: 'button',
+        className: 'link-btn',
+        dataset: { action: 'brainstorm-to-task', brainstormMessage: messageId },
+      }, icon('tasks'), el('span', {}, tr('brainstorm.toTask'))),
+      el('button', {
+        type: 'button',
+        className: 'link-btn',
+        dataset: { action: 'brainstorm-link-goal', brainstormMessage: messageId },
+      }, icon('target'), el('span', {}, tr('brainstorm.linkGoal'))));
+    const card = el('article', { className: 'brainstorm-msg brainstorm-msg-bot' },
+      el('div', { className: 'brainstorm-msg-head' },
+        el('span', { className: 'brainstorm-avatar' }, icon('spark')),
+        el('span', { className: 'brainstorm-msg-name' }, tr('brainstorm.brain')),
+        message && message.model
+          ? el('span', { className: 'brainstorm-msg-model' }, tr('brainstorm.model', { model: str(message.model) }))
+          : null,
+        el('span', { className: 'brainstorm-msg-time' }, relNode(str(message && message.at)))));
+    if (text) card.appendChild(el('div', { className: 'brainstorm-md', html: renderMarkdownHtml(text) }));
+    if (message && message.error) {
+      card.appendChild(el('div', { className: 'task-error brainstorm-msg-error' },
+        icon('alert'),
+        el('span', {}, tr('brainstorm.assistantError', { message: str(message.error) }))));
+    }
+    card.appendChild(actions);
+    return card;
+  }
+
+  function renderBrainstormErrorBox() {
+    const box = $('#brainstorm-error');
+    if (!box) return;
+    box.replaceChildren();
+    if (!state.brainstormError) {
+      box.hidden = true;
+      return;
+    }
+    box.hidden = false;
+    box.appendChild(icon('alert'));
+    box.appendChild(el('span', { className: 'brainstorm-error-text' }, state.brainstormError));
+    box.appendChild(el('button', {
+      type: 'button',
+      className: 'link-btn',
+      dataset: { brainstormRetry: '' },
+    }, tr('brainstorm.retry')));
+  }
+
+  function renderBrainstorm(forceScroll = false) {
+    if (!$('#section-brainstorm')) return;
+    renderBrainstormErrorBox();
+    const sessionsBox = $('#brainstorm-sessions');
+    const messagesBox = $('#brainstorm-messages');
+    const input = $('#brainstorm-input');
+    const sendBtn = $('#brainstorm-send');
+    const wasAtBottom = messagesBox
+      ? messagesBox.scrollHeight - messagesBox.scrollTop - messagesBox.clientHeight < 140
+      : true;
+    if (input) {
+      input.placeholder = tr('brainstorm.placeholder');
+      input.disabled = state.brainstormSending;
+    }
+    if (sendBtn) {
+      sendBtn.disabled = state.brainstormSending || !state.connected;
+      const label = sendBtn.querySelector('span');
+      if (label) label.textContent = state.brainstormSending ? tr('brainstorm.sending') : tr('brainstorm.send');
+    }
+    const reloadBtn = $('#brainstorm-reload');
+    if (reloadBtn) reloadBtn.disabled = state.brainstormBusy;
+    if (sessionsBox) {
+      sessionsBox.replaceChildren();
+      if (!state.brainstormSessions.length) {
+        sessionsBox.appendChild(el('p', { className: 'brainstorm-side-empty' }, tr('brainstorm.noSessions')));
+      } else {
+        const activeId = brainstormCurrentId();
+        state.brainstormSessions.forEach((session) => {
+          sessionsBox.appendChild(brainstormSessionRow(session, activeId));
+        });
+      }
+    }
+    if (messagesBox) {
+      messagesBox.replaceChildren();
+      if (!state.brainstorm && state.brainstormBusy) {
+        messagesBox.appendChild(el('p', { className: 'brainstorm-loading' }, tr('brainstorm.loading')));
+      } else if (state.brainstormError) {
+        // 错误由顶部提示条展示，消息区保持上下文
+      } else if (!state.brainstormSession || !arr(state.brainstormSession.messages).length) {
+        messagesBox.appendChild(brainstormEmptyNode());
+      } else {
+        arr(state.brainstormSession.messages).forEach((message) => {
+          messagesBox.appendChild(brainstormMessageNode(state.brainstormSession.id, message));
+        });
+      }
+      if (state.brainstormSending) messagesBox.appendChild(brainstormTypingNode());
+      if (forceScroll || wasAtBottom || state.brainstormSending) {
+        messagesBox.scrollTop = messagesBox.scrollHeight;
+      }
+    }
+  }
+
+  /* ==================================================================
+   * 心智（Soul / Skill）：编辑大脑每轮思考时随快照交给 Agnes 的提示段
+   * ================================================================== */
+  function mindLimits() {
+    const limits = state.mind && state.mind.limits && typeof state.mind.limits === 'object' ? state.mind.limits : {};
+    const pick = (value, fallback) => {
+      const n = Number(value);
+      return Number.isFinite(n) && n > 0 ? Math.round(n) : fallback;
+    };
+    return {
+      soul: pick(limits.soul, MIND_FIELD_LIMITS.soul),
+      skill: pick(limits.skill, MIND_FIELD_LIMITS.skill),
+    };
+  }
+
+  function mindDefaults() {
+    const defaults = state.mind && state.mind.defaults && typeof state.mind.defaults === 'object' ? state.mind.defaults : {};
+    return { soul: str(defaults.soul), skill: str(defaults.skill) };
+  }
+
+  function mindFieldEl(field) {
+    if (field === 'soul') return $('#mind-soul');
+    if (field === 'skill') return $('#mind-skill');
+    return null;
+  }
+
+  function mindText(field) {
+    const fieldEl = mindFieldEl(field);
+    return fieldEl ? fieldEl.value : '';
+  }
+
+  function mindTrimmed(field) {
+    return mindText(field).trim();
+  }
+
+  function mindIsDirtyNow() {
+    const mind = state.mind;
+    if (!mind) return false;
+    return mindTrimmed('soul') !== str(mind.soul).trim() || mindTrimmed('skill') !== str(mind.skill).trim();
+  }
+
+  function renderMind() {
+    const section = $('#section-mind');
+    if (!section) return;
+    const limits = mindLimits();
+    const defaults = mindDefaults();
+    const mind = state.mind;
+    const loaded = state.mindLoaded && !!mind;
+    const editable = loaded && !state.mindBusy;
+    ['soul', 'skill'].forEach((field) => {
+      const fieldEl = mindFieldEl(field);
+      if (!fieldEl) return;
+      // 有未保存修改时不覆盖用户输入；否则跟随服务端内容
+      if (!state.mindDirty && loaded && document.activeElement !== fieldEl) {
+        const nextValue = field === 'soul' ? str(mind.soul) : str(mind.skill);
+        if (fieldEl.value !== nextValue) fieldEl.value = nextValue;
+      }
+      if (!fieldEl.value && !loaded) fieldEl.placeholder = tr('mind.loading');
+      fieldEl.disabled = !editable && !state.mindDirty;
+      const value = fieldEl.value;
+      const countEl = field === 'soul' ? $('#mind-soul-count') : $('#mind-skill-count');
+      if (countEl) {
+        countEl.textContent = tr('mind.charCount', { n: value.length, max: limits[field] });
+        countEl.classList.toggle('is-over', value.length > limits[field]);
+      }
+      const badgeEl = field === 'soul' ? $('#mind-soul-badge') : $('#mind-skill-badge');
+      if (badgeEl) {
+        const isDefault = !!defaults[field] && value.trim() === defaults[field].trim();
+        badgeEl.textContent = tr(isDefault ? 'mind.badgeDefault' : 'mind.badgeCustom');
+        badgeEl.classList.toggle('is-custom', !isDefault);
+      }
+    });
+    const dirtyEl = $('#mind-dirty');
+    if (dirtyEl) dirtyEl.hidden = !state.mindDirty;
+    const updatedEl = $('#mind-updated');
+    if (updatedEl) {
+      updatedEl.textContent = mind && mind.updatedAt
+        ? tr('mind.updatedAt', { time: fmtDateTime(mind.updatedAt) })
+        : tr('mind.neverUpdated');
+    }
+    const errorEl = $('#mind-error');
+    if (errorEl) {
+      const message = state.mindError || (state.mindServerUpdated ? tr('mind.serverUpdated') : '');
+      errorEl.textContent = message;
+      errorEl.hidden = !message;
+    }
+    const saveLabel = $('#mind-save-label');
+    if (saveLabel) saveLabel.textContent = state.mindBusy ? tr('mind.saving') : tr('mind.save');
+    const saveBtn = $('#mind-save');
+    if (saveBtn) saveBtn.disabled = state.mindBusy || !state.mindDirty;
+    const soulReset = $('#mind-soul-reset');
+    if (soulReset) soulReset.disabled = state.mindBusy || !loaded;
+    const skillReset = $('#mind-skill-reset');
+    if (skillReset) skillReset.disabled = state.mindBusy || !loaded;
+    const resetAll = $('#mind-reset-all');
+    if (resetAll) resetAll.disabled = state.mindBusy || !loaded;
+    const previewText = $('#mind-preview-text');
+    if (previewText) {
+      const combined = loaded ? `${str(mind.soul).trim()}\n\n${str(mind.skill).trim()}`.trim() : '';
+      previewText.textContent = combined ? combined.slice(0, 600) : tr('mind.previewEmpty');
+      previewText.classList.toggle('is-empty', !combined);
+    }
+    const previewSummary = $('#mind-preview summary');
+    if (previewSummary) previewSummary.textContent = tr('mind.previewTitle');
+  }
+
+  async function loadMind({ silent = false } = {}) {
+    if (!state.connected) return;
+    try {
+      const res = await api('/api/mind', { timeout: 12000 });
+      if (res && res.mind && typeof res.mind === 'object') state.mind = res.mind;
+      state.mindLoaded = true;
+      state.mindError = '';
+      state.mindServerUpdated = false;
+    } catch (err) {
+      if (err && err.status === 401) return handleAuthLost(err.message);
+      state.mindError = err && err.status === 404 ? tr('mind.unsupported') : str(err && err.message) || tr('mind.loadFailed');
+      if (!silent) toast(state.mindError, 'error');
+    } finally {
+      renderMind();
+    }
+  }
+
+  function ensureMindLoaded() {
+    if (!state.connected || state.mindLoaded || state.mindBusy) return;
+    void loadMind();
+  }
+
+  function onMindUpdated(payload) {
+    const mind = payload && payload.mind && typeof payload.mind === 'object' ? payload.mind : null;
+    if (!mind) return;
+    state.mind = mind;
+    state.mindLoaded = true;
+    if (!state.mindDirty) {
+      state.mindError = '';
+      state.mindServerUpdated = false;
+      renderMind();
+      return;
+    }
+    // 用户正在编辑：只提示服务端已更新，不覆盖未保存内容
+    state.mindServerUpdated = true;
+    renderMind();
+  }
+
+  function updateMindDirty() {
+    state.mindDirty = mindIsDirtyNow();
+    if (!state.mindDirty) state.mindServerUpdated = false;
+    renderMind();
+  }
+
+  function mindValidationError() {
+    const limits = mindLimits();
+    const soul = mindTrimmed('soul');
+    const skill = mindTrimmed('skill');
+    if (!soul) return tr('mind.emptySoul');
+    if (!skill) return tr('mind.emptySkill');
+    if (soul.length > limits.soul) return tr('mind.tooLong', { field: tr('mind.soulTitle'), max: limits.soul });
+    if (skill.length > limits.skill) return tr('mind.tooLong', { field: tr('mind.skillTitle'), max: limits.skill });
+    return '';
+  }
+
+  async function saveMind() {
+    if (state.mindBusy) return;
+    const validation = mindValidationError();
+    if (validation) {
+      state.mindError = validation;
+      renderMind();
+      toast(validation, 'warn');
+      return;
+    }
+    state.mindBusy = true;
+    state.mindError = '';
+    renderMind();
+    try {
+      const res = await api('/api/mind', {
+        method: 'PATCH',
+        body: { soul: mindTrimmed('soul'), skill: mindTrimmed('skill') },
+        timeout: 20000,
+      });
+      if (res && res.mind && typeof res.mind === 'object') state.mind = res.mind;
+      state.mindLoaded = true;
+      state.mindDirty = false;
+      state.mindServerUpdated = false;
+      toast(tr('mind.saved'), 'success');
+    } catch (err) {
+      if (err && err.status === 401) return handleAuthLost(err.message);
+      state.mindError = tr('mind.saveFailed', { message: str(err && err.message) || tr('mind.loadFailed') });
+      toast(state.mindError, 'error');
+    } finally {
+      state.mindBusy = false;
+      renderMind();
+    }
+  }
+
+  async function resetMind({ field = '' } = {}) {
+    if (state.mindBusy) return;
+    if (!field) {
+      const ok = await confirmDialog({
+        title: tr('mind.resetAll'),
+        message: tr('mind.resetAllConfirm'),
+        okText: tr('mind.resetAll'),
+      });
+      if (!ok) return;
+    }
+    const body = field === 'soul'
+      ? { resetSoul: true }
+      : field === 'skill'
+        ? { resetSkill: true }
+        : { resetSoul: true, resetSkill: true };
+    state.mindBusy = true;
+    state.mindError = '';
+    renderMind();
+    try {
+      const res = await api('/api/mind', { method: 'PATCH', body, timeout: 20000 });
+      if (res && res.mind && typeof res.mind === 'object') state.mind = res.mind;
+      state.mindLoaded = true;
+      state.mindDirty = false;
+      state.mindServerUpdated = false;
+      toast(tr('mind.resetDone'), 'success');
+    } catch (err) {
+      if (err && err.status === 401) return handleAuthLost(err.message);
+      state.mindError = tr('mind.resetFailed', { message: str(err && err.message) || tr('mind.loadFailed') });
+      toast(state.mindError, 'error');
+    } finally {
+      state.mindBusy = false;
+      renderMind();
+    }
   }
 
   /* ==================================================================
@@ -3777,6 +6578,23 @@
     );
   }
 
+  /** 带复制按钮的键值行，用于目标 / 任务 ID 等需要复制的标识。 */
+  function kvCopy(label, value, successMessage) {
+    const text = value == null ? '' : String(value);
+    const copyBtn = el('button', {
+      type: 'button',
+      className: 'link-btn kv-copy',
+      title: '复制',
+      attrs: { 'aria-label': `复制${label}` },
+      onclick: () => copyText(text, successMessage || `${label} 已复制`),
+    }, icon('copy'));
+    return el('div', { className: 'kv kv-copy-row' },
+      el('span', { className: 'kv-label', text: label }),
+      el('span', { className: 'kv-value mono', text: text || '—', title: text }),
+      copyBtn,
+    );
+  }
+
   function maskToken(token) {
     if (!token) return '未保存';
     if (token.length <= 8) return '••••••••';
@@ -4162,6 +6980,56 @@
   /* ==================================================================
    * 抽屉框架
    * ================================================================== */
+  let drawerViewportBound = false;
+
+  /** 手机浏览器地址栏/工具栏会压缩可视区域，用 visualViewport 校正抽屉高度，避免底部操作栏被裁掉。 */
+  function syncDrawerViewport() {
+    const root = $('#drawer-root');
+    if (!root || root.hidden) return;
+    if (!isMobile() || !window.visualViewport) {
+      root.style.height = '';
+      return;
+    }
+    root.style.height = `${Math.round(window.visualViewport.height)}px`;
+  }
+
+  function bindDrawerViewport() {
+    if (drawerViewportBound) return;
+    drawerViewportBound = true;
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', syncDrawerViewport);
+      window.visualViewport.addEventListener('scroll', syncDrawerViewport);
+    }
+    window.addEventListener('orientationchange', syncDrawerViewport);
+  }
+
+  function unbindDrawerViewport() {
+    if (!drawerViewportBound) return;
+    drawerViewportBound = false;
+    if (window.visualViewport) {
+      window.visualViewport.removeEventListener('resize', syncDrawerViewport);
+      window.visualViewport.removeEventListener('scroll', syncDrawerViewport);
+    }
+    window.removeEventListener('orientationchange', syncDrawerViewport);
+    const root = $('#drawer-root');
+    if (root) root.style.height = '';
+  }
+
+  /**
+   * 分组抽屉底部操作栏：`spacer` 之前的按钮（通常是「关闭」）留在左侧，
+   * 之后的按钮收进可换行的右侧操作组，避免按钮过多（如失败任务详情）时整行超出
+   * 抽屉宽度、被 `.drawer { overflow: hidden }` 从右边缘裁切。
+   */
+  function groupDrawerFooterNodes(nodes) {
+    const list = (nodes || []).filter(Boolean);
+    const spacerIndex = list.findIndex((node) => node && node.nodeType === 1 && node.classList && node.classList.contains('spacer'));
+    if (spacerIndex < 0) return list;
+    const left = list.slice(0, spacerIndex);
+    const right = list.slice(spacerIndex + 1);
+    if (!right.length) return left;
+    return [...left, el('div', { className: 'drawer-foot-actions' }, ...right)];
+  }
+
   function openDrawer({ kind, id, title, subNodes, body, footerNodes }) {
     state.drawer = {
       open: true,
@@ -4178,7 +7046,7 @@
     $('#drawer-body').replaceChildren(body || '');
     const foot = $('#drawer-foot');
     if (footerNodes && footerNodes.length) {
-      foot.replaceChildren(...footerNodes);
+      foot.replaceChildren(...groupDrawerFooterNodes(footerNodes));
       foot.hidden = false;
     } else {
       foot.replaceChildren();
@@ -4186,6 +7054,8 @@
     }
     $('#drawer-root').hidden = false;
     document.body.classList.add('no-scroll');
+    bindDrawerViewport();
+    syncDrawerViewport();
     const drawer = $('#drawer');
     requestAnimationFrame(() => drawer.focus({ preventScroll: true }));
   }
@@ -4193,6 +7063,9 @@
   function hideDrawer() {
     if (!state.drawer.open) return;
     deviceNicknameDraft = null;
+    clearTimeout(goalDetailTimer);
+    goalDetailTimer = 0;
+    unbindDrawerViewport();
     $('#drawer-root').hidden = true;
     document.body.classList.remove('no-scroll');
     const returnFocus = state.drawer.returnFocus;
@@ -4217,7 +7090,7 @@
     $('#drawer-body').replaceChildren(body || '');
     const foot = $('#drawer-foot');
     if (footerNodes && footerNodes.length) {
-      foot.replaceChildren(...footerNodes);
+      foot.replaceChildren(...groupDrawerFooterNodes(footerNodes));
       foot.hidden = false;
     } else {
       foot.replaceChildren();
@@ -4905,7 +7778,7 @@
       }
     }
     const foot = $('#drawer-foot');
-    foot.replaceChildren(...deviceFooterNodes(device));
+    foot.replaceChildren(...groupDrawerFooterNodes(deviceFooterNodes(device)));
     foot.hidden = false;
   }
 
@@ -5126,6 +7999,7 @@
     arr(requirements.skills).forEach((skill) => reqChips.appendChild(el('span', { className: 'chip', dataset: { kind: 'skill' }, text: `技能 ${skill}` })));
     if (requirements.profile) reqChips.appendChild(el('span', { className: 'chip', dataset: { kind: 'profile' }, text: `配置 ${requirements.profile}` }));
     if (requirements.gateway) reqChips.appendChild(el('span', { className: 'chip', dataset: { kind: 'gateway' }, text: `网关 ${requirements.gateway}` }));
+    if (requirements.project) reqChips.appendChild(el('span', { className: 'chip', dataset: { kind: 'project' }, text: `项目 ${requirements.project}` }));
     arr(requirements.tags).forEach((tag) => reqChips.appendChild(el('span', { className: 'chip', text: `标签 ${tag}` })));
     if (requirements.deviceId) reqChips.appendChild(el('span', { className: 'chip', text: `设备 ${deviceName(requirements.deviceId)}` }));
     if (!reqChips.childElementCount) reqChips.appendChild(el('span', { className: 'chip chip-more', text: '无特殊要求' }));
@@ -5151,6 +8025,12 @@
       ),
     );
     body.appendChild(metaSection);
+    body.appendChild(taskGoalSectionNode(task));
+
+    const subtasksSectionNode = childTasksSection(task);
+    if (subtasksSectionNode) body.appendChild(subtasksSectionNode);
+    const threadSectionNode = threadStepsSection(task);
+    if (threadSectionNode) body.appendChild(threadSectionNode);
 
     const route = task.route || {};
     const routeSection = el('section', { className: 'detail-section' },
@@ -5256,7 +8136,11 @@
         type: 'button', className: 'btn btn-ghost btn-sm',
         onclick: () => { hideDrawer(); editTaskInstruction(task.id); },
       }, icon('edit'), '编辑重发'),
+      el('button', { type: 'button', className: 'btn btn-ghost btn-sm', onclick: () => openTaskGoalPicker(task.id) }, icon('link'), '关联到目标'),
     ];
+    if (str(task.goalId)) {
+      nodes.push(el('button', { type: 'button', className: 'btn btn-ghost btn-sm', onclick: () => void unlinkTaskGoal(task) }, icon('x'), '取消关联目标'));
+    }
     if (ACTIVE_STATUS.has(status)) {
       nodes.push(el('button', { type: 'button', className: 'btn btn-danger btn-sm', onclick: () => cancelTask(task.id) }, icon('x'), '取消任务'));
     }
@@ -5265,6 +8149,12 @@
         type: 'button', className: 'btn btn-primary btn-sm',
         onclick: () => { hideDrawer(); answerMikaTask(task.id); },
       }, icon('send'), '回答 Mika'));
+    }
+    if (retryableChildrenOf(task).length) {
+      nodes.push(el('button', {
+        type: 'button', className: 'btn btn-primary btn-sm',
+        onclick: () => retryFailedChildren(task.id),
+      }, icon('refresh'), '重试失败子任务'));
     }
     if (RETRYABLE_STATUS.has(status)) {
       nodes.push(el('button', { type: 'button', className: 'btn btn-ghost btn-sm', onclick: () => completeTaskManually(task.id) }, icon('check'), '标记成功'));
@@ -5292,7 +8182,7 @@
     $('#drawer-body').replaceChildren(buildTaskBody(task));
     $('#drawer-body').scrollTop = scroll;
     const foot = $('#drawer-foot');
-    foot.replaceChildren(...taskFooterNodes(task));
+    foot.replaceChildren(...groupDrawerFooterNodes(taskFooterNodes(task)));
     foot.hidden = false;
   }
 
@@ -5353,6 +8243,42 @@
     } catch (err) {
       if (err.status === 401) return handleAuthLost(err.message);
       toast(err.message || '重试失败', 'error');
+    }
+  }
+
+  async function retryFailedChildren(parentId) {
+    if (taskRecoveryBusy) return;
+    const parent = state.tasks.find((item) => item.id === parentId);
+    const children = retryableChildrenOf(parent);
+    if (!children.length) {
+      toast('没有可重试的失败子任务', 'warn');
+      return;
+    }
+    taskRecoveryBusy = true;
+    toast('正在重试失败子任务…', 'info', 2000);
+    let requeued = 0;
+    try {
+      for (const child of children) {
+        try {
+          const res = await api(`/api/tasks/${encodeURIComponent(child.id)}/retry`, { method: 'POST', timeout: 10000 });
+          if (res && res.task) {
+            upsertTask(res.task);
+            requeued += 1;
+          }
+        } catch (err) {
+          if (err.status === 401) {
+            handleAuthLost(err.message);
+            return;
+          }
+        }
+      }
+      state.sigs.stats = '';
+      state.sigs.tasks = '';
+      renderAll();
+      refreshTaskDrawer(parentId);
+      toast(requeued ? `已重新排队 ${requeued} 个失败子任务` : '重试失败，请稍后再试', requeued ? 'success' : 'error');
+    } finally {
+      taskRecoveryBusy = false;
     }
   }
 
@@ -5482,6 +8408,7 @@
     updateComposerTarget();
     textarea.focus();
     textarea.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    toast('已进入继续任务模式，请在下方输入下一步指令', 'info', 3200);
   }
 
   function cancelFollowUp() {
@@ -5601,7 +8528,14 @@
       return;
     }
     for (const message of devState.messages) {
-      log.appendChild(el('div', { className: `dev-msg ${message.role}`, text: message.text }));
+      const node = el('div', { className: `dev-msg ${message.role}` });
+      if (message.role === 'assistant') {
+        // DSH 的回复通常是 Markdown（标题/列表/代码块/表格），渲染后再展示，手机端更好读。
+        node.appendChild(renderMarkdown(message.text));
+      } else {
+        node.textContent = tx(String(message.text || ''));
+      }
+      log.appendChild(node);
     }
     log.scrollTop = log.scrollHeight;
   }
@@ -5738,6 +8672,21 @@
 
   function setTab(tab, { scroll = true } = {}) {
     const next = TABS.has(tab) ? tab : 'status';
+    // 心智页有未保存修改时先确认，避免切换 tab 丢失编辑
+    if (state.tab === 'mind' && next !== 'mind' && state.mindDirty) {
+      void confirmDialog({
+        title: tr('mind.leaveTitle'),
+        message: tr('mind.leaveMessage'),
+        okText: tr('mind.leaveOk'),
+        danger: false,
+      }).then((ok) => {
+        if (!ok) return;
+        state.mindDirty = false;
+        renderMind();
+        setTab(next, { scroll });
+      });
+      return;
+    }
     state.tab = next;
     $$('.mobile-tab').forEach((btn) => {
       const on = btn.dataset.tab === next;
@@ -5753,6 +8702,13 @@
     }
     if (next === 'developer') void resumeDevJob();
     if (next === 'reminders') ensureRemindersLoaded();
+    if (next === 'journal') void ensureJournalLoaded();
+    if (next === 'brainstorm') ensureBrainstormLoaded();
+    if (next === 'mind') ensureMindLoaded();
+    if (next === 'goals') {
+      ensureGoalsLoaded();
+      void refreshBrain();
+    }
     if (isMobile() && scroll) {
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
@@ -5883,6 +8839,7 @@
           if (task) copyText(task.instruction || '', '指令已复制');
         } else if (action === 'edit-instruction') editTaskInstruction(id);
         else if (action === 'follow-up') startFollowUp(id);
+        else if (action === 'retry-failed-children') retryFailedChildren(id);
         else if (action === 'answer') answerMikaTask(id);
         else if (action === 'toggle-events') {
           if (state.expandedEvents.has(id)) state.expandedEvents.delete(id);
@@ -5976,6 +8933,144 @@
     /* 长期目标 */
     const goalNew = $('#goal-new');
     if (goalNew) goalNew.addEventListener('click', () => openGoalFormDrawer());
+
+    /* 自主大脑状态卡 */
+    const brainThink = $('#brain-think');
+    if (brainThink) brainThink.addEventListener('click', () => void runBrainThink());
+    const brainSettings = $('#brain-settings');
+    if (brainSettings) brainSettings.addEventListener('click', () => openBrainDrawer());
+    const brainToggle = $('#brain-toggle');
+    if (brainToggle) brainToggle.addEventListener('click', () => void toggleBrain());
+    const brainOwnerAck = $('#brain-owner-ack');
+    if (brainOwnerAck) brainOwnerAck.addEventListener('click', () => void ackBrainOwnerAsk());
+
+    /* 管家心路 */
+    const journalSummaryNow = $('#journal-summary-now');
+    if (journalSummaryNow) journalSummaryNow.addEventListener('click', () => void generateJournalSummary());
+    const journalControls = $('#journal-controls');
+    if (journalControls) {
+      journalControls.addEventListener('click', (event) => {
+        const filterBtn = event.target.closest('[data-journal-filter]');
+        if (filterBtn) {
+          state.journalFilter = filterBtn.dataset.journalFilter || 'all';
+          renderJournal();
+          return;
+        }
+        const saveBtn = event.target.closest('#journal-save');
+        if (saveBtn) {
+          void saveJournalSettings();
+          return;
+        }
+        const dayBtn = event.target.closest('[data-journal-day-summary]');
+        if (dayBtn) void generateJournalSummary(dayBtn.dataset.journalDaySummary);
+      });
+      journalControls.addEventListener('change', (event) => {
+        if (event.target.closest('#journal-enabled') || event.target.closest('#journal-time')) {
+          void saveJournalSettings();
+        }
+      });
+    }
+
+    /* 头脑风暴 */
+    const brainstormNew = $('#brainstorm-new');
+    if (brainstormNew) brainstormNew.addEventListener('click', () => void newBrainstormSession());
+    const brainstormReload = $('#brainstorm-reload');
+    if (brainstormReload) brainstormReload.addEventListener('click', () => void loadBrainstorm({ silent: true }));
+    const brainstormErrorBox = $('#brainstorm-error');
+    if (brainstormErrorBox) {
+      brainstormErrorBox.addEventListener('click', (event) => {
+        if (event.target.closest('[data-brainstorm-retry]')) {
+          state.brainstormError = '';
+          void loadBrainstorm();
+        }
+      });
+    }
+    const brainstormForm = $('#brainstorm-form');
+    if (brainstormForm) {
+      brainstormForm.addEventListener('submit', (event) => {
+        event.preventDefault();
+        void sendBrainstorm();
+      });
+    }
+    const brainstormInput = $('#brainstorm-input');
+    if (brainstormInput) {
+      brainstormInput.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.ctrlKey || event.metaKey) return;
+        event.preventDefault();
+        void sendBrainstorm();
+      });
+    }
+    const brainstormSessions = $('#brainstorm-sessions');
+    if (brainstormSessions) {
+      brainstormSessions.addEventListener('click', (event) => {
+        const delBtn = event.target.closest('[data-brainstorm-delete]');
+        if (delBtn) {
+          event.preventDefault();
+          void deleteBrainstormSession(delBtn.dataset.brainstormDelete);
+          return;
+        }
+        const sessionBtn = event.target.closest('[data-brainstorm-session]');
+        if (sessionBtn) {
+          event.preventDefault();
+          selectBrainstormSession(sessionBtn.dataset.brainstormSession);
+        }
+      });
+    }
+    const brainstormMessages = $('#brainstorm-messages');
+    if (brainstormMessages) {
+      brainstormMessages.addEventListener('click', (event) => {
+        const suggestion = event.target.closest('[data-brainstorm-suggest]');
+        if (suggestion) {
+          const input = $('#brainstorm-input');
+          if (input) {
+            input.value = tr(suggestion.dataset.brainstormSuggest);
+            input.focus();
+            void sendBrainstorm();
+          }
+          return;
+        }
+        const actionBtn = event.target.closest('[data-action]');
+        if (!actionBtn) return;
+        event.preventDefault();
+        const action = actionBtn.dataset.action;
+        const messageId = str(actionBtn.dataset.brainstormMessage);
+        const sessionId = brainstormCurrentId();
+        if (action === 'brainstorm-copy') {
+          const message = arr(state.brainstormSession && state.brainstormSession.messages)
+            .find((item) => item && item.id === messageId);
+          copyText(brainstormTextOf(message), tr('brainstorm.copied'));
+        } else if (action === 'brainstorm-to-task') {
+          void brainstormToTask(sessionId, messageId);
+        } else if (action === 'brainstorm-link-goal') {
+          openBrainstormGoalPicker(sessionId, messageId);
+        }
+      });
+    }
+
+    /* 心智 */
+    const mindEditors = $('#mind-editors');
+    if (mindEditors) {
+      mindEditors.addEventListener('input', () => updateMindDirty());
+      mindEditors.addEventListener('click', (event) => {
+        const resetBtn = event.target.closest('[data-mind-reset]');
+        if (resetBtn) {
+          event.preventDefault();
+          void resetMind({ field: resetBtn.dataset.mindReset });
+        }
+      });
+    }
+    const mindSave = $('#mind-save');
+    if (mindSave) mindSave.addEventListener('click', () => void saveMind());
+    const mindResetAll = $('#mind-reset-all');
+    if (mindResetAll) mindResetAll.addEventListener('click', () => void resetMind({}));
+    // 心智页有未保存修改时，刷新/关闭前给出浏览器原生提示
+    window.addEventListener('beforeunload', (event) => {
+      if (!state.mindDirty) return undefined;
+      event.preventDefault();
+      event.returnValue = '';
+      return '';
+    });
+
     const goalList = $('#goal-list');
     if (goalList) {
       goalList.addEventListener('click', (event) => {
@@ -5996,6 +9091,7 @@
           if (action === 'check') void goalCheckNow(goalId);
           else if (action === 'approve') void goalApprove(goalId);
           else if (action === 'reject') void goalReject(goalId);
+          else if (action === 'skip') void goalSkipNext(goalId);
           else if (action === 'pause') void goalSetStatus(goalId, 'paused');
           else if (action === 'resume') void goalSetStatus(goalId, 'active');
           else if (action === 'stop') void goalSetStatus(goalId, 'stopped');
@@ -6130,6 +9226,10 @@
       renderDevices();
       renderTasks();
       renderGoals();
+      renderBrainCard();
+      renderMind();
+      if (state.tab === 'journal') ensureJournalLoaded();
+      if (state.tab === 'brainstorm') ensureBrainstormLoaded();
       renderReminders();
       renderNightlyReview();
       renderComposerOptions();
