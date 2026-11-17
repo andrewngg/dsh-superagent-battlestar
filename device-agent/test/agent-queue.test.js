@@ -162,3 +162,37 @@ test('结果被 Hub 收敛忽略时计入统计，不再重试', async (t) => {
   assert.equal(agent.stats.resultsIgnored, 1);
   assert.equal(calls.results.length, 1);
 });
+
+test('attempt 归因：命令里的 attempt 写入任务/结果，Hub 才能识别旧尝试', async (t) => {
+  const { agent, calls } = createHarness(t);
+
+  const parsed = agent._taskFromCommand({
+    id: 'cmd_att',
+    type: 'run_task',
+    taskId: 'task_att',
+    createdAt: new Date().toISOString(),
+    payload: { instruction: '带 attempt 的任务', attempt: 3 },
+  });
+  assert.equal(parsed.attempt, 3);
+
+  // 老 Hub 不下发 attempt 时保持兼容：任务 attempt 为 null，结果体不带 attempt 字段。
+  const legacy = agent._taskFromCommand({
+    id: 'cmd_legacy',
+    type: 'run_task',
+    taskId: 'task_legacy',
+    payload: { instruction: '旧 Hub' },
+  });
+  assert.equal(legacy.attempt, null);
+
+  await agent._reportResult(
+    { taskId: 'task_att', attempt: 3, startedAt: Date.now(), finished: false },
+    { ok: true, output: { text: 'ok' } },
+  );
+  await agent._reportResult(
+    { taskId: 'task_legacy', attempt: null, startedAt: Date.now(), finished: false },
+    { ok: true, output: { text: 'ok' } },
+  );
+
+  assert.equal(calls.results[0].body.attempt, 3);
+  assert.equal('attempt' in calls.results[1].body, false);
+});

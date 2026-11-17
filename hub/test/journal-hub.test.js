@@ -36,6 +36,10 @@ const MODEL_ENV_KEYS = [
   'BRAIN_MODEL',
   'AGNES_MODEL',
   'BRAIN_TIMEOUT_MS',
+  'DEEPSEEK_API_KEY',
+  'BRAINSTORM_API_KEY',
+  'BRAINSTORM_BASE_URL',
+  'BRAINSTORM_MODEL',
 ];
 
 /** 临时清空/设置模型相关环境变量，结束后恢复（宿主机可能配置了真实密钥）。 */

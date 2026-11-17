@@ -112,6 +112,17 @@ window.__ModuleLoader__.load({
       followUpHint: '继续会创建一个新任务，并自动带上当前任务的结果作为上下文。',
       activeFollowUpHint: '任务还在进行中，结束后才能继续；也可以先取消任务再继续。',
       cancelTaskTitle: '取消任务', dialogOk: '确定', dialogCancel: '取消', close: '关闭',
+      mind: '心智', mindTitle: '心智（Soul / Skill）',
+      mindHint: '灵魂与工作流程会随每轮思考的快照一起交给模型，影响它的表达方式与做事习惯。这部分配置已从 Web 控制台迁移到本插件面板。',
+      soulField: '灵魂 Soul', skillField: '工作流程 Skill',
+      soulHint: '模型的长期身份、语气与表达风格；留空会提示补全。',
+      skillHint: '模型做事的工作流程、检查清单与交付标准。',
+      mindDefaultBadge: '使用默认内容', mindCustomBadge: '自定义内容',
+      mindSave: '保存心智', mindSaving: '保存中…', mindSaved: '心智已保存', mindSaveFailed: '保存心智失败',
+      mindReset: '恢复默认', mindResetAll: '全部恢复默认', mindResetDone: '已恢复默认内容',
+      mindUpdatedAt: '最后更新', mindNeverUpdated: '尚未修改（使用默认内容）',
+      mindLoadFailed: '加载心智失败',
+      mindLoadNeedsRestart: '插件 Host 尚未加载心智接口（Host 代码不热更新，需完全重启 DSH 才会注册 /api/mind）。心智数据保存在 Hub，没有丢失；请完全退出并重新打开 DeepSeek Harness 后重试。',
     }
     const en = {
       panel: 'BattleStar', title: 'BattleStar', subtitle: 'Multi-device AI butler · console and keys',
@@ -211,6 +222,17 @@ window.__ModuleLoader__.load({
       followUpHint: 'Continue creates a new task with the current result as context.',
       activeFollowUpHint: 'The task is still active; it can continue after it ends. You can cancel it first.',
       cancelTaskTitle: 'Cancel task', dialogOk: 'OK', dialogCancel: 'Cancel', close: 'Close',
+      mind: 'Mind', mindTitle: 'Mind (Soul / Skill)',
+      mindHint: 'Soul and workflow are handed to the model with each thinking snapshot, shaping its tone and habits. This configuration has moved from the Web console to this plugin panel.',
+      soulField: 'Soul', skillField: 'Workflow (Skill)',
+      soulHint: 'Long-term identity, tone and expression style of the model. Empty values are rejected.',
+      skillHint: 'Workflow, checklists and delivery standards the model should follow.',
+      mindDefaultBadge: 'Using default', mindCustomBadge: 'Customized',
+      mindSave: 'Save mind', mindSaving: 'Saving…', mindSaved: 'Mind saved', mindSaveFailed: 'Failed to save mind',
+      mindReset: 'Reset to default', mindResetAll: 'Reset all to default', mindResetDone: 'Default content restored',
+      mindUpdatedAt: 'Last updated', mindNeverUpdated: 'Not modified yet (using defaults)',
+      mindLoadFailed: 'Failed to load mind',
+      mindLoadNeedsRestart: 'The plugin host has not loaded the mind route yet (host code does not hot-reload; DSH must be fully restarted to register /api/mind). The mind data lives in the Hub and is not lost — quit DeepSeek Harness completely, reopen it, then retry.',
     }
 
     const COLORS = {
@@ -531,7 +553,7 @@ window.__ModuleLoader__.load({
           h(Step, { index: 1, text: t('ctrlStep1') },
             h(CodeBlock, { t, text: `${hub}/m?token=<管理员令牌>` })),
           h(Step, { index: 2, text: t('ctrlStep2') },
-            h(CodeBlock, { t, text: 'dist/BattleStar-0.1.2.apk' })),
+            h(CodeBlock, { t, text: 'dist/BattleStar-0.1.5.apk' })),
           h(Step, { index: 3, text: t('ctrlStep3') }),
         ),
         h('section', { style: sectionCard },
@@ -702,6 +724,125 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // 心智（Soul / Skill）编辑已从 Web 控制台迁移到本插件面板；数据仍由 Hub 的 /api/mind 持久化。
+    function MindTab({ t }) {
+      const [mind, setMind] = useState(null)
+      const [soul, setSoul] = useState('')
+      const [skill, setSkill] = useState('')
+      const [busy, setBusy] = useState('')
+      const [error, setError] = useState('')
+      const [notice, setNotice] = useState('')
+      // Host 代码不热更新：DSH 里跑的是旧插件时 /api/mind 会 404「未知路由」。
+      // 此时把“需要重启”做成醒目的横幅，避免空白输入框被误读成“心智数据丢了”。
+      const [hostStale, setHostStale] = useState(false)
+
+      const apply = useCallback((next) => {
+        if (!next) return
+        setMind(next)
+        setSoul(String(next.soul || ''))
+        setSkill(String(next.skill || ''))
+      }, [])
+
+      const load = useCallback(async () => {
+        try {
+          const res = await call('/mind')
+          apply(res && res.mind ? res.mind : res)
+          setHostStale(false)
+          setError('')
+        } catch (err) {
+          const missing = isRouteMissingError(err)
+          setHostStale(missing)
+          setError(missing ? t('mindLoadNeedsRestart') : (err.message || t('mindLoadFailed')))
+        }
+      }, [apply, t])
+
+      useEffect(() => { void load() }, [load])
+
+      const limits = (mind && mind.limits) || { soul: 6000, skill: 12000 }
+
+      const patch = async (body, key, doneKey) => {
+        setBusy(key)
+        setError('')
+        setNotice('')
+        try {
+          const res = await call('/mind', { method: 'PATCH', body: JSON.stringify(body) })
+          apply(res && res.mind ? res.mind : res)
+          setNotice(t(doneKey))
+        } catch (err) {
+          const missing = isRouteMissingError(err)
+          if (missing) setHostStale(true)
+          setError(missing ? t('mindLoadNeedsRestart') : (err.message || t('mindSaveFailed')))
+        } finally {
+          setBusy('')
+        }
+      }
+
+      const dirty = Boolean(mind) && (soul !== String(mind.soul || '') || skill !== String(mind.skill || ''))
+      const badge = (isDefault) => h(Badge, { tone: isDefault ? 'idle' : 'ok' },
+        isDefault ? t('mindDefaultBadge') : t('mindCustomBadge'))
+      const updatedAt = mind && mind.updatedAt
+        ? `${t('mindUpdatedAt')} ${timeAgo(mind.updatedAt, t)}`
+        : t('mindNeverUpdated')
+      const textareaStyle = {
+        ...inputStyle, resize: 'vertical', lineHeight: 1.6, minHeight: 150,
+        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', fontSize: 12,
+      }
+
+      const fieldBlock = (label, hint, value, onChange, isDefault, charCount, limit, resetBody, resetKey) =>
+        h(Field, { label, hint }, h('div', null,
+          h('textarea', {
+            value, rows: 10, spellCheck: false, readOnly: hostStale,
+            placeholder: hostStale ? t('mindLoadNeedsRestart') : undefined,
+            style: textareaStyle, onChange: (e) => onChange(e.target.value),
+          }),
+          h('div', { style: { ...row, justifyContent: 'space-between', marginTop: 6, gap: 8, flexWrap: 'wrap' } },
+            h('span', { style: muted }, `${charCount} / ${limit}`),
+            h('span', { style: { ...row, gap: 6 } },
+              badge(isDefault),
+              h('button', {
+                style: btn(false, Boolean(busy)), disabled: Boolean(busy) || hostStale,
+                onClick: () => void patch(resetBody, resetKey, 'mindResetDone'),
+              }, t('mindReset')),
+            ),
+          ),
+        ))
+
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 16 } },
+        h('section', { style: card },
+          h('div', { style: { ...row, justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' } },
+            h('h3', { style: { fontSize: 14, margin: 0 } }, t('mindTitle')),
+            h('span', { style: muted }, updatedAt),
+          ),
+          h('div', { style: { ...muted, margin: '8px 0 14px', lineHeight: 1.6 } }, t('mindHint')),
+          hostStale
+            ? h('div', {
+                role: 'status',
+                style: {
+                  margin: '0 0 14px', padding: '10px 12px', borderRadius: 8,
+                  border: `1px solid ${COLORS.warn}`, background: COLORS.layer2,
+                  color: COLORS.warn, fontSize: 12, lineHeight: 1.6,
+                },
+              }, t('mindLoadNeedsRestart'))
+            : null,
+          fieldBlock(t('soulField'), t('soulHint'), soul, setSoul, mind ? mind.soulIsDefault : true, soul.length, limits.soul, { resetSoul: true }, 'reset-soul'),
+          fieldBlock(t('skillField'), t('skillHint'), skill, setSkill, mind ? mind.skillIsDefault : true, skill.length, limits.skill, { resetSkill: true }, 'reset-skill'),
+          h('div', { style: { ...row, justifyContent: 'flex-end', gap: 10, flexWrap: 'wrap' } },
+            h('button', {
+              style: btn(false, Boolean(busy)), disabled: Boolean(busy),
+              onClick: () => void patch({ resetSoul: true, resetSkill: true }, 'reset-all', 'mindResetDone'),
+            }, t('mindResetAll')),
+            h('button', {
+              style: btn(true, Boolean(busy) || !dirty || hostStale), disabled: Boolean(busy) || !dirty || hostStale,
+              onClick: () => void patch({ soul, skill }, 'save', 'mindSaved'),
+            }, busy === 'save' ? t('mindSaving') : t('mindSave')),
+          ),
+          (error || notice)
+            ? h('div', { style: { ...muted, textAlign: 'right', marginTop: 10, color: error ? COLORS.err : COLORS.ok } }, error || notice)
+            : null,
+        ),
+      )
+    }
+
     function Panel({ ctx }) {
       const t = ctx.locale.bind(NS)
       const [tab, setTab] = useState('console')
@@ -811,11 +952,11 @@ window.__ModuleLoader__.load({
       )
 
       const tabs = h('div', { style: { display: 'flex', gap: 6, marginTop: 16, borderBottom: `1px solid ${COLORS.border}`, paddingBottom: 8 } },
-        ['console', 'guide', 'settings'].map((key) => h('button', {
+        ['console', 'guide', 'mind', 'settings'].map((key) => h('button', {
           key, onClick: () => setTab(key), style: {
             ...btn(tab === key), fontWeight: 600,
           },
-        }, key === 'console' ? t('dashboard') : key === 'guide' ? t('guide') : t('settings'))),
+        }, key === 'console' ? t('dashboard') : key === 'guide' ? t('guide') : key === 'mind' ? t('mind') : t('settings'))),
       )
 
       return h('div', { style: { height: '100%', overflow: 'auto', boxSizing: 'border-box', padding: '22px 26px', background: COLORS.bg, color: COLORS.text, font: 'inherit' } },
@@ -836,7 +977,9 @@ window.__ModuleLoader__.load({
                     hubOrigin: status && status.hub ? status.hub.origin : '',
                     joinCode: status && status.hub ? status.hub.joinCode : '',
                   })
-                : h(SettingsTab, {
+                : tab === 'mind'
+                  ? h(MindTab, { t })
+                  : h(SettingsTab, {
                     settings: settingsData && settingsData.settings, secrets: settingsData && settingsData.secrets,
                     credentials: settingsData && settingsData.credentials,
                     status, t, busy, message, onSave,

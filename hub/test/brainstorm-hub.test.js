@@ -24,6 +24,13 @@ const MODEL_ENV_KEYS = [
   'BRAIN_MODEL',
   'AGNES_MODEL',
   'BRAIN_TIMEOUT_MS',
+  'DEEPSEEK_API_KEY',
+  'BRAINSTORM_API_KEY',
+  'BRAINSTORM_BASE_URL',
+  'BRAINSTORM_MODEL',
+  'BRAINSTORM_FILE_API_KEY',
+  'BRAINSTORM_FILE_BASE_URL',
+  'BRAINSTORM_FILE_MODEL',
 ];
 
 /** 临时清空模型相关环境变量，结束后恢复（宿主机可能配置了真实密钥）。 */
@@ -132,6 +139,54 @@ test('多轮对话：历史进入提示词，标题保持首条用户消息', as
   assert.ok(thinker.captured[1].user.includes('那第一步具体怎么做？'));
 });
 
+test('模型路由：普通对话用 Agnes，涉及文件时自动切 DeepSeek', async (t) => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    return {
+      ok: true,
+      status: 200,
+      async text() {
+        return JSON.stringify({ choices: [{ message: { content: '## 结论\n已读取文件内容。' } }] });
+      },
+    };
+  };
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  await withModelEnv(
+    { AGNES_API_KEY: 'agnes-key', AGNES_BASE_URL: 'https://agnes.test/v1', DEEPSEEK_API_KEY: 'ds-key' },
+    async () => {
+      const { hub } = await newHub(t);
+
+      const plain = await hub.chatBrainstorm({ message: '帮我把求职目标拆成本周行动' });
+      assert.equal(plain.error, null);
+      assert.equal(plain.fileMode, false);
+      assert.equal(plain.model, 'agnes-2.5-flash');
+      assert.equal(calls[0], 'https://agnes.test/v1/chat/completions');
+
+      const filePath = path.join(os.tmpdir(), 'bs-brainstorm-file-mode.txt');
+      fs.writeFileSync(filePath, '服务线 A：Python 自动化。');
+      t.after(() => fs.rmSync(filePath, { force: true }));
+
+      const withFile = await hub.chatBrainstorm({ message: `读取 ${filePath} 并总结` });
+      assert.equal(withFile.fileMode, true);
+      assert.equal(withFile.model, 'deepseek-chat');
+      assert.equal(calls[1], 'https://api.deepseek.com/chat/completions');
+      assert.equal(withFile.attachments.length, 1);
+
+      const uploaded = await hub.chatBrainstorm({
+        message: '再结合这份附件给建议',
+        attachments: [{ name: 'notes.txt', text: '附件正文' }],
+      });
+      assert.equal(uploaded.fileMode, true);
+      assert.equal(calls[2], 'https://api.deepseek.com/chat/completions');
+    },
+  );
+});
+
 test('模型失败：不抛错，assistant 消息带 error，之后可继续对话', async (t) => {
   const thinker = makeThinker();
   const { hub } = await newHub(t, { brainstormThink: thinker.think });
@@ -177,7 +232,7 @@ test('未配置模型：对话仍保存并返回错误，不抛给调用方', as
     assert.equal(result.reply, null);
     assert.equal(result.session.messages.length, 2);
     assert.equal(result.session.messages[0].role, 'user');
-    assert.equal(result.session.messages[1].error, '未配置自主大脑模型（BRAIN_API_KEY / AGNES_API_KEY）');
+    assert.equal(result.session.messages[1].error, '未配置自主大脑模型（BRAIN_API_KEY / AGNES_API_KEY / DEEPSEEK_API_KEY）');
     // 会话仍被保存，可继续追问。
     const view = hub.getBrainstorm();
     assert.equal(view.sessions.length, 1);

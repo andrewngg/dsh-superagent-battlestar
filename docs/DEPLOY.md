@@ -61,6 +61,14 @@ node hub/server.js --port 7317 --host 0.0.0.0
 | `BUTLER_PORT` / `BUTLER_HOST` | 监听端口/地址 | `7317` / `0.0.0.0` |
 | `BUTLER_DATA_DIR` | 数据目录 | `hub/data` |
 | `BUTLER_TTL_MS` | 设备离线判定 TTL | `30000` |
+| `DEEPSEEK_API_KEY` | 设置后头脑风暴/自主大脑自动使用 DeepSeek（`https://api.deepseek.com`、`deepseek-chat`） | 未设置则用默认供应商 |
+| `BRAIN_API_KEY` / `AGNES_API_KEY` | 自主大脑 + 头脑风暴的模型 Key（兼容旧名） | 空 |
+| `BRAIN_BASE_URL` / `BRAIN_MODEL` | 模型地址与模型名；可指向任意 OpenAI 兼容服务 | Agnes 默认 |
+| `BRAINSTORM_API_KEY` / `BRAINSTORM_BASE_URL` / `BRAINSTORM_MODEL` | 只覆盖头脑风暴，不影响自主大脑 | 继承 `BRAIN_*` |
+| `BRAINSTORM_FILE_API_KEY` / `BRAINSTORM_FILE_BASE_URL` / `BRAINSTORM_FILE_MODEL` | 只覆盖头脑风暴的「文件模式」（本轮带附件或提到文件路径时自动使用） | `DEEPSEEK_API_KEY` + `https://api.deepseek.com` + `deepseek-chat` |
+| `BRAIN_TIMEOUT_MS` | 模型调用超时（毫秒，5s–300s） | `60000` |
+
+> 模型配置也可以写在仓库根目录或 `hub/.env`（`KEY=VALUE`，已被 `.gitignore` 忽略），Hub 启动时自动加载；已存在的系统环境变量优先，日志只打印加载的键名、不打印值。
 
 ### 2.4 开机自启
 
@@ -173,11 +181,11 @@ node device-agent/agent.js --hub http://192.168.1.10:7317 --join-code <joinCode>
 
 ### 4.1 安装 APK
 
-把 `dist/BattleStar-0.1.2.apk` 传到手机安装（允许「安装未知来源应用」）。
+把 `dist/BattleStar-0.1.5.apk` 传到手机安装（允许「安装未知来源应用」）。
 或使用 adb：
 
 ```bash
-adb install -r dist/BattleStar-0.1.2.apk
+adb install -r dist/BattleStar-0.1.5.apk
 ```
 
 ### 4.2 首次连接

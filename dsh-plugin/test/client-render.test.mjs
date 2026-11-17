@@ -12,7 +12,7 @@ const source = fs.readFileSync(clientFile, 'utf8')
 // 测试内把内部组件暴露出来，做一次无 DOM 的渲染冒烟测试。
 const annotated = source.replace(
   '    return {\n      inject:',
-  '    globalThis.__dshClientInternals = { DeviceCard, ConsoleTab, GuideTab, Panel, SettingsTab }\n    return {\n      inject:',
+  '    globalThis.__dshClientInternals = { DeviceCard, ConsoleTab, GuideTab, MindTab, Panel, SettingsTab }\n    return {\n      inject:',
 )
 
 function flatten(children, out = []) {
@@ -281,4 +281,20 @@ test('ConsoleTab reports the stopped hub and still exposes the browser console l
   assert.match(html, /stopped/)
   assert.match(html, /noDevices/)
   assert.match(html, /openConsole/)
+})
+
+test('MindTab edits the soul and workflow that moved out of the web console', () => {
+  const { React, render, collect, internals } = loadInternals()
+  const tree = React.createElement(internals.MindTab, { t })
+  const html = render(tree)
+  for (const key of ['mindTitle', 'mindHint', 'soulField', 'skillField', 'mindSave', 'mindResetAll', 'mindDefaultBadge']) {
+    assert.match(html, new RegExp(key), `mind tab renders ${key}`)
+  }
+  const textareas = collect(tree, (node) => node.type === 'textarea')
+  assert.equal(textareas.length, 2, 'soul and workflow each get a textarea')
+  const buttons = collect(tree, (node) => node.type === 'button')
+  const labels = buttons.map((node) => render(node.props.children))
+  assert.ok(labels.includes('mindSave'), 'save action exists')
+  assert.ok(labels.includes('mindResetAll'), 'reset-all action exists')
+  assert.equal(labels.filter((label) => label === 'mindReset').length, 2, 'each field can be reset')
 })

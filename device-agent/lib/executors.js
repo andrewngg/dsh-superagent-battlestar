@@ -209,14 +209,16 @@ function delay(ms, signal) {
 /**
  * @param {(message:string, percent?:number)=>any} send
  * @param {{minIntervalMs?:number}} [options]
- * @returns {(message:string, percent?:number)=>Promise<void>}
+ * @returns {(message:string, percent?:number, opts?:{force?:boolean})=>Promise<void>}
  */
 function makeProgressThrottle(send, options = {}) {
   const minIntervalMs = clampInt(options.minIntervalMs, 0, 60000, PROGRESS_MIN_INTERVAL_MS);
   let lastAt = 0;
-  return async function reportProgress(message, percent) {
+  return async function reportProgress(message, percent, opts) {
     const now = Date.now();
-    if (now - lastAt < minIntervalMs) return;
+    // force：关键阶段（如「正在执行本机 CLI」）即使落后于 800ms 节流窗口也要上报，
+    // 否则紧接着 2% 起步进度会被丢弃，用户在整个执行期间看不到任何变化。
+    if (!(opts && opts.force) && now - lastAt < minIntervalMs) return;
     lastAt = now;
     try {
       await send(message, percent);
@@ -731,6 +733,11 @@ function createCliExecutor(options = {}) {
   const extraEnv = isPlainObject(cfg.env) ? cfg.env : {};
   const label = '本机 CLI';
   const streamProgress = cfg.streamProgress !== false;
+  // 卡死治理：长时间没有任何进度（不是 keepalive）就终止，避免静默等到 CLI 硬上限。
+  // 默认 5 分钟；可通过 cli.stallTimeoutMs 调整，设 0 关闭。
+  const stallTimeoutMs = clampInt(cfg.stallTimeoutMs, 0, 60 * 60 * 1000, 5 * 60 * 1000);
+  // 执行期间每 15s 至少报一次「已运行 Xs」心跳，让控制台看到任务还活着（心跳不算真实进度）。
+  const heartbeatMs = clampInt(cfg.heartbeatMs, 5000, 60000, 15000);
   // 项目归属：任务级 requirements.project > 设备配置 cli.project/projectName > 设备名兜底。
   // 设备级项目用工作目录作为项目文件夹（保持不变、零迁移）；任务级项目名由 worker 解析。
   const deviceName = nonEmptyString(options.deviceName) ? options.deviceName.trim() : '';
@@ -741,7 +748,14 @@ function createCliExecutor(options = {}) {
   return {
     async run(ctx = {}) {
       const signal = ctx.signal || null;
-      const progress = typeof ctx.progress === 'function' ? ctx.progress : async () => {};
+      const sendProgress = typeof ctx.progress === 'function' ? ctx.progress : async () => {};
+      // lastProgressAt 只统计「真实进度」（进度文件/执行器步骤），心跳不更新它，
+      // 这样 watchdog 才能发现 CLI 是否真的卡住。
+      let lastProgressAt = Date.now();
+      const progress = async (message, percent, opts) => {
+        if (!(opts && opts.silent)) lastProgressAt = Date.now();
+        return sendProgress(message, percent, opts);
+      };
       const task = ctx.task || {};
       const requirements = isPlainObject(task.requirements) ? task.requirements : {};
       throwIfAborted(signal);
@@ -749,12 +763,17 @@ function createCliExecutor(options = {}) {
       const instruction = String(task.instruction || '').trim();
       if (!instruction) return { output: { text: '' }, error: '任务指令为空' };
 
+      // 任务预算只允许「加长」不允许缩短：Hub 的 timeoutSec 是静默进度超时，
+      // 代码/多仓库类任务常需要 15 分钟以上，任务可以显式给更大预算。
+      const taskBudgetMs = Number(task.timeoutSec) > 0 ? Number(task.timeoutSec) * 1000 : 0;
+      const runTimeoutMs = clampInt(Math.max(timeoutMs, taskBudgetMs), 5000, 60 * 60 * 1000, timeoutMs);
+
       const args = [
         worker,
         '--instruction', instruction,
         '--mode', mode,
         '--workdir', workdir,
-        '--timeout-ms', String(timeoutMs),
+        '--timeout-ms', String(runTimeoutMs),
       ];
       if (allowShell) args.push('--allow-shell');
       if (fallbackToHermes) args.push('--fallback-hermes');
@@ -787,7 +806,7 @@ function createCliExecutor(options = {}) {
       if (nonEmptyString(hermes.exe)) env.BUTLER_CLI_HERMES_EXE = hermes.exe;
       if (nonEmptyString(opencode.exe)) env.BUTLER_CLI_OPENCODE_EXE = opencode.exe;
       env.BUTLER_CLI_WORKDIR = workdir;
-      env.BUTLER_CLI_TIMEOUT_MS = String(timeoutMs);
+      env.BUTLER_CLI_TIMEOUT_MS = String(runTimeoutMs);
       env.BUTLER_CLI_SESSION_FILE = path.join(stateDir, 'hermes-sessions.json');
       env.NO_COLOR = '1';
 
@@ -811,8 +830,9 @@ function createCliExecutor(options = {}) {
         }
       };
 
-      await progress(`正在执行${label}（${mode}）…`, 10);
+      await progress(`正在执行${label}（${mode}）…`, 10, { force: true });
       const startedAt = Date.now();
+      let stalled = false;
       let child;
       try {
         child = spawn(process.execPath, args, {
@@ -832,12 +852,55 @@ function createCliExecutor(options = {}) {
         : null;
       if (tailer) tailer.start();
 
+      // 心跳：即使后端（如 OpenCode）不产生执行步骤，也让控制台知道任务还活着。
+      let heartbeatTimer = null;
+      let stallTimer = null;
+      if (heartbeatMs > 0) {
+        heartbeatTimer = setInterval(() => {
+          if (Date.now() - lastProgressAt < heartbeatMs) return;
+          const sec = Math.round((Date.now() - startedAt) / 1000);
+          void progress(`${label}执行中（已 ${sec}s）…`, 20, { silent: true });
+        }, heartbeatMs);
+        if (heartbeatTimer.unref) heartbeatTimer.unref();
+      }
+      // 无进度 watchdog：连续 stallTimeoutMs 没有任何真实进度才终止，避免误杀慢但健康的任务。
+      if (stallTimeoutMs > 0) {
+        const checkMs = Math.min(15000, Math.max(5000, Math.floor(stallTimeoutMs / 3)));
+        stallTimer = setInterval(() => {
+          if (stalled) return;
+          if (Date.now() - lastProgressAt < stallTimeoutMs) return;
+          stalled = true;
+          const sec = Math.round(stallTimeoutMs / 1000);
+          void progress(`${label}无进度已 ${sec}s，准备终止…`, undefined, { silent: true });
+          void killProcessTree(child);
+        }, checkMs);
+        if (stallTimer.unref) stallTimer.unref();
+      }
+
       try {
         let outcome;
         try {
-          outcome = await waitForChild(child, { timeoutMs, signal, label });
+          outcome = await waitForChild(child, { timeoutMs: runTimeoutMs, signal, label });
         } catch (err) {
-          return { output: { text: '' }, error: err.message };
+          if (stalled) {
+            return {
+              output: { text: '', data: { executor: 'cli', backend: mode, stalled: true, stallTimeoutMs, durationMs: Date.now() - startedAt } },
+              error: `${label}无进度已 ${Math.round(stallTimeoutMs / 1000)}s（stalled），已终止`,
+            };
+          }
+          const timedOut = err && (err.name === 'ExecutorTimeoutError' || err.code === 'timeout');
+          return {
+            output: { text: '', data: { executor: 'cli', backend: mode, timedOut, durationMs: Date.now() - startedAt } },
+            error: timedOut
+              ? `${err.message}（本机 CLI 硬上限 ${Math.round(runTimeoutMs / 1000)}s，建议拆分任务或调大 timeoutSec）`
+              : err.message,
+          };
+        }
+        if (stalled) {
+          return {
+            output: { text: '', data: { executor: 'cli', backend: mode, stalled: true, stallTimeoutMs, durationMs: Date.now() - startedAt } },
+            error: `${label}无进度已 ${Math.round(stallTimeoutMs / 1000)}s（stalled），已终止`,
+          };
         }
         closeFds();
 
@@ -894,6 +957,8 @@ function createCliExecutor(options = {}) {
           durationMs,
         };
       } finally {
+        if (heartbeatTimer) clearInterval(heartbeatTimer);
+        if (stallTimer) clearInterval(stallTimer);
         if (tailer) await tailer.stop();
         closeFds();
         await removeDirSafe(dir);

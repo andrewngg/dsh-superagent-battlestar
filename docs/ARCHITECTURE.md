@@ -137,12 +137,25 @@ score = 100
 
 **并发**：母机 `first-machine` 的 `limits.maxConcurrentTasks` 现为 4；超出容量的任务保持 `queued`，槽位释放后由 Hub 自动重派，拆分出的子任务不会因为一台机器满载就失败。
 
+#### 3.3.2 派发亲和：母机 / 项目 / 线程（`routing-affinity`）
+
+路由评分只比较“当前谁更空/更新鲜”，不理解“这台机器有没有这个项目的上下文”。派发亲和在评分之前加一层软锁定，目标是把同一件事留在知道上下文的机器上：
+
+- **优先级**：显式 `requirements.deviceId`（硬锁，只在指定设备评分）> `task.affinity.deviceId`（任务首次派发或重试沿用）> 同 `(threadId||id)` 线程上次执行的主机 > `requirements.project` 的项目亲和（成功完成后 `projectAffinity.set(project, deviceId)`，随 `state.routing.projectAffinity` 持久化，上限 200 条）> 母机（`settings.mainDeviceId`，为空时 `_localDevice()`：`BUTLER_LOCAL_DEVICE_ID` > tags 含「本机」> 名称含主机名）> 常规评分。
+- **等待而不换机**：首选设备离线、或真实占用（assigned/running/waiting）达到 `limits.maxConcurrentTasks` 时，任务保持 `queued` 并写 `route.reason = "…亲和等待：<原因>"`，只在 reason 变化时广播/落盘；设备上线、槽位释放（`retryQueuedTasks`）后自动派回。设备不存在/禁用/缺能力才回退普通评分，并在 `route.reason` 注明「回退普通路由」。
+- **计划子任务特例**：`parentTaskId` 非空的子任务若因线程亲和指向的设备离线/并发满，直接回退自动路由（并行子任务不能被单并发设备卡住）；显式 deviceId 与任务原主机不受影响。
+- **失败语义**：`_finishTask(completed)` 记录项目亲和；任务内容层失败保留 `task.affinity`，手动重试回到原主机；`_dispatchFailure`（ack 超时/设备掉线，任务未真正执行）清空 `task.affinity` 并按 `_avoidDeviceIds` 重派，避免把“机器没跑起来”误判成“项目上下文不匹配”。
+- **自动标签**：设备 manifest 的 `tags` 之外，Hub 按「该设备成功执行过哪些项目」推导 `autoTags`（项目名 + 项目别名；`deviceToJson` 下发、`_capabilitiesForMatch` 合并进路由匹配）；任务 `requirements.project` 出现过的标签写入 `state.routing.projectTags` 作为项目别名，大脑写错的项目标签因此能自动匹配；显式 `deviceId` 钉住的设备只缺标签时按无 tags 需求评分派发，缺 model/skills/profile/gateway 仍排除；测试 `hub/test/auto-tags.test.js`。
+- **设置**：`PATCH /api/settings {mainDeviceId}`（空串=本机自动识别；非空必须已注册，未知返回 400「主设备不存在：…」），`state.json` 的 `routing = { projectAffinity, projectTags, mainDeviceId }`；控制台「设置 → 派发与母机」提供下拉选择。
+- **测试**：`hub/test/routing-affinity.test.js` 覆盖母机优先、线程/项目亲和（含重启恢复）、容量/离线等待、硬 deviceId、失败重试粘性、设置校验；`plan-devices.test.js` 覆盖子任务线程亲和回退。
+
 ### 3.4 命令与执行
 
 - Hub 不执行任何用户代码；它只把 `run_task` 命令交给设备代理。
 - 设备代理收到命令后先 `ack`（assigned→running），再交给执行器，定期 `progress`（执行期间额外发 `keepalive` 续期超时窗口），最终 `result`。
 - 执行器可插拔：`simulate`（演示）、`cli`（本机 Hermes / OpenCode / shell）、`dsh-cli`（命令模板调用 DSH）、`shell`、`http`（设备本地服务）、`ollama`。
 - 本机 CLI 的实时步骤：`cli` 执行器默认用 `hermes chat -q "<指令>" --format stream-json` 执行，逐行解析 `tool_use` / `tool_result` 事件，把「正在执行：工具」「子任务：…」「执行步骤：…」写入临时进度文件；设备代理每 500ms 轮询并转成 `progress` 上报（不占用子进程管道，Windows 沙箱安全）。任务卡片显示最新步骤，详情抽屉的事件时间线保留历史步骤；旧版 Hermes 不支持 `stream-json` 时自动回退 `-z` 一次性调用，只有粗粒度进度。
+- 本机 CLI 卡死治理（A+B）：执行前「正在执行本机 CLI」进度用 `force` 绕过 800ms 节流，OpenCode 的 `--format json` JSONL 输出增量解析为步骤进度，执行期间每 15s 至少一次「执行中（已 Xs）」心跳（心跳不更新“真实进度”时间）；连续 `stallTimeoutMs`（默认 5 分钟）无真实进度则 watchdog 终止子进程并回报 `stalled`，失败文案带「本机 CLI 硬上限」建议拆分；CLI 超时取 `max(cli.timeoutMs, task.timeoutSec)`（5 秒–1 小时），Hub 即使收到 keepalive 也在 `max(30 分钟, timeoutSec×6)` 后按超时处理；设备上报 `stalled/无进度/执行超时` 类失败时，Hub 在 `maxAttempts` 内自动重排一次并保留 `task.affinity`（普通内容错误不自动重排）。控制台任务详情新增执行器/后端/模型与「已运行」时长，超时失败追加拆分建议；自主大脑提示词要求把「多仓库/发布/部署/迁移/全量验证」类工作拆成 2–3 个 15 分钟内可完成的任务。
 - 设备端限制并发（`limits.maxConcurrentTasks`）；Hub 的单任务超时按“最后一次设备活动”计时（keepalive 续期），设备失联/卡死才超时，实际时长由执行器 `timeoutMs` 约束；超时后设备主动回报失败，Hub 可按需重试或改派。
 - 自动重试：运行超时在 `maxAttempts` 内由 Hub 自动重新排队（先下发 `cancel_task`），不需要人工点「重试」。
 - 系统自重启：`POST /api/system/restart`（或控制台「设置 → 系统维护 → 重启整套系统」）先给在线设备下发 `restart_agent`，各代理拉起新进程后优雅退出，随后 Hub 自身 re-exec；自重启恢复时运行中的任务自动重新排队，不占用重试次数。

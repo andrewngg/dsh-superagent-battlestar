@@ -11,7 +11,7 @@
   <title>BattleStar · 控制台</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="assets/vendor/select2.min.css">
-  <link rel="stylesheet" href="assets/style.css?v=20261116h">
+  <link rel="stylesheet" href="assets/style.css?v=20261117j">
 </head>
 <body>
   <!-- 静态图标库（仅常量路径，不承载用户数据） -->
@@ -42,6 +42,7 @@
       <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/></symbol>
       <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.4"/></symbol>
       <symbol id="i-flag" viewBox="0 0 24 24"><path d="M5.5 21V3.5"/><path d="M5.5 4.5h12l-2.4 4 2.4 4h-12"/></symbol>
+      <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5.5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="18.5" cy="12" r="1.6"/></symbol>
       <symbol id="i-bell" viewBox="0 0 24 24"><path d="M18.2 9.6a6.2 6.2 0 1 0-12.4 0c0 5.1-2 6.4-2 6.4h16.4s-2-1.3-2-6.4z"/><path d="M10.1 19.4a2.1 2.1 0 0 0 3.8 0"/></symbol>
     </defs>
   </svg>
@@ -129,62 +130,227 @@
       </div>
     </header>
 
-    <main class="page">
-      <section id="stats-grid" class="stats-grid" aria-label="总体状态" data-tab-panel="status"></section>
+    <main class="page" id="page" data-cat="overview">
+      <!-- 桌面端功能分类导航；手机端使用底部导航 -->
+      <nav class="cat-nav" id="cat-nav" aria-label="功能分区">
+        <button type="button" class="cat-tab is-active" data-tab="overview" aria-selected="true">
+          <svg class="icon" aria-hidden="true"><use href="#i-activity"></use></svg><span>概览</span>
+        </button>
+        <button type="button" class="cat-tab" data-tab="tasks" aria-selected="false">
+          <svg class="icon" aria-hidden="true"><use href="#i-tasks"></use></svg><span>任务</span>
+        </button>
+        <button type="button" class="cat-tab" data-tab="brain" aria-selected="false">
+          <svg class="icon" aria-hidden="true"><use href="#i-spark"></use></svg><span>大脑</span>
+        </button>
+        <button type="button" class="cat-tab" data-tab="goals" aria-selected="false">
+          <svg class="icon" aria-hidden="true"><use href="#i-target"></use></svg><span>目标</span>
+        </button>
+        <button type="button" class="cat-tab" data-tab="reminders" aria-selected="false">
+          <svg class="icon" aria-hidden="true"><use href="#i-bell"></use></svg><span>提醒</span>
+        </button>
+        <button type="button" class="cat-tab" data-tab="developer" aria-selected="false">
+          <svg class="icon" aria-hidden="true"><use href="#i-edit"></use></svg><span>开发</span>
+        </button>
+      </nav>
 
-      <div class="layout">
-        <div class="col-main">
-          <section class="panel section-devices" id="section-devices" data-tab-panel="status">
-            <div class="panel-head">
-              <div>
-                <h2>设备</h2>
-                <p class="panel-sub" id="devices-sub">正在加载…</p>
-              </div>
-              <div class="panel-head-actions">
-                <span class="legend"><i class="status-dot" data-tone="online"></i>在线</span>
-                <span class="legend"><i class="status-dot" data-tone="offline"></i>离线</span>
-              </div>
-            </div>
-            <div id="device-grid" class="device-grid"></div>
-          </section>
+      <!-- ===== 概览：总体指标 / 设备 / 快速入口 / 实时动态 ===== -->
+      <section class="cat-view" data-cat-view="overview">
+        <section id="stats-grid" class="stats-grid" aria-label="总体状态"></section>
 
-          <section class="panel section-tasks" id="section-tasks" data-tab-panel="tasks">
-            <div class="panel-head">
-              <div>
-                <h2>任务</h2>
-                <p class="panel-sub" id="tasks-sub">正在加载…</p>
-              </div>
-              <div class="task-head-tools">
-                <div class="filter-row" id="task-filters" role="group" aria-label="任务筛选">
-                  <button type="button" class="filter-chip" data-filter="all">全部</button>
-                  <button type="button" class="filter-chip is-active" data-filter="active">进行中</button>
-                  <button type="button" class="filter-chip" data-filter="completed">已完成</button>
-                  <button type="button" class="filter-chip" data-filter="failed">失败</button>
-                  <button type="button" class="filter-chip" data-filter="trash">垃圾桶</button>
-                  <button type="button" class="filter-chip" data-filter="archived">已归档</button>
+        <div class="layout">
+          <div class="col-main">
+            <section class="panel section-devices" id="section-devices">
+              <div class="panel-head">
+                <div>
+                  <h2>设备</h2>
+                  <p class="panel-sub" id="devices-sub">正在加载…</p>
                 </div>
                 <div class="panel-head-actions">
-                  <button type="button" class="btn btn-ghost btn-sm" id="tasks-collapse-all" title="收起所有任务，只显示指令和时间">全部收起</button>
-                  <button type="button" class="btn btn-ghost btn-sm" id="tasks-expand-all" title="展开所有任务，恢复完整卡片">全部展开</button>
+                  <span class="legend"><i class="status-dot" data-tone="online"></i>在线</span>
+                  <span class="legend"><i class="status-dot" data-tone="offline"></i>离线</span>
                 </div>
               </div>
-            </div>
-            <div id="task-recovery-hint" class="recovery-hint" hidden></div>
-            <div id="task-list" class="task-list" aria-live="polite"></div>
-          </section>
+              <div id="device-grid" class="device-grid"></div>
+            </section>
 
-          <section class="panel section-goals" id="section-goals" data-tab-panel="goals">
-            <div class="panel-head">
-              <div>
-                <h2>长期目标</h2>
-                <p class="panel-sub" id="goals-sub">正在加载…</p>
+            <section class="panel quick-nav-panel" id="quick-nav">
+              <div class="panel-head">
+                <div>
+                  <h2>快速入口</h2>
+                  <p class="panel-sub">按分类进入常用功能</p>
+                </div>
               </div>
-              <div class="panel-head-actions">
-                <button type="button" class="btn btn-ghost btn-sm" id="goal-new">
-                  <svg class="icon"><use href="#i-target"></use></svg><span>新建目标</span>
+              <div class="quick-nav-grid">
+                <button type="button" class="quick-nav-card" data-goto="tasks">
+                  <span class="quick-nav-icon"><svg class="icon" aria-hidden="true"><use href="#i-tasks"></use></svg></span>
+                  <span class="quick-nav-body"><strong>任务指令</strong><small>发指令、看进度、重试失败</small></span>
+                  <span class="quick-nav-meta" id="quick-tasks-meta">—</span>
+                </button>
+                <button type="button" class="quick-nav-card" data-goto="brain">
+                  <span class="quick-nav-icon"><svg class="icon" aria-hidden="true"><use href="#i-spark"></use></svg></span>
+                  <span class="quick-nav-body"><strong>自主大脑</strong><small>思考记录、心路、头脑风暴</small></span>
+                  <span class="quick-nav-meta" id="quick-brain-meta">—</span>
+                </button>
+                <button type="button" class="quick-nav-card" data-goto="goals">
+                  <span class="quick-nav-icon"><svg class="icon" aria-hidden="true"><use href="#i-target"></use></svg></span>
+                  <span class="quick-nav-body"><strong>长期目标</strong><small>目标进度与每日复盘</small></span>
+                  <span class="quick-nav-meta" id="quick-goals-meta">—</span>
+                </button>
+                <button type="button" class="quick-nav-card" data-goto="reminders">
+                  <span class="quick-nav-icon"><svg class="icon" aria-hidden="true"><use href="#i-bell"></use></svg></span>
+                  <span class="quick-nav-body"><strong>提醒</strong><small>定时提醒与重复规则</small></span>
+                  <span class="quick-nav-meta" id="quick-reminders-meta">—</span>
                 </button>
               </div>
-            </div>
+            </section>
+          </div>
+
+          <aside class="col-rail">
+            <section class="panel section-activity" aria-label="实时动态">
+              <div class="panel-head">
+                <div><h2>实时动态</h2><p class="panel-sub" id="activity-sub">等待事件…</p></div>
+              </div>
+              <ul id="activity-list" class="activity-list" data-i18n-skip></ul>
+            </section>
+          </aside>
+        </div>
+      </section>
+
+      <!-- ===== 任务：发指令 + 任务列表 ===== -->
+      <section class="cat-view" data-cat-view="tasks" hidden>
+        <div class="layout">
+          <div class="col-main">
+            <section class="panel section-tasks" id="section-tasks">
+              <div class="panel-head">
+                <div>
+                  <h2>任务</h2>
+                  <p class="panel-sub" id="tasks-sub">正在加载…</p>
+                </div>
+                <div class="task-head-tools">
+                  <div class="filter-row" id="task-filters" role="group" aria-label="任务筛选">
+                    <button type="button" class="filter-chip" data-filter="all">全部</button>
+                    <button type="button" class="filter-chip is-active" data-filter="active">进行中</button>
+                    <button type="button" class="filter-chip" data-filter="completed">已完成</button>
+                    <button type="button" class="filter-chip" data-filter="failed">失败</button>
+                    <button type="button" class="filter-chip" data-filter="trash">垃圾桶</button>
+                    <button type="button" class="filter-chip" data-filter="archived">已归档</button>
+                  </div>
+                  <div class="panel-head-actions">
+                    <button type="button" class="btn btn-ghost btn-sm" id="tasks-collapse-all" title="收起所有任务，只显示指令和时间">全部收起</button>
+                    <button type="button" class="btn btn-ghost btn-sm" id="tasks-expand-all" title="展开所有任务，恢复完整卡片">全部展开</button>
+                  </div>
+                </div>
+              </div>
+              <div id="task-recovery-hint" class="recovery-hint" hidden></div>
+              <div id="task-list" class="task-list" aria-live="polite"></div>
+            </section>
+          </div>
+
+          <aside class="col-rail">
+            <section class="panel section-command" id="section-command">
+              <div class="panel-head">
+                <div>
+                  <h2>发指令</h2>
+                  <p class="panel-sub">描述任务，中枢自动挑选设备</p>
+                </div>
+              </div>
+              <form id="task-form" autocomplete="off">
+                <div id="followup-banner" class="followup-banner" hidden>
+                  <div class="followup-copy">
+                    <strong id="followup-title">继续任务</strong>
+                    <span id="followup-desc" class="muted"></span>
+                  </div>
+                  <button type="button" class="link-btn" id="followup-cancel">取消</button>
+                </div>
+                <div class="composer-input">
+                  <label class="sr-only" for="instruction">指令内容</label>
+                  <textarea id="instruction" name="instruction" rows="4" maxlength="8000"
+                            placeholder="例如：把本周的开销记录整理成一份 Word 报告，并附上汇总表格"></textarea>
+                  <div class="composer-hint"><kbd>Ctrl</kbd> + <kbd>Enter</kbd> 发送</div>
+                </div>
+
+                <div class="composer-attachment-tools">
+                  <button type="button" class="link-btn" id="attach-btn">
+                    <svg class="icon"><use href="#i-link"></use></svg><span>添加附件</span>
+                  </button>
+                  <input type="file" id="file-input" multiple hidden>
+                  <span class="muted" id="attach-hint">小文件 ≤2MB，最多 3 个</span>
+                </div>
+                <div id="attachment-list" class="attachment-list" hidden></div>
+
+                <div class="field-row">
+                  <div class="field">
+                    <label for="req-model">模型要求</label>
+                    <select id="req-model"><option value="">不限模型</option></select>
+                  </div>
+                  <div class="field">
+                    <label for="target-device">目标设备</label>
+                    <select id="target-device"><option value="">自动路由（全部在线）</option></select>
+                  </div>
+                </div>
+
+                <div class="field">
+                  <div class="field-label-row">
+                    <label for="skill-select">技能要求</label>
+                    <span class="muted" id="skills-hint">可多选</span>
+                  </div>
+                  <select id="skill-select" multiple></select>
+                </div>
+
+                <div class="field">
+                  <label for="req-project">项目（可选）</label>
+                  <input type="text" id="req-project" placeholder="项目名或绝对路径，决定 Hermes 会话归属" autocomplete="off">
+                </div>
+
+                <div class="field-row">
+                  <div class="field">
+                    <label for="priority">优先级</label>
+                    <select id="priority">
+                      <option value="9">9 · 紧急</option>
+                      <option value="7">7 · 高</option>
+                      <option value="5" selected>5 · 普通</option>
+                      <option value="3">3 · 低</option>
+                      <option value="1">1 · 后台</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="timeout">超时</label>
+                    <select id="timeout">
+                      <option value="60">60 秒</option>
+                      <option value="300" selected>5 分钟</option>
+                      <option value="600">10 分钟</option>
+                      <option value="1800">30 分钟</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="composer-foot">
+                  <span class="composer-target" id="composer-target">自动路由：等待在线设备…</span>
+                  <label class="btn btn-ghost btn-sm composer-attach" for="file-input">
+                    <svg class="icon"><use href="#i-link"></use></svg><span>附件</span>
+                  </label>
+                  <button type="submit" class="btn btn-primary" id="send-btn">
+                    <svg class="icon"><use href="#i-send"></use></svg><span>发送指令</span>
+                  </button>
+                </div>
+
+                <div id="route-result" class="route-result" hidden aria-live="polite"></div>
+              </form>
+            </section>
+          </aside>
+        </div>
+      </section>
+
+      <!-- ===== 大脑：自主大脑 / 心路 / 头脑风暴 ===== -->
+      <section class="cat-view" data-cat-view="brain" hidden>
+        <div class="brain-subnav" role="tablist" aria-label="大脑分区">
+          <button type="button" class="brain-subtab is-active" role="tab" data-brain-view="card" aria-selected="true">自主大脑</button>
+          <button type="button" class="brain-subtab" role="tab" data-brain-view="journal" aria-selected="false">心路</button>
+          <button type="button" class="brain-subtab" role="tab" data-brain-view="brainstorm" aria-selected="false">头脑风暴</button>
+        </div>
+
+        <div class="brain-stage">
+          <div class="brain-card-slot" data-brain-panel="card">
             <div id="brain-card" class="brain-card" hidden>
               <div class="brain-head">
                 <span class="brain-title">
@@ -200,9 +366,21 @@
                 <div class="brain-owner-ask-main">
                   <strong id="brain-owner-ask-label">需要主人</strong>
                   <p id="brain-owner-ask-text"></p>
+                  <p id="brain-owner-ask-hint" class="brain-owner-ask-hint" hidden></p>
                 </div>
                 <button type="button" class="btn btn-ghost btn-sm" id="brain-owner-ack">知道了</button>
               </div>
+              <p id="brain-owner-reply" class="brain-owner-reply-echo" hidden></p>
+              <form id="brain-reply-form" class="brain-tell-form" autocomplete="off">
+                <label class="brain-tell-label" for="brain-reply-input">直接告诉大脑（下一轮思考会带上）</label>
+                <div class="brain-tell-row">
+                  <input id="brain-reply-input" class="brain-owner-reply-input" type="text" maxlength="1000" autocomplete="off" placeholder="例如：选 A / 先手动补投递 / 换个方向">
+                  <button type="submit" class="btn btn-primary btn-sm" id="brain-reply-send">回复</button>
+                </div>
+                <div class="brain-tell-foot">
+                  <button type="button" class="btn btn-ghost btn-sm" id="brain-ask-detail" title="让大脑用大白话把每个选项的做法、代价和结果写出来">不知道选哪个？让大脑把每个选项的细节讲清楚</button>
+                </div>
+              </form>
               <div id="brain-assessment" class="brain-assessment" hidden></div>
               <p id="brain-rhythm" class="brain-rhythm" hidden></p>
               <div class="brain-meta">
@@ -221,11 +399,10 @@
                 </button>
               </div>
             </div>
-            <div id="goal-list" class="goal-list" aria-live="polite"></div>
-            <div id="nightly-review" class="nightly-review" hidden></div>
-          </section>
+            <p id="brain-loading" class="brain-loading">正在载入大脑状态…</p>
+          </div>
 
-          <section class="panel section-journal" id="section-journal" data-tab-panel="journal">
+          <section class="panel section-journal" id="section-journal" data-brain-panel="journal" hidden>
             <div class="panel-head">
               <div>
                 <h2>管家心路</h2>
@@ -242,7 +419,7 @@
             <div id="journal-body" class="journal-body" aria-live="polite"></div>
           </section>
 
-          <section class="panel section-brainstorm" id="section-brainstorm" data-tab-panel="brainstorm">
+          <section class="panel section-brainstorm" id="section-brainstorm" data-brain-panel="brainstorm" hidden>
             <div class="panel-head">
               <div>
                 <h2>头脑风暴</h2>
@@ -250,7 +427,7 @@
               </div>
               <div class="panel-head-actions">
                 <button type="button" class="btn btn-ghost btn-sm" id="brainstorm-reload">
-                  <svg class="icon" aria-hidden="true"><use href="#i-refresh"></use></svg><span>刷新</span>
+                  <svg class="icon"><use href="#i-refresh"></use></svg><span>刷新</span>
                 </button>
               </div>
             </div>
@@ -268,268 +445,176 @@
               <div class="brainstorm-main">
                 <div id="brainstorm-messages" class="brainstorm-messages" aria-live="polite"></div>
                 <form class="brainstorm-composer" id="brainstorm-form">
+                  <div class="brainstorm-attach-bar">
+                    <button type="button" class="btn btn-ghost btn-sm" id="brainstorm-attach">
+                      <svg class="icon" aria-hidden="true"><use href="#i-link"></use></svg><span>附件</span>
+                    </button>
+                    <input type="file" id="brainstorm-file" multiple hidden
+                      accept=".txt,.md,.markdown,.json,.jsonl,.js,.mjs,.cjs,.ts,.tsx,.jsx,.py,.ps1,.psm1,.sh,.bat,.cmd,.html,.htm,.css,.scss,.yml,.yaml,.toml,.ini,.cfg,.conf,.sql,.java,.xml,.csv,.log,.env,text/*">
+                    <span class="brainstorm-attach-note">文本文件，最多 6 个；也可直接写 Hub 本机路径</span>
+                  </div>
+                  <div id="brainstorm-attachments" class="brainstorm-attachments" hidden></div>
                   <textarea id="brainstorm-input" rows="2" maxlength="8000" placeholder="输入你的想法，Enter 发送，Shift+Enter 换行"></textarea>
                   <div class="brainstorm-composer-foot">
                     <span id="brainstorm-hint" class="brainstorm-hint">Enter 发送 · Shift+Enter 换行</span>
                     <button type="submit" class="btn btn-primary btn-sm" id="brainstorm-send">
-                      <svg class="icon" aria-hidden="true"><use href="#i-send"></use></svg><span>发送</span>
+                      <svg class="icon"><use href="#i-send"></use></svg><span>发送</span>
                     </button>
                   </div>
                 </form>
               </div>
             </div>
           </section>
-
-          <section class="panel section-mind" id="section-mind" data-tab-panel="mind">
-            <div class="panel-head">
-              <div>
-                <h2>心智</h2>
-                <p class="panel-sub" id="mind-sub">编辑大脑的灵魂与工作流程。</p>
-              </div>
-              <div class="panel-head-actions">
-                <span id="mind-dirty" class="mind-dirty" hidden>有未保存的修改</span>
-                <span id="mind-updated" class="mind-updated"></span>
-              </div>
-            </div>
-            <div class="mind-intro">
-              <span class="mind-intro-icon"><svg class="icon" aria-hidden="true"><use href="#i-spark"></use></svg></span>
-              <p>这段灵魂与工作流程会在大脑每一轮思考时随现场快照一起交给 Agnes 模型。</p>
-            </div>
-            <div id="mind-error" class="mind-error" role="alert" hidden></div>
-            <div id="mind-editors" class="mind-editors">
-              <article class="mind-card" data-mind-field="soul">
-                <div class="mind-card-head">
-                  <h3>灵魂 Soul</h3>
-                  <span id="mind-soul-badge" class="mind-badge">使用默认内容</span>
-                </div>
-                <p class="mind-card-desc">大脑是谁：价值观、气质、语气、取舍原则，以及面对不确定、风险与失败时的态度。</p>
-                <textarea id="mind-soul" class="mind-textarea" rows="12" spellcheck="false" aria-label="灵魂 Soul" placeholder="正在载入心智…"></textarea>
-                <div class="mind-card-foot">
-                  <span id="mind-soul-count" class="mind-count">0 / 6000</span>
-                  <button type="button" class="btn btn-ghost btn-sm" id="mind-soul-reset" data-mind-reset="soul">恢复默认</button>
-                </div>
-              </article>
-              <article class="mind-card" data-mind-field="skill">
-                <div class="mind-card-head">
-                  <h3>工作流程 Skill</h3>
-                  <span id="mind-skill-badge" class="mind-badge">使用默认内容</span>
-                </div>
-                <p class="mind-card-desc">大脑怎么做事：从观察、判断主要矛盾、评估方案，到小步执行、复盘与请求主人决策的步骤化流程。</p>
-                <textarea id="mind-skill" class="mind-textarea" rows="12" spellcheck="false" aria-label="工作流程 Skill" placeholder="正在载入心智…"></textarea>
-                <div class="mind-card-foot">
-                  <span id="mind-skill-count" class="mind-count">0 / 12000</span>
-                  <button type="button" class="btn btn-ghost btn-sm" id="mind-skill-reset" data-mind-reset="skill">恢复默认</button>
-                </div>
-              </article>
-            </div>
-            <div class="mind-actions">
-              <button type="button" class="btn btn-primary btn-sm" id="mind-save">
-                <svg class="icon" aria-hidden="true"><use href="#i-check"></use></svg><span id="mind-save-label">保存心智</span>
-              </button>
-              <button type="button" class="btn btn-ghost btn-sm" id="mind-reset-all">全部恢复默认</button>
-            </div>
-            <details class="mind-preview" id="mind-preview">
-              <summary>本次思考将使用的提示段（前 600 字）</summary>
-              <pre id="mind-preview-text"></pre>
-            </details>
-          </section>
-
-          <section class="panel section-reminders" id="section-reminders" data-tab-panel="reminders">
-            <div class="panel-head">
-              <div>
-                <h2 id="reminders-title">提醒</h2>
-                <p class="panel-sub" id="reminders-sub">正在加载…</p>
-              </div>
-              <div class="panel-head-actions">
-                <button type="button" class="btn btn-ghost btn-sm" id="reminder-new">
-                  <svg class="icon"><use href="#i-bell"></use></svg><span id="reminder-new-label">新建提醒</span>
-                </button>
-              </div>
-            </div>
-            <div id="reminder-hint" class="reminder-hint" role="note" hidden></div>
-            <div id="reminder-list" class="reminder-list" aria-live="polite"></div>
-          </section>
         </div>
-
-        <aside class="col-rail">
-          <section class="panel section-command" id="section-command" data-tab-panel="command">
-            <div class="panel-head">
-              <div>
-                <h2>发指令</h2>
-                <p class="panel-sub">描述任务，中枢自动挑选设备</p>
-              </div>
-            </div>
-            <form id="task-form" autocomplete="off">
-              <div id="followup-banner" class="followup-banner" hidden>
-                <div class="followup-copy">
-                  <strong id="followup-title">继续任务</strong>
-                  <span id="followup-desc" class="muted"></span>
-                </div>
-                <button type="button" class="link-btn" id="followup-cancel">取消</button>
-              </div>
-              <div class="composer-input">
-                <label class="sr-only" for="instruction">指令内容</label>
-                <textarea id="instruction" name="instruction" rows="4" maxlength="8000"
-                          placeholder="例如：把本周的开销记录整理成一份 Word 报告，并附上汇总表格"></textarea>
-                <div class="composer-hint"><kbd>Ctrl</kbd> + <kbd>Enter</kbd> 发送</div>
-              </div>
-
-              <div class="composer-attachment-tools">
-                <button type="button" class="link-btn" id="attach-btn">
-                  <svg class="icon"><use href="#i-link"></use></svg><span>添加附件</span>
-                </button>
-                <input type="file" id="file-input" multiple hidden>
-                <span class="muted" id="attach-hint">小文件 ≤2MB，最多 3 个</span>
-              </div>
-              <div id="attachment-list" class="attachment-list" hidden></div>
-
-              <div class="field-row">
-                <div class="field">
-                  <label for="req-model">模型要求</label>
-                  <select id="req-model"><option value="">不限模型</option></select>
-                </div>
-                <div class="field">
-                  <label for="target-device">目标设备</label>
-                  <select id="target-device"><option value="">自动路由（全部在线）</option></select>
-                </div>
-              </div>
-
-              <div class="field">
-                <div class="field-label-row">
-                  <label for="skill-select">技能要求</label>
-                  <span class="muted" id="skills-hint">可多选</span>
-                </div>
-                <select id="skill-select" multiple></select>
-              </div>
-
-              <div class="field">
-                <label for="req-project">项目（可选）</label>
-                <input type="text" id="req-project" placeholder="项目名或绝对路径，决定 Hermes 会话归属" autocomplete="off">
-              </div>
-
-              <div class="field-row">
-                <div class="field">
-                  <label for="priority">优先级</label>
-                  <select id="priority">
-                    <option value="9">9 · 紧急</option>
-                    <option value="7">7 · 高</option>
-                    <option value="5" selected>5 · 普通</option>
-                    <option value="3">3 · 低</option>
-                    <option value="1">1 · 后台</option>
-                  </select>
-                </div>
-                <div class="field">
-                  <label for="timeout">超时</label>
-                  <select id="timeout">
-                    <option value="60">60 秒</option>
-                    <option value="300" selected>5 分钟</option>
-                    <option value="600">10 分钟</option>
-                    <option value="1800">30 分钟</option>
-                  </select>
-                </div>
-              </div>
-
-              <div class="composer-foot">
-                <span class="composer-target" id="composer-target">自动路由：等待在线设备…</span>
-                <label class="btn btn-ghost btn-sm composer-attach" for="file-input">
-                  <svg class="icon"><use href="#i-link"></use></svg><span>附件</span>
-                </label>
-                <button type="submit" class="btn btn-primary" id="send-btn">
-                  <svg class="icon"><use href="#i-send"></use></svg><span>发送指令</span>
-                </button>
-              </div>
-
-              <div id="route-result" class="route-result" hidden aria-live="polite"></div>
-            </form>
-          </section>
-
-          <section class="panel section-activity" aria-label="实时动态">
-            <div class="panel-head">
-              <div><h2>实时动态</h2><p class="panel-sub" id="activity-sub">等待事件…</p></div>
-            </div>
-            <ul id="activity-list" class="activity-list" data-i18n-skip></ul>
-          </section>
-        </aside>
-      </div>
-
-      <section class="panel section-settings" id="section-settings" data-tab-panel="settings" hidden>
-        <div class="panel-head">
-          <div><h2>设置</h2><p class="panel-sub">连接、令牌与本机信息</p></div>
-        </div>
-        <div id="settings-inline-body" class="settings-body"></div>
       </section>
 
-      <section class="panel section-developer" id="section-developer" data-tab-panel="developer">
-        <div class="panel-head">
-          <div>
-            <h2>Developer Mode</h2>
-            <p class="panel-sub">直接和 DeepSeek Harness 沟通，修改 BattleStar 仓库</p>
+      <!-- ===== 目标：长期目标 + 每日复盘 ===== -->
+      <section class="cat-view" data-cat-view="goals" hidden>
+        <div class="layout">
+          <div class="col-main">
+            <section class="panel section-goals" id="section-goals">
+              <div class="panel-head">
+                <div>
+                  <h2>长期目标</h2>
+                  <p class="panel-sub" id="goals-sub">正在加载…</p>
+                </div>
+                <div class="panel-head-actions">
+                  <button type="button" class="btn btn-ghost btn-sm" id="goal-new">
+                    <svg class="icon"><use href="#i-target"></use></svg><span>新建目标</span>
+                  </button>
+                </div>
+              </div>
+              <div id="goal-list" class="goal-list" aria-live="polite"></div>
+            </section>
           </div>
-          <button type="button" class="btn btn-ghost btn-sm" id="dev-reset">新会话</button>
+
+          <aside class="col-rail">
+            <section class="panel section-nightly" id="section-nightly">
+              <div class="panel-head">
+                <div>
+                  <h2>每日复盘</h2>
+                  <p class="panel-sub">每晚自动总结当天进展并规划明天</p>
+                </div>
+              </div>
+              <div id="nightly-review" class="nightly-review" hidden></div>
+            </section>
+          </aside>
         </div>
-        <div class="dev-safety">
-          <strong>开发者模式</strong>
-          <span>只允许修改 super-butler 仓库；不要输出或提交私人 token、密钥、个人资料。修改会直接生效，请自行确认测试结果。</span>
-        </div>
-        <div id="dev-chat-log" class="dev-chat-log" aria-live="polite" data-i18n-skip>
-          <div class="dev-empty">告诉 DSH 要改什么，例如：把任务卡片的按钮改成两列，并修复移动端溢出。</div>
-        </div>
-        <div class="dev-scope-row">
-          <label for="dev-scope">改动对象</label>
-          <select id="dev-scope">
-            <option value="global" selected>全局 · 整套系统</option>
-            <option value="plugin">DSH 插件 · dsh-plugin</option>
-            <option value="apk">APK · android</option>
-            <option value="localhost">Localhost 界面 · hub/web</option>
-          </select>
-        </div>
-        <form id="dev-form" class="dev-form">
-          <textarea id="dev-input" rows="3" maxlength="20000" placeholder="描述要修改的功能、bug 或重构要求…"></textarea>
-          <div class="dev-actions">
-            <span id="dev-status" class="dev-status">只修改当前 BattleStar 仓库</span>
-            <button type="submit" class="btn btn-primary btn-sm" id="dev-send">发送给 DSH</button>
+      </section>
+
+      <!-- ===== 提醒 ===== -->
+      <section class="cat-view" data-cat-view="reminders" hidden>
+        <div class="layout single">
+          <div class="col-main">
+            <section class="panel section-reminders" id="section-reminders">
+              <div class="panel-head">
+                <div>
+                  <h2 id="reminders-title">提醒</h2>
+                  <p class="panel-sub" id="reminders-sub">正在加载…</p>
+                </div>
+                <div class="panel-head-actions">
+                  <button type="button" class="btn btn-ghost btn-sm" id="reminder-new">
+                    <svg class="icon"><use href="#i-bell"></use></svg><span id="reminder-new-label">新建提醒</span>
+                  </button>
+                </div>
+              </div>
+              <div id="reminder-hint" class="reminder-hint" role="note" hidden></div>
+              <div id="reminder-list" class="reminder-list" aria-live="polite"></div>
+            </section>
           </div>
-        </form>
+        </div>
+      </section>
+
+      <!-- ===== 设置（手机端底部导航；桌面端走右上角抽屉） ===== -->
+      <section class="cat-view" data-cat-view="settings" hidden>
+        <div class="layout single">
+          <div class="col-main">
+            <section class="panel section-settings" id="section-settings" hidden>
+              <div class="panel-head">
+                <div><h2>设置</h2><p class="panel-sub">连接、令牌与本机信息</p></div>
+              </div>
+              <div id="settings-inline-body" class="settings-body"></div>
+            </section>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== 开发 ===== -->
+      <section class="cat-view" data-cat-view="developer" hidden>
+        <div class="layout single">
+          <div class="col-main">
+            <section class="panel section-developer" id="section-developer">
+              <div class="panel-head">
+                <div>
+                  <h2>Developer Mode</h2>
+                  <p class="panel-sub">直接和 DeepSeek Harness 沟通，修改 BattleStar 仓库</p>
+                </div>
+                <button type="button" class="btn btn-ghost btn-sm" id="dev-reset">新会话</button>
+              </div>
+              <div class="dev-safety">
+                <strong>开发者模式</strong>
+                <span>只允许修改 super-butler 仓库；不要输出或提交私人 token、密钥、个人资料。修改会直接生效，请自行确认测试结果。</span>
+              </div>
+              <div id="dev-chat-log" class="dev-chat-log" aria-live="polite" data-i18n-skip>
+                <div class="dev-empty">告诉 DSH 要改什么，例如：把任务卡片的按钮改成两列，并修复移动端溢出。</div>
+              </div>
+              <div class="dev-scope-row">
+                <label for="dev-scope">改动对象</label>
+                <select id="dev-scope">
+                  <option value="global" selected>全局 · 整套系统</option>
+                  <option value="plugin">DSH 插件 · dsh-plugin</option>
+                  <option value="apk">APK · android</option>
+                  <option value="localhost">Localhost 界面 · hub/web</option>
+                </select>
+              </div>
+              <form id="dev-form" class="dev-form">
+                <textarea id="dev-input" rows="3" maxlength="20000" placeholder="描述要修改的功能、bug 或重构要求…"></textarea>
+                <div class="dev-actions">
+                  <span id="dev-status" class="dev-status">只修改当前 BattleStar 仓库</span>
+                  <button type="submit" class="btn btn-primary btn-sm" id="dev-send">发送给 DSH</button>
+                </div>
+              </form>
+            </section>
+          </div>
+        </div>
       </section>
     </main>
   </div>
 
-  <!-- 汉堡菜单：挂在 body 级，用 fixed 跟随当前视口（不受 .app 动画/transform 影响） -->
+  <!-- 手机底部导航：一级 5 个分类 + 「更多」二级菜单（执行记录 / 开发 / 设置） -->
   <nav class="mobile-tabs" id="mobile-nav" aria-label="主导航">
-    <button type="button" class="mobile-tab is-active" data-tab="status" aria-selected="true">
-      <svg class="icon"><use href="#i-devices"></use></svg><span>状态</span>
+    <button type="button" class="mobile-tab is-active" data-tab="overview" aria-selected="true">
+      <svg class="icon"><use href="#i-activity"></use></svg><span>概览</span>
     </button>
     <button type="button" class="mobile-tab" data-tab="tasks" aria-selected="false">
       <svg class="icon"><use href="#i-tasks"></use></svg><span>任务</span>
     </button>
+    <button type="button" class="mobile-tab" data-tab="brain" aria-selected="false">
+      <svg class="icon"><use href="#i-spark"></use></svg><span>大脑</span>
+    </button>
     <button type="button" class="mobile-tab" data-tab="goals" aria-selected="false">
       <svg class="icon"><use href="#i-target"></use></svg><span>目标</span>
-    </button>
-    <button type="button" class="mobile-tab" data-tab="journal" aria-selected="false">
-      <svg class="icon"><use href="#i-spark"></use></svg><span>心路</span>
-    </button>
-    <button type="button" class="mobile-tab" data-tab="brainstorm" aria-selected="false">
-      <svg class="icon"><use href="#i-spark"></use></svg><span>头脑风暴</span>
-    </button>
-    <button type="button" class="mobile-tab" data-tab="mind" aria-selected="false">
-      <svg class="icon"><use href="#i-gear"></use></svg><span>心智</span>
     </button>
     <button type="button" class="mobile-tab" data-tab="reminders" aria-selected="false">
       <svg class="icon"><use href="#i-bell"></use></svg><span>提醒</span>
     </button>
-    <button type="button" class="mobile-tab" data-tab="command" aria-selected="false">
-      <svg class="icon"><use href="#i-terminal"></use></svg><span>指令</span>
-    </button>
-    <button type="button" class="mobile-tab" data-tab="developer" aria-selected="false">
-      <svg class="icon"><use href="#i-edit"></use></svg><span>开发</span>
-    </button>
-    <button type="button" class="mobile-tab" data-tab="settings" aria-selected="false">
-      <svg class="icon"><use href="#i-gear"></use></svg><span>设置</span>
-    </button>
-    <button type="button" class="mobile-tab" data-action="records">
-      <svg class="icon"><use href="#i-clock"></use></svg><span>执行记录</span>
+    <button type="button" class="mobile-tab" id="nav-more" aria-haspopup="true" aria-expanded="false" aria-controls="mobile-more-menu">
+      <svg class="icon"><use href="#i-more"></use></svg><span>更多</span>
     </button>
   </nav>
+
+  <!-- 手机底部「更多」二级菜单（悬浮在导航上方） -->
+  <div id="mobile-more-menu" class="mobile-more-menu" role="menu" aria-label="更多功能" hidden>
+    <button type="button" class="mobile-more-item" role="menuitem" data-more-action="records">
+      <svg class="icon"><use href="#i-clock"></use></svg><span>执行记录</span>
+    </button>
+    <button type="button" class="mobile-more-item" role="menuitem" data-more-action="developer">
+      <svg class="icon"><use href="#i-edit"></use></svg><span>开发</span>
+    </button>
+    <button type="button" class="mobile-more-item" role="menuitem" data-more-action="settings">
+      <svg class="icon"><use href="#i-gear"></use></svg><span>设置</span>
+    </button>
+  </div>
 
   <!-- ============ 详情抽屉 ============ -->
   <div id="drawer-root" class="drawer-root" hidden>
@@ -570,7 +655,7 @@
 
   <script src="assets/vendor/jquery.min.js" defer></script>
   <script src="assets/vendor/select2.min.js" defer></script>
-  <script src="assets/i18n.js?v=20261116h" defer></script>
-  <script src="assets/app.js?v=20261116h" defer></script>
+  <script src="assets/i18n.js?v=20261117j" defer></script>
+  <script src="assets/app.js?v=20261117j" defer></script>
 </body>
 </html>

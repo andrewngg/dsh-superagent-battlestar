@@ -127,9 +127,9 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
 
 ### 5.4 手机/控制台（管理员令牌）
 
-- `GET /api/snapshot?limit=50` → `{ server:{version,uptimeSec,hubTime}, settings:{language}, stats:{...}, devices:[Device], tasks:[Task], goals:[Goal], reminders:[Reminder], events:[Event] }`
-- `GET /api/settings` → `{ settings:{ language }, supportedLanguages:['zh-CN','en'], hubTime }`
-- `PATCH|PUT /api/settings` body `{ language:'zh-CN'|'en' }` → `{ settings, hubTime }`；持久化到 `<dataDir>/settings.json`，并广播 SSE `settings.updated`。
+- `GET /api/snapshot?limit=50` → `{ server:{version,uptimeSec,hubTime}, settings:{language,mainDeviceId}, stats:{...}, devices:[Device], tasks:[Task], goals:[Goal], reminders:[Reminder], events:[Event] }`
+- `GET /api/settings` → `{ settings:{ language, mainDeviceId }, supportedLanguages:['zh-CN','en'], hubTime }`
+- `PATCH|PUT /api/settings` body `{ language?:'zh-CN'|'en', mainDeviceId?:string }` → `{ settings, hubTime }`；`mainDeviceId` 为空字符串表示「本机自动识别」，非空必须是已注册设备 id（否则 400「主设备不存在：…」），最长 120 字符；持久化到 `<dataDir>/settings.json`，并广播 SSE `settings.updated`。
 - `GET /api/goals?status=` → `{ goals:[Goal], hubTime }`
 - `POST /api/goals` body `{ title, nickname?, description?, schedule?, requirements? }` → `{ goal, hubTime }`
   - `nickname`: 目标昵称（≤40 字，可选）；控制台卡片、提醒与每日总结优先用昵称称呼目标，留空则显示 `title`。
@@ -225,7 +225,7 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
 {
   "id":"dev_ab12cd34", "name":"书房工作站", "nickname":"书房主力机（写代码）", "platform":"windows", "kind":"dsh",
   "agentVersion":"0.1.0", "endpoint":"http://192.168.1.20:7788",
-  "tags":["书房"], "online":true, "status":"idle",
+  "tags":["书房"], "autoTags":["简历自动化"], "online":true, "status":"idle",
   "registeredAt":"2026-11-05T08:00:00.000Z", "lastSeenAt":"2026-11-05T08:00:10.000Z",
   "disabled":false,
   "load":{"running":0,"max":2},
@@ -236,6 +236,8 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
   }
 }
 ```
+
+`autoTags` 是 Hub 推导的自动标签（该设备成功执行过的项目名 + 项目别名），仅用于路由匹配与展示，设备上报 manifest 时不需要填；`autoTags` 与 `tags` 一起参与 `requirements.tags` 匹配。
 
 ### Task
 
@@ -253,9 +255,10 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
   "parentTaskId":null, "childTaskIds":[], "isPlan":false,   // 长任务拆分：父任务 isPlan=true 并带子任务 id
   "planStep":null, "planGroup":null, "planDependsOn":[], "planDependsOnTaskIds":[],  // 子任务的执行计划
   "plan":null,                                               // 父任务：{strategy,blockerPolicy,groups[]}
-  "route":{"reason":"matched 2 candidates; picked dev_ab12cd34 (score 118)",
+  "route":{"reason":"项目亲和：「alpha」上次成功在「书房工作站」; picked dev_ab12cd34 (score 118)",
            "candidates":[{"deviceId":"dev_ab12cd34","score":118,"matched":["skill:office-docx"]}],
            "excluded":[{"deviceId":"dev_z","reason":"missing model:deepseek-chat"}]},
+  "affinity":{"deviceId":"dev_ab12cd34","reason":"项目亲和：「alpha」上次成功在「书房工作站」","at":"..."}, // 首次派发时写入，重试/继续此任务沿用；ack 超时或设备离线清空
   "events":[{"at":"...","type":"created","message":"任务已创建"}]
 }
 ```
@@ -340,12 +343,18 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
 | `answer_task` | 把用户回答交给等待中的任务 |
 | `restart_agent` | 设备代理自重启：拉起新进程后优雅退出（不受并发槽位限制，优先处理） |
 
-## 7. 路由评分（Hub 必须实现，测试可依赖）
+## 7. 路由评分与派发亲和（Hub 必须实现，测试可依赖）
 
-1. 过滤：`disabled`、`!online`、真实占用 `assigned+running+waiting` 达到 `limits.maxConcurrentTasks`、缺少所需能力 → 排除并记录原因。
-2. 必配（requirements 非空时）：`model` ∈ models[].id（`available!==false`）；`skills` ⊆ skills[].id；`profile` ∈ profiles[].id；`gateway` ∈ gateways[].id；`tags` ⊆ device.tags；`deviceId` 完全相等。
-3. 评分：基础 100；`loadRatio = running/max`；`-20*loadRatio`；指定 `deviceId` +15；匹配到 model.strengths 中含需求关键词 +5；最近心跳更近 +最多 3。
-4. 取最高分；同分取 `lastSeenAt` 更新者。返回 `route.candidates`（前 5）与 `route.excluded`（最多 10）。
+1. **亲和优先（软锁）**：显式 `requirements.deviceId` 时只在该设备上评分（硬过滤）；否则依次尝试 `task.affinity.deviceId`（任务原主机）→ 同 `threadId` 上次执行的主机 → `requirements.project` 对应的上次成功设备（`state.json` 的 `routing.projectAffinity`）→ 母机（`settings.mainDeviceId`，未配置时取 Hub 本机或带「本机」标签的设备）。
+   - 首选设备离线或占用达到 `limits.maxConcurrentTasks` → 任务保持 `queued`，`route.reason` 为「亲和等待：…」，不换机；设备上线/空槽后自动重派。
+   - 首选设备不存在、已禁用或缺所需能力 → 回退普通评分，`route.reason` 注明原因。
+   - 计划子任务（`parentTaskId` 非空）的**线程亲和**在设备离线/满载时直接回退自动路由，避免并行子任务被单并发设备卡住；显式 deviceId 与任务原主机仍生效。
+   - 派发成功时写入 `task.affinity`（首次派发或沿用）；任务内容层失败保留亲和（手动重试回原主机），ack 超时/设备掉线清空亲和并重派。
+2. 过滤：`disabled`、`!online`、真实占用 `assigned+running+waiting` 达到 `limits.maxConcurrentTasks`、缺少所需能力 → 排除并记录原因。
+3. 必配（requirements 非空时）：`model` ∈ models[].id（`available!==false`）；`skills` ⊆ skills[].id；`profile` ∈ profiles[].id；`gateway` ∈ gateways[].id；`tags` ⊆ device.tags ∪ device.autoTags（`autoTags` 由 Hub 按该设备成功执行过的项目推导，含项目名与项目别名）；显式 `requirements.deviceId` 命中该设备时，只缺标签视为满足（缺 model/skills/profile/gateway 仍排除）；`deviceId` 完全相等。
+4. 评分：基础 100；`loadRatio = running/max`；`-20*loadRatio`；指定 `deviceId` +15；匹配到 model.strengths 中含需求关键词 +5；最近心跳更近 +最多 3。
+5. 取最高分；同分取 `lastSeenAt` 更新者。返回 `route.candidates`（前 5）与 `route.excluded`（最多 10）。
+6. 持久化：`state.json` 的 `routing = { projectAffinity:{project:deviceId,…(最多 200 条)}, projectTags:{project:[标签,…]（每项目 ≤20、全局 ≤200）}, mainDeviceId }`；任务成功完成后记录项目亲和；任务 `requirements.project` 出现过的标签会登记为该项目别名，`create_task` 时无人声明但带 project 的标签也会被学习保留（无 project 才丢弃）。
 
 ## 8. 设备代理行为约定
 

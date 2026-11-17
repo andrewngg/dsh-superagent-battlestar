@@ -63,13 +63,14 @@
 - `brainToJson(brain, { decisions = 10 } = {})` → 对外 JSON（`nextThinkAt` 根据 lastThinkAt+intervalSec 计算；`decisions` 取最近 N 条；附 `configured` 布尔：是否找到 API key）。
 - `recordBrainDecision(brain, decision)` → 写入并裁剪到 30 条。
 - `buildBrainPrompt(snapshot)` → `{ system, user }`；snapshot 结构见 2.4。系统提示：你是 BattleStar 的自主管家大脑，只能输出严格 JSON；先理解用户目标与正在跑的任务，再决定最小动作；禁止臆造设备/任务 id；没有必要时 `actions: []`。
-- `parseBrainReply(text)` → `{ summary, actions: [...] }`；容忍 ```json 围栏；校验 action 白名单、taskId/goalId 为字符串、confidence 0..1；非法 JSON 抛错（错误信息含 `大脑返回不是合法 JSON`）。actions 最多 3 条。
+- `parseBrainReply(text)` → `{ summary, actions: [...] }`；容忍 ```json 围栏（含未闭合）、前后解释文字、字符串内花括号、尾随逗号与被输出上限截断的 JSON（`stripReplyWrapping` / `sliceBalancedObject` / `stripTrailingCommas` / `repairTruncatedJson` 依次尝试）；校验 action 白名单、taskId/goalId 为字符串、confidence 0..1；仍非法时抛错，错误信息为 `大脑返回不是合法 JSON（开头：<输出前 160 字>…）`，方便在控制台定位截断或跑题。actions 最多 3 条。
 - `createBrainThinker(config)` → `async ({ system, user }) => string`；config 解析：
   - key: `BRAIN_API_KEY || AGNES_API_KEY || BUTLER_AGNES_API_KEY`
   - baseUrl: `BRAIN_BASE_URL || AGNES_BASE_URL || https://apihub.agnes-ai.com/v1`
   - model: `config.model || BRAIN_MODEL || AGNES_MODEL || 'agnes-2.5-flash'`
   - timeout: `BRAIN_TIMEOUT_MS || 60000`
-  - POST `${baseUrl}/chat/completions`，`temperature: 0.2, max_tokens: 2000, stream: false`，`Authorization: Bearer <key>`；无 key 时调用抛错 `未配置自主大脑模型（BRAIN_API_KEY / AGNES_API_KEY）`。
+  - 输出上限：`BRAIN_MAX_TOKENS`（默认 4000，clamp 1000–8000；六步 assessment + 长 instruction 在 2000 时容易被截断）。
+  - POST `${baseUrl}/chat/completions`，`temperature: 0.2, max_tokens: <上面>, stream: false`，`Authorization: Bearer <key>`；baseUrl 指向 DeepSeek 时自动加 `response_format:{type:'json_object'}`，若网关 400 且响应提到 `response_format|json_object` 则去掉该参数重试一次；`message.content` 为片段数组时拼接，为空时回退 `message.reasoning_content`；无 key 时调用抛错 `未配置自主大脑模型（BRAIN_API_KEY / AGNES_API_KEY）`。
 - 决策记录结构：
 ```js
 { id:'brain_xxx', at:'ISO', trigger:'manual|schedule', mode:'auto|suggest',
@@ -87,7 +88,7 @@
   - `listBrainDecisions(limit)`。
   - `runBrainCycle()`（自动，30s 定时器调用）：`enabled && !thinking && now >= nextThinkAt && !this._closed` 才真正思考；返回 Promise；内部错误只记录不抛出。
   - `requestBrainThink({ trigger = 'manual' } = {})`：强制立刻思考一次（忽略 nextThinkAt，思考中则复用/拒绝），返回 decision。
-  - `_runBrainThink(trigger)`：构造 snapshot → 调 `this.brainThink({system,user})`（懒创建 `createBrainThinker({model: this.brain.model})`）→ `parseBrainReply` → 按 mode 执行/记录 → `recordBrainDecision` → 更新 `lastThinkAt/lastError/lastSummary` → 广播 `brain.updated`（data `{ brain: getBrain() }`）→ `schedulePersist()`。
+  - `_runBrainThink(trigger)`：构造 snapshot → 调 `this.brainThink({system,user})`（懒创建 `createBrainThinker({model: this.brain.model})`）→ `parseBrainReply`；若解析失败（`isBrainParseFailure`：非法 JSON / 空输出 / 没有结论）则在同一 system 下把修复提示（「重新只输出一个完整合法 JSON…」）追加进 user 再调用一次，第二次成功照常决策、第二次仍失败才记 `error`；非格式类错误（网络/鉴权）直接记录 → 按 mode 执行/记录 → `recordBrainDecision` → 更新 `lastThinkAt/lastError/lastSummary` → 广播 `brain.updated`（data `{ brain: getBrain() }`）→ `schedulePersist()`。
   - `_applyBrainActions(decision)`：仅在 `mode==='auto'` 执行；最多 `maxActions` 条；每条动作独立 try/catch，失败写 `error` 不中断其它动作：
     - `retry_task`：任务存在且状态 `failed/timeout/cancelled` 且 `attempts < maxAttempts` → `retryTask(task)`。
     - `resume_thread`：任务终态且 `instruction` 非空（默认 `继续此任务并推进下一步`）→ `createFollowUp(task, { instruction })`。
@@ -104,21 +105,31 @@
           guidance(最近3条),taskIds,runningTaskId,pendingApproval,linkedStats}],
   tasks: 可行动任务（assigned/running/waiting/queued/failed/timeout）最多 24 条
          + 最近完成（24h 内，按 finishedAt 倒序）最多 8 条:
-          [{id,instruction(300),status,goalId,isPlan,parentTaskId,threadId,attempts,maxAttempts,
+          [{id,instruction(300),status,goalId,project(120),assignedDeviceId,isPlan,parentTaskId,threadId,attempts,maxAttempts,
             createdAt,updatedAt,finishedAt,error(300),progress,planStep,planTotal,
             childProgress,assignedDeviceName,lastEvent,dependsOn(最近6个前置)}],
   decisions: 最近 3 条决策（供模型避免重复无效动作）:
-          [{at,summary(160),actions:[{action,taskId,goalId,executed,skippedReason,error(80)}]}],
+          [{at,summary(160),ownerAsk(160),actions:[{action,taskId,goalId,executed,skippedReason,error(80)}]}],
+  projectHosts: 最多 10 条 [{project,deviceId,deviceName,source:'affinity'|'task'}]（项目 → 最可能知道上下文的设备）,
+  consultations: 最近 5 条 [{at,deviceId,deviceName,project,question(200),answer(400),ok}]（worker 已回答的咨询）,
+  notes: 最近 8 条 [{at,text(300)}]（管家长期记忆）,
+  pathAudit: 最多 8 条 [{ref(200),status:'exists'|'missing'|'candidates',paths(最多3)}],
+  host: {user,platform},
   approvals: [{goalId,goalTitle,createdAt,reason}] }
 ```
 - 只喂“可能值得行动”的任务：`cancelled` 与已归档任务**不进入**快照，避免 40 条历史把可行动任务挤掉；排序优先级 failed/timeout → waiting → running/assigned → queued，同级按 `updatedAt` 倒序。
 - 每条任务渲染相对时间（`完成/排队/更新 N 分钟前`），让模型能判断“卡了多久”。
-- 决策记忆最多 3 条，帮助模型看到上一轮被拒的动作与原因，减少重复无效调用。
+- 决策记忆最多 3 条，帮助模型看到上一轮被拒的动作与原因，减少重复无效调用；每条决策附 `ownerAsk` 文本（「当轮提问」），提示词据此要求同一问题不要反复问。
+- 路径核查（`pathAudit`）：从可行动/失败任务的 instruction、error、progress.message、lastEvent.message 提取文件引用（Windows/POSIX 绝对路径、常见扩展名的裸文件名），在 Hub 主机允许根内探测——`BRAIN_PATH_ROOTS`（`path.delimiter` 分隔）优先，其次仓库根、worker-workspace、`~/Desktop`、`~/Downloads`、cwd，最多 8 个根；绝对路径直接测存在性，裸文件名做有界 BFS（最多 600 个目录、深度 4、命中 3 个即停，跳过 node_modules/.git/.venv/__pycache__/dist/build/target/.cache 与隐藏目录），最多 10 个引用、8 条审计。`status` 为 `exists` / `missing` / `candidates`（附最多 3 个同名候选路径）。**只代表 Hub 母机**，其它设备上的文件以设备自查为准，提示词会明确说明这一点。
+- 项目 ↔ 主机（`projectHosts`）：先取派发亲和的 `state.routing.projectAffinity`（`source:'affinity'`），再用最近任务（按 `updatedAt` 倒序、取 60 条）里 `requirements.project + assignedDeviceId` 的组合补齐（`source:'task'`），最多 10 条；`deviceName` 优先任务记录里的设备名，否则由 `devices` 补。提示词据此告诉大脑「缺项目上下文时优先向这里的设备 consult_worker」。
+- 咨询记录（`consultations`）：`consult_worker` 创建的只读咨询任务完成后，把问题、回答、设备、项目、是否成功写入 `brain.consultations`（最多 20 条，持久化在 `state.json.brain`）；快照取最近 5 条渲染成「## 咨询记录（worker 已回答；同一问题不要重复咨询）」，提示词要求同一问题不要重复咨询。
+- 管家记忆（`notes`）：`remember` 动作写入 `brain.notes`（每条 ≤400 字、最多 20 条、去重、持久化）；快照取最近 8 条渲染成「## 管家记忆（长期上下文，按需使用，不要重复记录）」，用于跨轮记住项目约定、路径、偏好等稳定事实。
 
 ### 2.5 HTTP（hub/lib/http.js）
 - `GET /api/brain` → `{ brain, decisions, hubTime }`（decisions 默认 20 条，`?decisions=` 可调，范围 1..30）。
 - `PATCH /api/brain` → body 同 `updateBrain`，返回 `{ brain, hubTime }`。
 - `POST /api/brain/think` → 强制思考，返回 `{ decision, brain, hubTime }`；未配置模型时返回 400（message 含 `BRAIN_API_KEY`）或 `{decision:null, error}`，二选一但需在实现中固定。
+- `POST /api/brain/owner-ask/choose` body `{optionId}` → `{brain, hubTime}`：主人点选大脑提问的选项；无待决提问 400「当前没有等待主人决定的问题」、缺 optionId 400「缺少选项 id」、选项不存在 400「无效的选项」；成功后写入 `ownerReply`、清空 `ownerAsk`、广播 `brain.updated`。
 - `GOAL_ADMIN_RE` 增加 `unlink`：`/^\/api\/goals\/([^/]+)(?:\/(check|link|unlink|approve|reject|skip|guidance))?$/`；`POST /api/goals/:id/unlink` body `{taskId}` → `unlinkGoalTask`。
 - `GET /api/goals/:id` 返回 `{ goal, tasks: listGoalTasks(goalId), linkedStats, hubTime }`。
 
@@ -233,13 +244,16 @@
 
 ### 7.1 目标与数据模型
 - 控制台新增「头脑风暴」页：与自主大脑多轮对话，用来梳理方向、拆解目标、评估取舍；任意一条大脑回复可一键转成任务（可同时关联到长期目标）。
-- 数据持久化在 `state.json` 的 `brainstorm` 字段：`{ activeId:null, sessions:[{id,title,createdAt,updatedAt,messages:[{id,role:'user'|'assistant',at,text,model?,error?}]}] }`。
+- 数据持久化在 `state.json` 的 `brainstorm` 字段：`{ activeId:null, sessions:[{id,title,createdAt,updatedAt,messages:[{id,role:'user'|'assistant',at,text,model?,error?,attachments?:[{name,path?,size,truncated?}]}]}] }`。
 - 上限：`sessions` 30、每会话 `messages` 200、单条 `text` 8000 字符；标题取首条用户消息截断 40 字；无模型配置时对话仍保存并返回错误提示，不抛给调用方。
+- 附件：用户消息可携带文件；正文只在生成本轮提示词时读取，`state.json` 仅保存名称/路径/大小等元数据，不保存文件内容。
 
 ### 7.2 模块 `hub/lib/brainstorm.js`（纯函数，无 I/O）
-- 导出：`DEFAULT_BRAINSTORM = {activeId:null, sessions:[]}`、`MAX_SESSIONS=30`、`MAX_MESSAGES=200`、`MAX_TEXT=8000`、`restoreBrainstorm(raw)`、`createSession({title?})`、`appendMessage(session, {role,text,error?})`（越界裁剪、更新 `updatedAt`、首条用户消息定标题）、`sessionSummary(session)` → `{id,title,createdAt,updatedAt,messageCount,lastMessageAt,preview}`、`brainstormToJson(brainstorm,{messages=100,sessionId})` → `{activeId, sessions:[summary], session?}`、`normalizeChatRequest(body)` → `{ok,value|errors}`（`sessionId<=80`、`message` 非空 <=8000）、`buildBrainstormPrompt({history,userMessage,context})` → `{system,user}`。
-- 提示词：中文、markdown 为主、区分事实/假设、给 2–3 个方案并推荐一个、指出风险与下一步；不要求 JSON。用户侧 prompt 包含管家上下文（长期目标、进行中/失败任务、最近心路总结）与最近 12 条对话。
-- 模型配置复用 `brain.js` 的 `brainModelConfig()/createBrainThinker()`（同一 `BRAIN_*`/`AGNES_*` 环境变量），不新增配置项。
+- 导出：`DEFAULT_BRAINSTORM = {activeId:null, sessions:[]}`、`MAX_SESSIONS=30`、`MAX_MESSAGES=200`、`MAX_TEXT=8000`、`MAX_ATTACHMENTS=8`、`restoreBrainstorm(raw)`、`createSession({title?})`、`appendMessage(session, {role,text,error?,attachments?})`（越界裁剪、更新 `updatedAt`、首条用户消息定标题）、`sessionSummary(session)` → `{id,title,createdAt,updatedAt,messageCount,lastMessageAt,preview}`、`brainstormToJson(brainstorm,{messages=100,sessionId})` → `{activeId, sessions:[summary], session?}`、`normalizeChatRequest(body)` → `{ok,value|errors}`（`sessionId<=80`、`message` 非空 <=8000、`attachments` 最多 8 个 `{path}` / `{name,text}`）、`renderAttachments(attachments)`、`buildBrainstormPrompt({history,userMessage,context,attachments})` → `{system,user}`。
+- 文件读取由 `hub/lib/file-reader.js` 负责：`readAttachments([{path}|{name,text}])`（单文件 512KB、单次 8 个、总注入 160K 字，超出截断）、`extractFilePaths(text,{requireExists})`（从消息正文识别引号/裸绝对路径与 UNC；`requireExists` 默认 `true` 时只接受存在的文本文件，传 `false` 时仅做路径归一化，用于判断本轮是否在谈文件）、`isSensitivePath()`（拒绝 `.env`、`id_rsa`、`*.pem`/`*.key` 等密钥/凭据文件）、`isProbablyText()`（拒绝二进制）；路径相对 `process.cwd()` 解析，读取失败只返回错误文本，不抛异常。
+- 提示词：中文、markdown 为主、区分事实/假设、给 2–3 个方案并推荐一个、指出风险与下一步；不要求 JSON。用户侧 prompt 包含管家上下文（长期目标、进行中/失败任务、最近心路总结）、`## 用户提供的文件`（文件名/路径/大小 + 代码围栏内容）、最近 12 条对话与「本轮消息」；历史中的用户消息附 `（附件：文件名）`。
+- 模型配置复用 `brain.js` 的 `brainModelConfig()/createBrainThinker()`；`selectBrainstormModel({fileMode})` 按本轮是否涉及文件选择模型：普通对话用默认配置，`fileMode`（带附件、消息提到文件路径或读取失败）时改用文件模型 `brainstormFileModelConfig()`。文件模型默认 `DEEPSEEK_API_KEY` + `https://api.deepseek.com` + `deepseek-chat`，可用 `BRAINSTORM_FILE_API_KEY` / `BRAINSTORM_FILE_BASE_URL` / `BRAINSTORM_FILE_MODEL` 单独覆盖；没有 DeepSeek Key 时回退默认模型（文件内容仍会注入）。头脑风暴还可用 `BRAINSTORM_API_KEY` / `BRAINSTORM_BASE_URL` / `BRAINSTORM_MODEL` 整体覆盖，未设置时回退 `BRAIN_*` / `AGNES_*`。只配置 `DEEPSEEK_API_KEY`（且无显式 baseUrl/其他 Key）时整体切到 DeepSeek（`BRAIN_MODEL` 可换 `deepseek-reasoner`）。以上变量可写在仓库根目录或 `hub/.env`，由 `hub/lib/env-file.js` 在 `hub/server.js` 启动时加载（系统环境变量优先、日志只打印键名、`.env` 已 gitignore）。`chatBrainstorm` 返回 `model` 与 `fileMode` 便于前端/日志区分本轮使用的模型。
+- 模型提示：`buildBrainstormPrompt` 会声明文件内容已由 Hub 注入、要求模型直接回答而不要声称“无法访问本地文件系统”；失败项通过 `## 附件读取失败` 段给出路径与原因。
 
 ### 7.3 Hub 集成（`hub/lib/hub.js`）
 - 构造器：`this.brainstorm = restoreBrainstorm(options.brainstorm)`；`_brainstormThinkInjected = typeof options.brainstormThink === 'function'`；`this.brainstormThink`；惰性 `_brainstormThinker`。
@@ -248,13 +262,13 @@
 - 方法：
   - `getBrainstorm({messages=100, sessionId}={})`：返回 `brainstormToJson`，`session` 缺省取 `activeId` 或最近更新的会话。
   - `listBrainstormSessions()`、`createBrainstormSession()`、`deleteBrainstormSession(id)`。
-  - `async chatBrainstorm({sessionId, message})`：无会话则新建；追加 user 消息 → 组上下文（目标、活跃任务、最近 3 天心路总结）→ `buildBrainstormPrompt` → 大脑模型 → 追加 assistant 消息（模型失败时 assistant 消息带 `error`，不抛）→ `broadcast('brainstorm.updated',{session},{record:false})` → log/persist → 返回 `{session, reply, error}`。
+  - `async chatBrainstorm({sessionId, message, attachments})`：无会话则新建；`_collectBrainstormFiles(message, attachments)` 先读取显式附件、再自动识别消息里的本机路径（去重），失败项写入提示词提示；追加 user 消息（带附件元数据）→ 组上下文（目标、活跃任务、最近 3 天心路总结）→ `buildBrainstormPrompt`（含附件内容）→ 大脑模型 → 追加 assistant 消息（模型失败时 assistant 消息带 `error`，不抛）→ `broadcast('brainstorm.updated',{session},{record:false})` → log/persist → 返回 `{session, reply, error, attachments, attachmentErrors}`。
   - `brainstormMessageToTask({sessionId, messageId, goalId})`：取 assistant 消息，用正文作为任务指令（标题取首行 80 字），`createTask({instruction, priority:6, context:{brainstorm:true, sessionId, messageId}, goalId})`；`goalId` 存在时自动登记关联（走 `_registerGoalTask`）。
 - 事件：仅 SSE `brainstorm.updated`（`record:false`），不写常规 events。
 
 ### 7.4 HTTP（`hub/lib/http.js`）
 - `GET /api/brainstorm?messages=1..200&session=<id>` → `{brainstorm:{activeId,sessions:[summary...]}, session, hubTime}`。
-- `POST /api/brainstorm/chat` body `{sessionId?, message}` → `{session, reply, error?, hubTime}`；参数非法 400；模型未配置/失败仍 200，`error` 说明原因且 assistant 消息已带 error。
+- `POST /api/brainstorm/chat` body `{sessionId?, message, attachments?}` → `{session, reply, error?, attachments?, attachmentErrors?, hubTime}`；`attachments` 支持 `[{path}]`（Hub 本机路径）或 `[{name,text}]`（上传文本），最多 8 个；参数非法 400；模型未配置/失败仍 200，`error` 说明原因且 assistant 消息已带 error。
 - `POST /api/brainstorm/sessions` → `{session, brainstorm:{activeId,sessions}, hubTime}`。
 - `DELETE /api/brainstorm/sessions/:id` → `{ok:true, brainstorm, hubTime}`；不存在 404。
 - `POST /api/brainstorm/to-task` body `{sessionId, messageId, goalId?}` → `{task, session, hubTime}`；消息不存在 400/404。
@@ -262,12 +276,14 @@
 ### 7.5 Web UI（`hub/web/*`）
 - 新增 tab `brainstorm`（标签「对话」，移动端同为「对话」）：`TABS`、`section.panel[data-tab-panel="brainstorm"]`、移动端 `.mobile-tab[data-tab="brainstorm"]`。
 - 页面：标题 `头脑风暴` + 副标题 `直接和大脑聊思路、拆目标、做取舍`；左侧会话列表（新建、删除、标题+预览+时间），右侧消息流（用户右侧强调色气泡；大脑左侧卡片，markdown 渲染，带 `复制 / 转成任务 / 关联目标` 操作），底部输入框 + 发送（Enter 发送，Shift+Enter 换行，busy 时禁用并显示「大脑思考中…」）。
+- 附件：输入框上方「附件」按钮 + 隐藏多选文件输入（文本文件、最多 6 个、单个 ≤256KB），选中后 chips 展示名称/大小与移除按钮；发送时以 `attachments:[{name,text}]` 随请求提交；消息气泡展示附件 chips（名称/大小）；也可在消息中直接写 Hub 本机路径由后端读取。
 - 空态：开场白 + 3 个建议问题按钮（示例：把「求职」目标拆成本周 3 个行动；评估自由职业先做哪个方向；指出当前计划里最可能失败的一步）。
 - 状态：`state.brainstorm/brainstormBusy/brainstormError/brainstormSessions/brainstormSession`；进入 tab 拉取，SSE `brainstorm.updated` 刷新；缓存戳升级；i18n 增加 zh/en `brainstorm.*` 键。
 - 「关联目标」从 `state.goals` 里选（目标 drawer 里已有 goalById，可复用）；转任务成功 toast 提示并可直接打开任务抽屉。
 
 ### 7.6 测试与文档
-- `hub/test/brainstorm.test.js`：默认值/restore/上限裁剪/标题/appendMessage/sessionSummary/brainstormToJson/normalizeChatRequest/buildBrainstormPrompt（含上下文与历史）。
+- `hub/test/brainstorm.test.js`：默认值/restore/上限裁剪/标题/appendMessage/sessionSummary/brainstormToJson/normalizeChatRequest（含 attachments）/buildBrainstormPrompt（含上下文、历史与附件段）。
+- `hub/test/brainstorm-files.test.js`：`file-reader`（文本/二进制/敏感/上传/体积上限、路径提取）、`normalizeChatRequest` 附件校验、提示词附件段、`hub.chatBrainstorm`（显式附件 + 消息路径 + 失败提示 + 元数据落盘）、HTTP `POST /api/brainstorm/chat` 附件端到端与 400。
 - `hub/test/brainstorm-hub.test.js`：注入 `brainstormThink` 的对话落盘、会话自动创建、模型抛错不抛、to-task 生成任务与目标关联、持久化恢复、HTTP GET/POST/DELETE/to-task、SSE 不写常规 events。
 - 文档：`docs/ARCHITECTURE.md` 增加 §3.10 头脑风暴与 §4.8 数据模型；`README.md` 增加功能 bullet、API 示例、测试计数；本节即契约。
 - 文件所有权：Lead 负责 `hub/lib/*`；web-ui 负责 `hub/web/*`（含 `i18n.js`）；verifier 负责 `hub/test/brainstorm*.test.js`、`docs/ARCHITECTURE.md`、`README.md`。
@@ -286,7 +302,10 @@
 - `skippedCycles`：自上次真实思考以来跳过的轮数（没有新信号时直接跳过模型调用）。
 - `consecutiveFailures`：连续思考失败次数（0–6）；失败时按 `max(idleStreak, consecutiveFailures)` 指数退避，避免模型故障时按基准间隔反复重试；一次成功即清零。
 - `lastAssessment`：最近一次六步思考结论 `{goals, progress, betterWay, improvement, myMove, ownerAsk}`（各 ≤400 字）。
-- `ownerAsk`：需要主人参与的事项 `{text, at, goalId?}`；PATCH `/api/brain {ownerAskAck:true}` 清除。
+- `ownerAsk`：需要主人参与的事项 `{text, at, goalId?, options?}`；`options` 为 `[{id:'o1'.., label}]`（2–4 个、标签去重、≤40 字），模型可给出可点选项，也可只有文字。PATCH `/api/brain {ownerAskAck:true}` 清除（表示「知道了」）；`POST /api/brain/owner-ask/choose {optionId}` 表示主人点选了一个选项。
+- `ownerReply`：主人对上次提问的选择 `{optionId, label, question, at, goalId?}`；写入后清空 `ownerAsk`，下一轮思考会把它作为「主人对上次提问的选择」注入提示词并消费清空。
+- `consultations`：worker 咨询记录数组 `[{at,taskId,deviceId,deviceName,project,question,answer,ok}]`（最多 20 条，`_recordBrainConsultation` 在咨询任务结束时写入）。
+- `notes`：管家长期记忆数组 `[{at,text}]`（最多 20 条、每条 ≤400 字，`remember` 动作写入并去重）。
 - `restoreBrain` 容错恢复以上字段；PATCH 支持 `adaptive`、`ownerAskAck`。
 
 ### 8.3 节律规则（Hub）
@@ -300,16 +319,23 @@
 ### 8.4 六步思考协议（提示词 + 解析）
 - `buildBrainPrompt(snapshot, { mind, maxActions })`：系统提示要求严格 JSON：
   `{"assessment":{"goals":"现在有什么目标","progress":"进度在哪里","betterWay":"有什么更好的工作方式","improvement":"我需要改进哪里","myMove":"我可以做什么推进进度","ownerAsk":"需要主人做什么（无则留空字符串）"},"summary":"一句话结论","actions":[{...同现有}]}`
-  并要求：先完成六步再给动作；`actions` 为空是合法且常见的；`ownerAsk` 只在确实需要主人决策/授权/提供信息时填写；本轮动作上限取配置 `maxActions`（1–3）。
+  并要求：先完成六步再给动作；`actions` 为空是合法且常见的；`ownerAsk` 只用于需要主人决策/授权/偏好/确认方向的事项，**禁止询问文件/目录/脚本路径、文件是否存在、版本号、密码、设备在线状态、任务 id 等机器可查事实**；任务因路径缺失或路径不对而失败时先看「路径核查」，有候选路径就写进自包含 create_task 让有文件能力的设备处理，确认不存在就建定位/重规划任务，不要问主人；本轮动作上限取配置 `maxActions`（1–3）。
 - 用户提示包含**最近 3 条决策**（时间、摘要、每个动作的执行/跳过原因），并明确“重复以下无效动作会被再次拒绝”；任务行带相对时间（完成/排队/更新 N 分钟前）；示例 JSON 使用通用目标，不含个人场景。
-- `parseBrainReply` 返回 `{ summary, actions, assessment, ownerAsk }`；`assessment` 逐字段截断，`ownerAsk` 非空时归一化为 `{text, goalId?}`。
+- 路径核查段：用户提示在任务区块后插入「## 路径核查（在 <user>@<platform> 上实测；其它设备上的路径可能不同）」，逐条列出文件引用 → `存在` / `Hub 主机上该路径不存在，但找到同名文件：…` / `Hub 主机上不存在（可能属于其它设备）`，并提示「路径核查只代表 Hub 主机；设备侧文件请用 create_task 让对应设备自查，不要据此向主人提问」；该段由 `snapshot.pathAudit` 与 `snapshot.host` 渲染，无引用时不输出。
+- create_task 的 `requirements.tags` 语义是设备能力标签。Hub 的 `_sanitizeBrainRequirements` 会按 `requirements.project` 区分处理：**有 project 时**，无人声明但形似项目标签的值保留下来并登记为该项目的别名（`state.routing.projectTags`，每项目 ≤20、全局 ≤200），日志记 info「把标签登记为项目别名：…」；**无 project 时**才丢弃无人声明的标签并记 warn，避免把项目名「反腐AI」当标签导致永久排队。`_learnProjectTags` 同时从任务与成功完成记录里累积项目→标签别名；`deviceToJson` 下发 `autoTags`（该设备成功执行过的项目名 + 项目别名），`_capabilitiesForMatch` 把它们并入 `tags` 匹配；`_matchDeviceRequirements` 对显式 `requirements.deviceId` 钉住的设备只缺标签时视为满足（缺 model/skills/profile/gateway 仍排除）。提示词仍要求一般任务不填 tags，用 `project`/`deviceId` 定位。
+- 咨询 worker 与管家记忆：系统提示允许 `consult_worker`（只读问题、`requirements.deviceId` 必填；设备选择顺序「项目 ↔ 主机」映射 > 最近执行该项目设备 > 母机；每轮最多 1 个，不要发手机/纯 ComfyUI）与 `remember`（note ≤300 字、一条一个事实、不要重复、不要写临时进度）。用户提示在任务区块后依次插入「## 项目 ↔ 主机（N 个；缺少项目上下文时优先向这里的设备 consult_worker）」「## 咨询记录（worker 已回答；同一问题不要重复咨询）」「## 管家记忆（长期上下文，按需使用，不要重复记录）」。`consult_worker` 由 Hub 建一个 instruction 以「【只读咨询】」开头、`priority:7`、`timeoutSec:300`、`requirements.deviceId` 硬锁的咨询任务，完成/失败后 `_recordBrainConsultation` 把回答写入 `brain.consultations`，下一轮提示词带上「咨询记录」，同一设备同时只允许一个进行中的咨询。
+- 精简要求：系统提示额外要求 assessment 每项 ≤120 字、summary ≤120 字、动作 instruction ≤400 字，避免 JSON 过长被输出上限截断。
+- 解析失败重试：Hub 在 `parseBrainReply` 抛格式类错误（非法 JSON / 空输出 / 没有结论）时，把「上次输出无法解析，请只输出完整合法 JSON」的修复提示追加到同一轮 user 提示再调用一次模型；第二次成功则整轮照常执行，两次都失败才记录 `error`（错误带输出开头片段）。
+- `parseBrainReply` 返回 `{ summary, actions, assessment, ownerAsk }`；`assessment` 逐字段截断，`ownerAsk` 非空时归一化为 `{text, goalId?, options?}`（`assessment.ownerAsk` 为对象时保留 options，字符串时 options=null）。
+- 提示词规则：ownerAsk 可以是字符串，也可以是 `{text, options:[...]}`；选项 ≤20 字、互斥、指向明确动作，不要「其他/你自己决定」，最多 4 个；当 `brain.ownerReply` 存在时，用户提示加入「主人对上次提问的选择」，并要求基于该选择继续推进、不要再次询问同一个问题；同一问题若已在「最近决策」的「当轮提问」中出现过（或已由 ownerReply 消费），不要换个说法重复问。
 - 决策记录新增 `assessment`、`ownerAsk` 字段；`brain.lastAssessment`、`brain.ownerAsk` 同步，SSE `brain.updated` 携带。
 - 心路：思考条目的正文包含六步摘要（有 `ownerAsk` 时写「需要主人：…」）；低价值思考（摘要属于「无需/暂不/无动作/保持观察/没有需要」一类，且无执行动作、无错误、无 `ownerAsk`）不写心路；连续失败只在第一次记录。
-- 控制台：自主大脑卡片/抽屉展示最近一次六步思考、需要主人的事项（可「知道了」清除）、当前节律（基准间隔 / 实际间隔 / 空闲连续轮数 / 跳过轮数 / 下次思考时间）。
+- 控制台：自主大脑卡片/抽屉展示最近一次六步思考、需要主人的事项（有选项时直接点选，无选项可「知道了」清除）、当前节律（基准间隔 / 实际间隔 / 空闲连续轮数 / 跳过轮数 / 下次思考时间）。点选会调用 `POST /api/brain/owner-ask/choose`，成功后提示「已选择：…，下一轮思考会据此推进」。
+- 手机通知：`ButlerNotificationService` 每 5 秒拉取 snapshot，发现 `brain.ownerAsk` 时用 `butler_decision` 通道（`IMPORTANCE_HIGH`，通知 id 7600）弹出「管家需要你决定」，正文为问题；通知栏最多 3 个选项动作按钮（点击由 `DecisionActionReceiver` 在后台 POST `/api/brain/owner-ask/choose`，成功后取消通知；失败保留，等下一次 snapshot 重试）；没有 options 时给一个「打开决策」动作；点通知正文打开 App 的 `#brain-card` 并高亮；签名去重避免每 5 秒重复提醒。APK 版本 0.1.5（versionCode 6）。
 
 ### 8.5 测试
-- `brain.test.js`：`normalizeAssessment`、`parseBrainReply`（含/不含 assessment、ownerAsk 归一化）、`restoreBrain` 新字段（含 `consecutiveFailures`）、`computeNextThinkAt` 优先 `nextThinkAt`、`brainToJson` 新字段、`normalizeBrainPatch`（adaptive/ownerAskAck）、提示词包含六步。
-- `brain-hub.test.js`：空闲时 `runBrainCycle` 跳过模型调用且退避；有活时重置节律；执行动作后 `nextThinkAt` 按基准间隔；ownerAsk 落库与 ack 清除；心路包含六步。
+- `brain.test.js`：`normalizeAssessment`、`parseBrainReply`（含/不含 assessment、ownerAsk 归一化、对象 ownerAsk 保留选项）、`normalizeOwnerOptions`（2–4 个、去重、稳定 id、超长截断）、`normalizeOwnerReply`、`restoreBrain` 新字段（含 `consecutiveFailures`、`ownerReply`）、`computeNextThinkAt` 优先 `nextThinkAt`、`brainToJson` 新字段、`normalizeBrainPatch`（adaptive/ownerAskAck）、提示词包含六步；JSON 容错（尾随逗号、未闭合围栏、字符串内花括号、截断修复、错误带输出开头）、`brainMaxCompletionTokens`（默认 4000 / clamp 1000–8000）、thinker 的 `max_tokens` 可配、DeepSeek `response_format` 与 400 降级、content 片段数组与 `reasoning_content` 回退；`buildBrainPrompt` 路径核查/项目与设备上下文/历史提问用例（含禁止拿文件路径等机器可查事实问主人的规则）；`normalizeActions` 的 `question/note`、`normalizeBrainConsultations`/`normalizeBrainNotes`、`restoreBrain`/`brainToJson` 的 `consultations`/`notes`、`buildBrainPrompt` 的「项目 ↔ 主机 / 咨询记录 / 管家记忆」三段与咨询、记忆规则。
+- `brain-hub.test.js`：空闲时 `runBrainCycle` 跳过模型调用且退避；有活时重置节律；执行动作后 `nextThinkAt` 按基准间隔；ownerAsk 落库与 ack 清除；`POST /api/brain/owner-ask/choose` 写入 ownerReply/清空 ownerAsk/下一轮提示词含「主人对上次提问的选择」/非法选项 400/未授权 401；心路包含六步；非法 JSON 会带修复提示重试一次（两次失败才记 error、第二次成功则正常并清空 `lastError`）；`_brainSnapshot` 提取任务文件引用并在 Hub 主机探测（`applier.py` 候选、绝对路径 missing）、任务 `project`/`assignedDeviceId`、决策 `ownerAsk`、历史提问防重复、`BRAIN_PATH_ROOTS` 生效；`consult_worker` 建只读咨询任务（钉到指定设备）并在 ack/result 后写入 `brain.consultations`、下一轮提示词含咨询记录；`remember` 写入 `brain.notes`、去重并持久化；缺少问题/设备、设备不存在、同设备重复咨询被跳过；`projectHosts` 从项目任务投影。
 - `brain-optimize.test.js`（prompt 体积与噪音优化回归）：`idleIntervalCapSec`/`effectiveIntervalSec` 上限、`formatAge` 渲染、提示词含最近决策与任务相对时间且动作上限来自配置、快照过滤 cancelled/completed 且 cancelled 不再算 busy、空闲退避可突破 1800s（1800→3600→7200）、失败退避 600→1200→2400 且心路只记一次失败、纯 `none` 决策不写心路。
 
 ### 8.6 与心智（Soul / Skill）的关系

@@ -54,7 +54,7 @@ import java.util.Locale;
 public class MainActivity extends Activity {
 
     private static final String TAG = "SuperButler";
-    private static final String APP_VERSION = "0.1.4";
+    private static final String APP_VERSION = "0.1.5";
     private static final String SETUP_URL = "file:///android_asset/setup.html";
     private static final String ERROR_BASE = "file:///android_asset/error.html";
     private static final String ASSET_BASE = "file:///android_asset/";
@@ -67,6 +67,7 @@ public class MainActivity extends Activity {
 
     private static final String TASK_PROGRESS_CHANNEL = "butler_task_progress";
     private static final String TASK_DONE_CHANNEL = "butler_task_done";
+    private static final String DECISION_CHANNEL = "butler_decision";
     private static final int REQ_POST_NOTIFICATIONS = 7301;
     private static final int REQ_FILE_CHOOSER = 7302;
     private static final int TASK_NOTIFY_BASE = 7300;
@@ -225,6 +226,30 @@ public class MainActivity extends Activity {
             } catch (Exception e) {
                 Log.w(TAG, "switch to reminders tab failed", e);
             }
+        } else if ("brain".equals(tab)) {
+            // 大脑决策通知：切到状态页，稍后滚动并高亮大脑卡片（等待 tab 切换渲染完成）
+            try {
+                webView.evaluateJavascript("try{window.location.hash='#status';}catch(e){}", null);
+            } catch (Exception e) {
+                Log.w(TAG, "switch to status tab failed", e);
+            }
+            final WebView target = webView;
+            target.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    if (target != webView || showingError) return;
+                    try {
+                        target.evaluateJavascript(
+                                "try{var c=document.querySelector('#brain-card');"
+                                        + "if(c){c.classList.add('is-flash');"
+                                        + "setTimeout(function(){c.classList.remove('is-flash');},2400);"
+                                        + "c.scrollIntoView({behavior:'smooth',block:'center'});}}catch(e){}",
+                                null);
+                    } catch (Exception e) {
+                        Log.w(TAG, "focus brain card failed", e);
+                    }
+                }
+            }, 500L);
         }
         pendingOpenTab = null;
     }
@@ -688,8 +713,13 @@ public class MainActivity extends Activity {
         NotificationChannel done = new NotificationChannel(
                 TASK_DONE_CHANNEL, "BattleStar 任务完成", NotificationManager.IMPORTANCE_DEFAULT);
         done.setDescription("任务完成、失败或超时提醒");
+        // 自主大脑需要主人决定：高优先级，通知栏直接展示可点选项
+        NotificationChannel decision = new NotificationChannel(
+                DECISION_CHANNEL, "BattleStar 管家决策", NotificationManager.IMPORTANCE_HIGH);
+        decision.setDescription("自主大脑需要你决定时提醒，可直接在通知栏点选");
         nm.createNotificationChannel(progress);
         nm.createNotificationChannel(done);
+        nm.createNotificationChannel(decision);
         // 提醒事项渠道：gentle（butler_reminders）+ alarm（butler_reminders_alarm），
         // Receiver/开机重排里也会确保创建（进程被杀后 Receiver 可能先于 Activity 运行）
         ReminderScheduler.ensureChannels(this);

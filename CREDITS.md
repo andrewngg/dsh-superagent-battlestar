@@ -80,7 +80,7 @@
 - 所有 Hub / 设备代理 / Web 控制台 / DSH 插件代码：原创，MIT；
 - `dist/icon-512.png`、`android/res/mipmap-*`、`dsh-plugin/icon.svg`：本项目原创图标；
 - APK 仅使用 Android 系统组件（无 AndroidX、无第三方 SDK）；
-- `dist/BattleStar-0.1.4.apk`：本项目构建产物，使用测试签名（`android/keystore/` 本地生成，已 gitignore，不提交）。
+- `dist/BattleStar-0.1.5.apk`：本项目构建产物，使用测试签名（`android/keystore/` 本地生成，已 gitignore，不提交）。
 
 ## 7. 商标声明
 

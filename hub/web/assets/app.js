@@ -112,9 +112,26 @@
   /** Agnes 执行计划里的策略/并行组文案。 */
   const PLAN_STRATEGY_LABEL = { parallel: '并行执行', sequential: '按顺序执行', mixed: '并行 + 顺序依赖' };
   const planStrategyLabel = (plan) => (plan && PLAN_STRATEGY_LABEL[plan.strategy]) || '';
-  const TABS = new Set(['status', 'tasks', 'command', 'goals', 'journal', 'brainstorm', 'mind', 'reminders', 'developer', 'settings']);
-  /** 心智（Soul / Skill）字段上限缺省值；服务端 limits 优先。 */
-  const MIND_FIELD_LIMITS = { soul: 6000, skill: 12000 };
+  /**
+   * 主页分类（桌面顶部分类导航与手机底部导航共用同一套状态）：
+   * overview=概览 / tasks=任务指令 / brain=大脑（card=自主大脑、journal=心路、brainstorm=头脑风暴）
+   * / goals=目标 / reminders=提醒 / developer=开发 / settings=设置（桌面端改为设置抽屉）。
+   */
+  const CATS = ['overview', 'tasks', 'brain', 'goals', 'reminders', 'developer', 'settings'];
+  const DEFAULT_CAT = 'overview';
+  const BRAIN_VIEWS = ['card', 'journal', 'brainstorm'];
+  /** 旧 hash / 旧调用名 → 新分类；journal、brainstorm 归入大脑分类。 */
+  const TAB_ALIASES = { status: 'overview', command: 'tasks', journal: 'brain', brainstorm: 'brain', mind: 'brain' };
+  function normalizeTab(raw) {
+    const value = String(raw == null ? '' : raw).trim().toLowerCase();
+    if (Object.prototype.hasOwnProperty.call(TAB_ALIASES, value)) return TAB_ALIASES[value];
+    return CATS.includes(value) ? value : '';
+  }
+  function brainViewOrDefault(view) {
+    const value = String(view == null ? '' : view).trim().toLowerCase();
+    return BRAIN_VIEWS.includes(value) ? value : 'card';
+  }
+  // 心智（Soul / Skill）编辑已迁移到 DSH 插件面板，Web 控制台不再展示。
 
   /* 多语言：ButlerI18n 由 assets/i18n.js 提供（默认中文时不做任何处理） */
   const I18N = window.ButlerI18n || null;
@@ -316,6 +333,7 @@
     brain: null,
     brainBusy: false,
     brainError: '',
+    brainUnavailable: false,
     brainDecisions: [],
     goalDetail: null,
     journal: null,
@@ -330,12 +348,7 @@
     brainstormError: '',
     brainstormSessions: [],
     brainstormSession: null,
-    mind: null,
-    mindLoaded: false,
-    mindBusy: false,
-    mindDirty: false,
-    mindError: '',
-    mindServerUpdated: false,
+    brainstormAttachments: [],
     reminders: [],
     remindersLoaded: false,
     remindersLoading: false,
@@ -356,7 +369,8 @@
     expandedOutput: new Set(),
     rawOutputs: new Set(),
     rawInstructions: new Set(),
-    tab: 'status',
+    tab: 'overview',
+    brainView: 'card',
     autoOpenDone: false,
     sendBusy: false,
     drawer: { open: false, kind: null, id: null, returnFocus: null },
@@ -638,7 +652,9 @@
     applySnapshot(snapshot);
     showAppView();
     startSse();
-    setTab(currentTabFromHash(), { scroll: false });
+    const initialTab = currentTabFromHash();
+    setTab(initialTab.cat, { scroll: false, brainView: initialTab.brainView });
+    void refreshBrain();
     scrubUrlToken();
     scheduleRelativeRefresh();
     setTimeout(() => maybeAutoOpen(), 60);
@@ -663,6 +679,7 @@
     state.brain = null;
     state.brainBusy = false;
     state.brainError = '';
+    state.brainUnavailable = false;
     state.brainDecisions = [];
     state.goalDetail = null;
     clearTimeout(goalDetailTimer);
@@ -679,15 +696,10 @@
     state.brainstormError = '';
     state.brainstormSessions = [];
     state.brainstormSession = null;
+    state.brainstormAttachments = [];
     clearTimeout(brainstormRefreshTimer);
     brainstormRefreshTimer = 0;
     brainstormLoadSeq += 1;
-    state.mind = null;
-    state.mindLoaded = false;
-    state.mindBusy = false;
-    state.mindDirty = false;
-    state.mindError = '';
-    state.mindServerUpdated = false;
     state.reminders = [];
     state.remindersLoaded = false;
     state.remindersLoading = false;
@@ -734,6 +746,7 @@
     state.brain = null;
     state.brainBusy = false;
     state.brainError = '';
+    state.brainUnavailable = false;
     state.brainDecisions = [];
     state.goalDetail = null;
     clearTimeout(goalDetailTimer);
@@ -750,15 +763,10 @@
     state.brainstormError = '';
     state.brainstormSessions = [];
     state.brainstormSession = null;
+    state.brainstormAttachments = [];
     clearTimeout(brainstormRefreshTimer);
     brainstormRefreshTimer = 0;
     brainstormLoadSeq += 1;
-    state.mind = null;
-    state.mindLoaded = false;
-    state.mindBusy = false;
-    state.mindDirty = false;
-    state.mindError = '';
-    state.mindServerUpdated = false;
     state.reminders = [];
     state.remindersLoaded = false;
     state.remindersLoading = false;
@@ -834,7 +842,7 @@
       'device.updated', 'device.online', 'device.offline',
       'task.created', 'task.updated', 'task.completed', 'task.failed', 'task.deleted',
       'goal.created', 'goal.updated', 'goal.deleted', 'goal.approval',
-      'nightly.review.updated', 'brain.updated', 'journal.updated', 'brainstorm.updated', 'mind.updated',
+      'nightly.review.updated', 'brain.updated', 'journal.updated', 'brainstorm.updated',
       'log', 'ping',
     ];
     for (const name of named) {
@@ -946,7 +954,6 @@
     if (name === 'brain.updated') return onBrainUpdated(payload);
     if (name === 'journal.updated') return onJournalUpdated(payload);
     if (name === 'brainstorm.updated') return onBrainstormUpdated(payload);
-    if (name === 'mind.updated') return onMindUpdated(payload);
     if (name === 'settings.updated') return onSettingsUpdated(payload);
     if (name === 'log') return onLogEvent(payload);
     if (name === 'ping') return;
@@ -1211,6 +1218,13 @@
     return arr(capsOf(device).gateways).filter((g) => g && g.id);
   }
   function tagsOf(device) {
+    const direct = arr(device && device.tags);
+    // 自动标签：设备做过哪个项目，就自动带上该项目名/项目别名标签（Hub 侧推导，不改设备 manifest）。
+    const auto = arr(device && device.autoTags);
+    const merged = [...new Set([...direct, ...auto])];
+    return merged.length ? merged : arr(capsOf(device).tags);
+  }
+  function manifestTagsOf(device) {
     const direct = arr(device && device.tags);
     return direct.length ? direct : arr(capsOf(device).tags);
   }
@@ -1619,7 +1633,7 @@
         const iso = node.dataset.relFuture;
         if (iso) node.textContent = tx(fmtRelFuture(iso, now));
       });
-      if (state.brain && state.tab === 'goals') renderBrainCard();
+      if (state.brain && state.tab === 'brain' && state.brainView === 'card') renderBrainCard();
     }, 15000);
   }
 
@@ -1892,7 +1906,20 @@
     const capacity = /^at capacity \((\d+)\/(\d+)\)$/.exec(s);
     if (capacity) return `并发已满（${capacity[1]}/${capacity[2]}）`;
     const missing = /^missing (.+)$/.exec(s);
-    if (missing) return `缺少 ${missing[1]}`;
+    if (missing) {
+      // tag:/skill:/model: 等前缀对用户不直观，翻译成设备标签/技能/模型等中文说法。
+      const kindNames = { tag: '设备标签', skill: '技能', model: '模型', profile: '配置文件', gateway: '网关' };
+      const parts = missing[1]
+        .split(/[,，]\s*/)
+        .map((part) => {
+          const token = /^([a-z]+):(.+)$/.exec(part.trim());
+          if (!token) return part.trim();
+          const kindName = kindNames[token[1]];
+          return kindName ? `${kindName}「${token[2]}」` : part.trim();
+        })
+        .filter(Boolean);
+      return parts.length ? `缺少${parts.join('、')}` : '不满足要求';
+    }
     return s;
   }
 
@@ -4258,11 +4285,17 @@
   function renderBrainCard() {
     const card = $('#brain-card');
     if (!card) return;
+    const loading = $('#brain-loading');
     const brain = state.brain;
     if (!brain || typeof brain !== 'object') {
       card.hidden = true;
+      if (loading) {
+        loading.hidden = false;
+        loading.textContent = tx(state.brainUnavailable ? '当前 Hub 未启用自主大脑' : '正在载入大脑状态…');
+      }
       return;
     }
+    if (loading) loading.hidden = true;
     const scrollY = window.scrollY;
     card.hidden = false;
     const chipView = brainChipView(brain);
@@ -4318,11 +4351,49 @@
         askTextNode.textContent = askText;
         askTextNode.title = askText;
       }
+      const askHint = $('#brain-owner-ask-hint');
+      if (askHint) {
+        const hasOptions = Boolean(ask && Array.isArray(ask.options) && ask.options.length);
+        askHint.hidden = !askText || hasOptions;
+        askHint.textContent = hasOptions ? '' : tr('brain.ownerAskNoOptions');
+      }
       const ackBtn = $('#brain-owner-ack');
       if (ackBtn) {
         ackBtn.textContent = tr('brain.ownerAskAck');
         ackBtn.disabled = Boolean(state.brainBusy);
       }
+      const oldOptions = askBox.querySelector('.brain-owner-options');
+      if (oldOptions) oldOptions.remove();
+      const askOptions = brainOwnerOptionsNode(ask);
+      if (askOptions) askBox.insertBefore(askOptions, ackBtn || null);
+    }
+    // 直接回复大脑：常驻输入框（没有待决定问题时也能主动给方向）。
+    const replyForm = $('#brain-reply-form');
+    if (replyForm) {
+      const replyLabel = replyForm.querySelector('.brain-tell-label');
+      if (replyLabel) replyLabel.textContent = tr('brain.tellLabel');
+      const replyInput = $('#brain-reply-input');
+      if (replyInput) {
+        replyInput.disabled = Boolean(state.brainBusy);
+        replyInput.placeholder = tr('brain.replyPlaceholder');
+      }
+      const replySend = $('#brain-reply-send');
+      if (replySend) {
+        replySend.textContent = tr('brain.replySend');
+        replySend.disabled = Boolean(state.brainBusy);
+      }
+    }
+    // 上次回复回显：大脑已收到主人的回答，等待下一轮思考。
+    const replyEcho = $('#brain-owner-reply');
+    if (replyEcho) {
+      const reply = brain.ownerReply && typeof brain.ownerReply === 'object' ? brain.ownerReply : null;
+      const replyText = reply ? (str(reply.text) || str(reply.label)) : '';
+      const showEcho = Boolean(replyText);
+      replyEcho.hidden = !showEcho;
+      replyEcho.textContent = showEcho
+        ? tr('brain.replyEcho', { text: shorten(replyText, 60), time: reply.at ? fmtRel(reply.at) : '' })
+        : '';
+      replyEcho.title = showEcho ? replyText : '';
     }
     // 六步思考摘要：卡片上展示 目标 / 进度 / 我来推进 三步
     const assessBox = $('#brain-assessment');
@@ -4347,13 +4418,19 @@
     if (!state.connected) return;
     try {
       const res = await api('/api/brain', { timeout: 12000 });
-      if (res && res.brain && typeof res.brain === 'object') state.brain = res.brain;
+      if (res && res.brain && typeof res.brain === 'object') {
+        state.brain = res.brain;
+        state.brainUnavailable = false;
+      }
       if (res && Array.isArray(res.decisions)) state.brainDecisions = res.decisions.slice(0, 20);
       if (state.brain) state.brainError = '';
     } catch (err) {
       if (err.status === 401) return handleAuthLost(err.message);
-      // 旧版 Hub 没有大脑接口：静默忽略，卡片保持隐藏
-      if (err.status === 404) state.brain = null;
+      // 旧版 Hub 没有大脑接口：静默忽略，卡片改成「未启用」占位
+      if (err.status === 404) {
+        state.brain = null;
+        state.brainUnavailable = true;
+      }
     } finally {
       renderBrainCard();
     }
@@ -4365,7 +4442,7 @@
     state.brain = brain;
     if (Array.isArray(brain.decisions)) state.brainDecisions = brain.decisions.slice(0, 20);
     state.brainError = '';
-    if (state.tab === 'goals') renderBrainCard();
+    if (state.tab === 'brain' && state.brainView === 'card') renderBrainCard();
     if (state.drawer.open && state.drawer.kind === 'brain' && !state.brainBusy) {
       void loadBrainDrawer({ preserveScroll: true });
     }
@@ -4419,6 +4496,59 @@
     }
   }
 
+  /** 大脑提问的可点选项（卡片与抽屉共用）：没有 options 时返回 null。 */
+  function brainOwnerOptionsNode(ask) {
+    const options = ask && Array.isArray(ask.options) ? ask.options : [];
+    const usable = options.filter((option) => option && str(option.label));
+    if (!usable.length) return null;
+    const wrap = el('div', { className: 'brain-owner-options' });
+    usable.forEach((option) => {
+      const label = str(option.label);
+      const detail = str(option.detail);
+      const id = str(option.id);
+      const btn = el(
+        'button',
+        { type: 'button', className: 'brain-owner-option', title: detail ? `${label}\n\n${detail}` : label },
+        el('span', { className: 'brain-owner-option-label', text: label }),
+        detail ? el('span', { className: 'brain-owner-option-detail', text: detail }) : null,
+      );
+      btn.addEventListener('click', () => { void chooseBrainOwnerOption(id, label); });
+      wrap.appendChild(btn);
+    });
+    // 旧版提问只有短标签、没有细节时，给主人一个「让大脑说清楚」的快捷出口。
+    const hasDetail = usable.some((option) => str(option.detail));
+    const more = el('button', {
+      type: 'button',
+      className: 'btn btn-ghost btn-sm brain-owner-ask-more',
+      text: tr(hasDetail ? 'brain.askMore' : 'brain.askDetail'),
+      title: tr('brain.askDetailRequest'),
+    });
+    more.addEventListener('click', () => { void replyBrainOwnerAsk(tr('brain.askDetailRequest')); });
+    wrap.appendChild(more);
+    return wrap;
+  }
+
+  /** 选择大脑提问里的一个选项：写入 ownerReply 后，下一轮思考会据此继续。 */
+  async function chooseBrainOwnerOption(optionId, label) {
+    const id = str(optionId);
+    if (!id || state.brainBusy) return;
+    state.brainBusy = true;
+    renderBrainCard();
+    try {
+      const res = await api('/api/brain/owner-ask/choose', { method: 'POST', body: { optionId: id }, timeout: 15000 });
+      if (res && res.brain && typeof res.brain === 'object') state.brain = res.brain;
+      state.brainError = '';
+      toast(tr('brain.ownerChooseDone', { label: str(label) }), 'success');
+    } catch (err) {
+      if (err.status === 401) return handleAuthLost(err.message);
+      toast(str(err && err.message) || tr('brain.ownerChooseFailed'), 'error');
+    } finally {
+      state.brainBusy = false;
+      renderBrainCard();
+      if (state.drawer.open && state.drawer.kind === 'brain') void loadBrainDrawer({ preserveScroll: true });
+    }
+  }
+
   /** 确认「需要主人」提醒：PATCH ownerAskAck 后刷新卡片与抽屉。 */
   async function ackBrainOwnerAsk() {
     if (state.brainBusy) return;
@@ -4437,6 +4567,61 @@
       renderBrainCard();
       if (state.drawer.open && state.drawer.kind === 'brain') void loadBrainDrawer({ preserveScroll: true });
     }
+  }
+
+  /**
+   * 主人自由输入回复大脑提问（选项之外的补充，例如「A」「先手动补投递」）：
+   * 写入 ownerReply 后，下一轮思考会据此继续。
+   * @returns {Promise<boolean>} 是否回复成功（用于清空输入框）
+   */
+  async function replyBrainOwnerAsk(text) {
+    const value = str(text).trim();
+    if (!value) {
+      toast(tr('brain.replyEmpty'), 'warn');
+      return false;
+    }
+    if (state.brainBusy) return false;
+    state.brainBusy = true;
+    renderBrainCard();
+    try {
+      const res = await api('/api/brain/owner-ask/reply', { method: 'POST', body: { text: value }, timeout: 15000 });
+      if (res && res.brain && typeof res.brain === 'object') state.brain = res.brain;
+      state.brainError = '';
+      toast(tr('brain.replyDone'), 'success');
+      return true;
+    } catch (err) {
+      if (err.status === 401) {
+        handleAuthLost(err.message);
+        return false;
+      }
+      toast(str(err && err.message) || tr('brain.replyFailed'), 'error');
+      return false;
+    } finally {
+      state.brainBusy = false;
+      renderBrainCard();
+      if (state.drawer.open && state.drawer.kind === 'brain') void loadBrainDrawer({ preserveScroll: true });
+    }
+  }
+
+  /** 大脑抽屉里的自由回复输入框（卡片上是静态表单，这里为抽屉动态生成）。 */
+  function brainReplyFormNode() {
+    const input = el('input', {
+      className: 'brain-owner-reply-input',
+      type: 'text',
+      attrs: { maxlength: '1000', autocomplete: 'off', placeholder: tr('brain.replyPlaceholder'), 'aria-label': tr('brain.replyPlaceholder') },
+    });
+    const send = el('button', { type: 'submit', className: 'btn btn-primary btn-sm', text: tr('brain.replySend') });
+    const form = el('form', { className: 'brain-tell-form' }, el('div', { className: 'brain-tell-row' }, input, send));
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      if (send.disabled) return;
+      send.disabled = true;
+      void replyBrainOwnerAsk(input.value).then((ok) => {
+        if (ok) input.value = '';
+        send.disabled = false;
+      });
+    });
+    return form;
   }
 
   function openBrainDrawer() {
@@ -4611,7 +4796,9 @@
               ? el('span', { className: 'brain-owner-ask-goal', text: tr('brain.ownerAskGoal', { id: shorten(str(drawerAsk.goalId), 16) }) })
               : null,
           ),
+          brainOwnerOptionsNode(drawerAsk),
           askAckBtn,
+          brainReplyFormNode(),
         ),
       ));
     }
@@ -4933,11 +5120,11 @@
       };
       state.journalError = '';
       state.journalDirty = false;
-      if (state.tab === 'journal') renderJournal();
+      if (state.tab === 'brain' && state.brainView === 'journal') renderJournal();
       return;
     }
     state.journalDirty = true;
-    if (state.tab === 'journal') scheduleJournalReload();
+    if (state.tab === 'brain' && state.brainView === 'journal') scheduleJournalReload();
   }
 
   function journalRefChip(kind, id) {
@@ -4965,10 +5152,53 @@
     return el('span', { className: 'journal-ref is-static', attrs: { title: id }, text: label });
   }
 
+  /** 手机端折叠用的箭头按钮（桌面端由 CSS 隐藏）。 */
+  function journalCollapseButton(open = false) {
+    return el('button', {
+      type: 'button',
+      className: 'journal-collapse-btn',
+      attrs: { 'data-journal-toggle': '1', 'aria-expanded': open ? 'true' : 'false', title: tr(open ? 'journal.collapse' : 'journal.expand') },
+      onclick: (event) => {
+        event.stopPropagation();
+        toggleJournalCard(event.currentTarget);
+      },
+    }, icon('chevron'));
+  }
+
+  /** 展开/收起心路卡片（条目或每日复盘）。 */
+  function toggleJournalCard(handle) {
+    const card = handle && handle.closest ? handle.closest('.journal-entry, .journal-summary-card') : null;
+    if (!card) return;
+    const open = !card.classList.contains('is-open');
+    card.classList.toggle('is-open', open);
+    const key = str(card.dataset.journalKey);
+    if (key) {
+      if (!(state.journalOpen instanceof Set)) state.journalOpen = new Set();
+      if (open) state.journalOpen.add(key);
+      else state.journalOpen.delete(key);
+    }
+    const btn = card.querySelector('[data-journal-toggle]');
+    if (btn) {
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      btn.title = tr(open ? 'journal.collapse' : 'journal.expand');
+    }
+  }
+
+  /** 渲染后恢复上次展开状态（手机端折叠默认收起）。 */
+  function journalRestoreOpen(card, key) {
+    card.dataset.journalKey = key;
+    if (!(state.journalOpen instanceof Set)) return false;
+    const open = state.journalOpen.has(key);
+    if (open) card.classList.add('is-open');
+    return open;
+  }
+
   function journalEntryNode(entry) {
     const kind = JOURNAL_KIND_META[entry.kind] ? entry.kind : 'thought';
     const meta = JOURNAL_KIND_META[kind];
     const node = el('article', { className: 'journal-entry', dataset: { kind } });
+    const entryKey = `entry:${str(entry.id) || [str(entry.at), str(entry.title), str(entry.text).slice(0, 24)].join('|')}`;
+    const open = journalRestoreOpen(node, entryKey);
     const head = el('div', { className: 'journal-entry-head' });
     const kindNode = el('span', { className: `journal-kind is-${meta.tone}` });
     kindNode.appendChild(icon(meta.iconName));
@@ -4979,11 +5209,12 @@
     if (str(refs.taskId)) head.appendChild(journalRefChip('task', str(refs.taskId)));
     if (str(refs.goalId)) head.appendChild(journalRefChip('goal', str(refs.goalId)));
     if (str(refs.decisionId)) head.appendChild(journalRefChip('decision', str(refs.decisionId)));
+    const text = str(entry.text);
+    if (text) head.appendChild(journalCollapseButton(open));
     node.appendChild(head);
     if (str(entry.title)) node.appendChild(goalRawText('h4', 'journal-entry-title', str(entry.title)));
-    const text = str(entry.text);
     if (text) {
-      const bodyNode = goalRawText('div', 'journal-entry-text', '');
+      const bodyNode = goalRawText('div', 'journal-entry-text journal-entry-body', '');
       bodyNode.innerHTML = renderMarkdownHtml(text);
       node.appendChild(bodyNode);
     }
@@ -4992,6 +5223,8 @@
 
   function journalSummaryCard(day) {
     const card = el('article', { className: 'journal-summary-card' });
+    const summaryKey = `summary:${str(day.date) || str(day.generatedAt) || 'current'}`;
+    const open = journalRestoreOpen(card, summaryKey);
     const head = el('div', { className: 'journal-summary-head' });
     head.appendChild(el('h4', { className: 'journal-summary-title', text: tr('journal.summaryTitle') }));
     const meta = el('div', { className: 'journal-summary-meta' });
@@ -5008,8 +5241,10 @@
         onclick: () => void generateJournalSummary(str(day.date)),
       }));
     }
+    head.appendChild(journalCollapseButton(open));
     card.appendChild(head);
-    if (str(day.error)) card.appendChild(el('p', { className: 'journal-summary-error', text: str(day.error) }));
+    const body = el('div', { className: 'journal-summary-body' });
+    if (str(day.error)) body.appendChild(el('p', { className: 'journal-summary-error', text: str(day.error) }));
     const highlights = Array.isArray(day.highlights) ? day.highlights.filter(Boolean) : [];
     if (highlights.length) {
       const chips = el('div', { className: 'journal-highlights' });
@@ -5018,7 +5253,7 @@
         if (!text) continue;
         chips.appendChild(el('span', { className: 'journal-highlight', text }));
       }
-      if (chips.childElementCount) card.appendChild(chips);
+      if (chips.childElementCount) body.appendChild(chips);
     }
     const stats = day.stats && typeof day.stats === 'object' ? day.stats : null;
     if (stats) {
@@ -5029,13 +5264,14 @@
       pieces.push(tr('journal.statsTotal', { n: num(stats.total, 0) }));
       if (num(stats.completedTasks, 0) > 0) pieces.push(tr('journal.statsCompleted', { n: stats.completedTasks }));
       if (num(stats.failedTasks, 0) > 0) pieces.push(tr('journal.statsFailed', { n: stats.failedTasks }));
-      card.appendChild(el('p', { className: 'journal-stats', text: pieces.join(' · ') }));
+      body.appendChild(el('p', { className: 'journal-stats', text: pieces.join(' · ') }));
     }
     if (str(day.summary)) {
       const md = el('div', { className: 'journal-summary-md' });
       md.innerHTML = renderMarkdownHtml(str(day.summary));
-      card.appendChild(md);
+      body.appendChild(md);
     }
+    if (body.childElementCount) card.appendChild(body);
     return card;
   }
 
@@ -5353,7 +5589,7 @@
     clearTimeout(brainstormRefreshTimer);
     brainstormRefreshTimer = setTimeout(() => {
       brainstormRefreshTimer = 0;
-      if (state.tab === 'brainstorm' && state.connected) void loadBrainstorm({ silent: true });
+      if (state.tab === 'brain' && state.brainView === 'brainstorm' && state.connected) void loadBrainstorm({ silent: true });
     }, 500);
   }
 
@@ -5374,7 +5610,7 @@
       state.brainstorm = { activeId: session.id, supported: true };
     }
     brainstormUpsertSummary(summary);
-    if (state.tab === 'brainstorm') renderBrainstorm();
+    if (state.tab === 'brain' && state.brainView === 'brainstorm') renderBrainstorm();
   }
 
   function selectBrainstormSession(id) {
@@ -5450,18 +5686,105 @@
     }
   }
 
+  const BRAINSTORM_MAX_ATTACHMENTS = 6;
+  const BRAINSTORM_ATTACHMENT_MAX_BYTES = 256 * 1024;
+  const BRAINSTORM_TEXT_EXTENSIONS = new Set([
+    'txt', 'md', 'markdown', 'json', 'jsonl', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx',
+    'py', 'ps1', 'psm1', 'sh', 'bat', 'cmd', 'html', 'htm', 'css', 'scss',
+    'yml', 'yaml', 'toml', 'ini', 'cfg', 'conf', 'sql', 'java', 'xml', 'csv',
+    'log', 'env', 'gitignore', 'dockerfile',
+  ]);
+
+  function formatAttachmentSize(size) {
+    const value = Number(size) || 0;
+    if (value < 1024) return `${value} B`;
+    if (value < 1024 * 1024) return `${(value / 1024).toFixed(value < 10240 ? 1 : 0)} KB`;
+    return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  function brainstormAttachmentsNode() {
+    const box = $('#brainstorm-attachments');
+    if (!box) return;
+    const items = arr(state.brainstormAttachments);
+    box.hidden = !items.length;
+    box.replaceChildren();
+    items.forEach((item, index) => {
+      box.appendChild(el('span', { className: 'brainstorm-attach-chip', title: str(item.name) },
+        icon('link'),
+        el('span', { className: 'brainstorm-attach-name' }, str(item.name)),
+        el('span', { className: 'brainstorm-attach-size' }, formatAttachmentSize(item.size)),
+        el('button', {
+          type: 'button',
+          className: 'brainstorm-attach-remove',
+          dataset: { removeBrainstormAttachment: String(index) },
+          attrs: { 'aria-label': tr('brainstorm.removeAttachment'), title: tr('brainstorm.removeAttachment') },
+        }, icon('x'))));
+    });
+  }
+
+  async function addBrainstormFiles(fileList) {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+    const current = arr(state.brainstormAttachments).slice();
+    for (const file of files) {
+      if (current.length >= BRAINSTORM_MAX_ATTACHMENTS) {
+        toast(tr('brainstorm.attachmentsFull', { n: BRAINSTORM_MAX_ATTACHMENTS }), 'warn');
+        break;
+      }
+      const name = str(file && file.name) || 'file';
+      if (!file || file.size > BRAINSTORM_ATTACHMENT_MAX_BYTES) {
+        toast(tr('brainstorm.attachmentTooLarge', { name }), 'warn');
+        continue;
+      }
+      const ext = (name.includes('.') ? name.split('.').pop() : '').toLowerCase();
+      const looksText = BRAINSTORM_TEXT_EXTENSIONS.has(ext) || String(file.type || '').startsWith('text/');
+      if (!looksText) {
+        toast(tr('brainstorm.attachmentNotText', { name }), 'warn');
+        continue;
+      }
+      let text = '';
+      try {
+        text = typeof file.text === 'function' ? await file.text() : '';
+      } catch {
+        toast(tr('brainstorm.attachmentReadFailed', { name }), 'error');
+        continue;
+      }
+      if (!str(text).trim()) {
+        toast(tr('brainstorm.attachmentEmpty', { name }), 'warn');
+        continue;
+      }
+      current.push({ name, size: Number(file.size) || text.length, text });
+    }
+    state.brainstormAttachments = current;
+    renderBrainstorm();
+  }
+
+  function removeBrainstormAttachment(index) {
+    const position = Number(index);
+    if (!Number.isInteger(position) || position < 0) return;
+    state.brainstormAttachments = arr(state.brainstormAttachments).filter((_, i) => i !== position);
+    renderBrainstorm();
+  }
+
   async function sendBrainstorm() {
     if (state.brainstormSending || !state.connected) return;
     const input = $('#brainstorm-input');
     if (!input) return;
     const message = str(input.value).trim();
     if (!message) return;
+    const attachments = arr(state.brainstormAttachments).map((item) => ({ name: item.name, text: item.text }));
+    const attachmentMeta = attachments.map((item) => ({
+      name: item.name,
+      size: threadByteLength(item.text),
+    }));
     const sessionId = brainstormCurrentId();
     const now = new Date().toISOString();
     const previous = state.brainstormSession;
+    const optimisticUser = { id: `local_${Date.now()}`, role: 'user', at: now, text: message };
+    if (attachmentMeta.length) optimisticUser.attachments = attachmentMeta;
     const optimisticMessages = previous && sessionId
-      ? arr(previous.messages).concat([{ id: `local_${Date.now()}`, role: 'user', at: now, text: message }])
-      : [{ id: `local_${Date.now()}`, role: 'user', at: now, text: message }];
+      ? arr(previous.messages).concat([optimisticUser])
+      : [optimisticUser];
     state.brainstormSession = previous && sessionId
       ? { ...previous, messages: optimisticMessages }
       : { id: '', title: tr('brainstorm.sessionTitleFallback'), createdAt: now, updatedAt: now, messages: optimisticMessages };
@@ -5471,11 +5794,17 @@
     renderBrainstorm(true);
     try {
       const body = sessionId ? { sessionId, message } : { message };
+      if (attachments.length) body.attachments = attachments;
       const res = await api('/api/brainstorm/chat', { method: 'POST', body, timeout: 130000 });
       if (res && res.session) {
         state.brainstormSession = res.session;
         state.brainstorm = { activeId: res.session.id, supported: true };
         brainstormUpsertSummary(brainstormSessionSummaryFrom(res.session));
+        state.brainstormAttachments = [];
+        const errors = arr(res.attachmentErrors).filter(Boolean);
+        if (errors.length) {
+          toast(tr('brainstorm.attachmentErrors', { message: errors.join('；') }), 'warn');
+        }
       }
       if (!res || !res.session) state.brainstormSession = previous;
     } catch (err) {
@@ -5494,6 +5823,18 @@
       renderBrainstorm(true);
       if (input) input.focus();
     }
+  }
+
+  /** UTF-8 字节数（仅用于附件元数据显示，浏览器无 Buffer）。 */
+  function threadByteLength(text) {
+    if (typeof TextEncoder === 'function') {
+      try {
+        return new TextEncoder().encode(String(text || '')).length;
+      } catch {
+        return String(text || '').length;
+      }
+    }
+    return String(text || '').length;
   }
 
   async function brainstormToTask(sessionId, messageId, goalId) {
@@ -5626,9 +5967,17 @@
   function brainstormMessageNode(sessionId, message) {
     const role = str(message && message.role) === 'user' ? 'user' : 'assistant';
     if (role === 'user') {
-      return el('div', { className: 'brainstorm-msg brainstorm-msg-user' },
-        el('div', { className: 'brainstorm-bubble' },
-          goalRawText('div', 'brainstorm-bubble-text', brainstormTextOf(message))));
+      const bubble = el('div', { className: 'brainstorm-bubble' },
+        goalRawText('div', 'brainstorm-bubble-text', brainstormTextOf(message)));
+      const files = arr(message && message.attachments);
+      if (files.length) {
+        bubble.appendChild(el('div', { className: 'brainstorm-msg-files' },
+          ...files.map((item) => el('span', { className: 'brainstorm-file-chip', title: str(item.path) || str(item.name) },
+            icon('link'),
+            el('span', { className: 'brainstorm-file-name' }, str(item.name)),
+            item.size ? el('span', { className: 'brainstorm-file-size' }, formatAttachmentSize(item.size)) : null))));
+      }
+      return el('div', { className: 'brainstorm-msg brainstorm-msg-user' }, bubble);
     }
     const text = brainstormTextOf(message);
     const messageId = str(message && message.id);
@@ -5705,6 +6054,13 @@
     }
     const reloadBtn = $('#brainstorm-reload');
     if (reloadBtn) reloadBtn.disabled = state.brainstormBusy;
+    const hint = $('#brainstorm-hint');
+    if (hint) {
+      hint.textContent = arr(state.brainstormAttachments).length
+        ? tr('brainstorm.attachHint')
+        : tr('brainstorm.hint');
+    }
+    brainstormAttachmentsNode();
     if (sessionsBox) {
       sessionsBox.replaceChildren();
       if (!state.brainstormSessions.length) {
@@ -5736,238 +6092,6 @@
     }
   }
 
-  /* ==================================================================
-   * 心智（Soul / Skill）：编辑大脑每轮思考时随快照交给 Agnes 的提示段
-   * ================================================================== */
-  function mindLimits() {
-    const limits = state.mind && state.mind.limits && typeof state.mind.limits === 'object' ? state.mind.limits : {};
-    const pick = (value, fallback) => {
-      const n = Number(value);
-      return Number.isFinite(n) && n > 0 ? Math.round(n) : fallback;
-    };
-    return {
-      soul: pick(limits.soul, MIND_FIELD_LIMITS.soul),
-      skill: pick(limits.skill, MIND_FIELD_LIMITS.skill),
-    };
-  }
-
-  function mindDefaults() {
-    const defaults = state.mind && state.mind.defaults && typeof state.mind.defaults === 'object' ? state.mind.defaults : {};
-    return { soul: str(defaults.soul), skill: str(defaults.skill) };
-  }
-
-  function mindFieldEl(field) {
-    if (field === 'soul') return $('#mind-soul');
-    if (field === 'skill') return $('#mind-skill');
-    return null;
-  }
-
-  function mindText(field) {
-    const fieldEl = mindFieldEl(field);
-    return fieldEl ? fieldEl.value : '';
-  }
-
-  function mindTrimmed(field) {
-    return mindText(field).trim();
-  }
-
-  function mindIsDirtyNow() {
-    const mind = state.mind;
-    if (!mind) return false;
-    return mindTrimmed('soul') !== str(mind.soul).trim() || mindTrimmed('skill') !== str(mind.skill).trim();
-  }
-
-  function renderMind() {
-    const section = $('#section-mind');
-    if (!section) return;
-    const limits = mindLimits();
-    const defaults = mindDefaults();
-    const mind = state.mind;
-    const loaded = state.mindLoaded && !!mind;
-    const editable = loaded && !state.mindBusy;
-    ['soul', 'skill'].forEach((field) => {
-      const fieldEl = mindFieldEl(field);
-      if (!fieldEl) return;
-      // 有未保存修改时不覆盖用户输入；否则跟随服务端内容
-      if (!state.mindDirty && loaded && document.activeElement !== fieldEl) {
-        const nextValue = field === 'soul' ? str(mind.soul) : str(mind.skill);
-        if (fieldEl.value !== nextValue) fieldEl.value = nextValue;
-      }
-      if (!fieldEl.value && !loaded) fieldEl.placeholder = tr('mind.loading');
-      fieldEl.disabled = !editable && !state.mindDirty;
-      const value = fieldEl.value;
-      const countEl = field === 'soul' ? $('#mind-soul-count') : $('#mind-skill-count');
-      if (countEl) {
-        countEl.textContent = tr('mind.charCount', { n: value.length, max: limits[field] });
-        countEl.classList.toggle('is-over', value.length > limits[field]);
-      }
-      const badgeEl = field === 'soul' ? $('#mind-soul-badge') : $('#mind-skill-badge');
-      if (badgeEl) {
-        const isDefault = !!defaults[field] && value.trim() === defaults[field].trim();
-        badgeEl.textContent = tr(isDefault ? 'mind.badgeDefault' : 'mind.badgeCustom');
-        badgeEl.classList.toggle('is-custom', !isDefault);
-      }
-    });
-    const dirtyEl = $('#mind-dirty');
-    if (dirtyEl) dirtyEl.hidden = !state.mindDirty;
-    const updatedEl = $('#mind-updated');
-    if (updatedEl) {
-      updatedEl.textContent = mind && mind.updatedAt
-        ? tr('mind.updatedAt', { time: fmtDateTime(mind.updatedAt) })
-        : tr('mind.neverUpdated');
-    }
-    const errorEl = $('#mind-error');
-    if (errorEl) {
-      const message = state.mindError || (state.mindServerUpdated ? tr('mind.serverUpdated') : '');
-      errorEl.textContent = message;
-      errorEl.hidden = !message;
-    }
-    const saveLabel = $('#mind-save-label');
-    if (saveLabel) saveLabel.textContent = state.mindBusy ? tr('mind.saving') : tr('mind.save');
-    const saveBtn = $('#mind-save');
-    if (saveBtn) saveBtn.disabled = state.mindBusy || !state.mindDirty;
-    const soulReset = $('#mind-soul-reset');
-    if (soulReset) soulReset.disabled = state.mindBusy || !loaded;
-    const skillReset = $('#mind-skill-reset');
-    if (skillReset) skillReset.disabled = state.mindBusy || !loaded;
-    const resetAll = $('#mind-reset-all');
-    if (resetAll) resetAll.disabled = state.mindBusy || !loaded;
-    const previewText = $('#mind-preview-text');
-    if (previewText) {
-      const combined = loaded ? `${str(mind.soul).trim()}\n\n${str(mind.skill).trim()}`.trim() : '';
-      previewText.textContent = combined ? combined.slice(0, 600) : tr('mind.previewEmpty');
-      previewText.classList.toggle('is-empty', !combined);
-    }
-    const previewSummary = $('#mind-preview summary');
-    if (previewSummary) previewSummary.textContent = tr('mind.previewTitle');
-  }
-
-  async function loadMind({ silent = false } = {}) {
-    if (!state.connected) return;
-    try {
-      const res = await api('/api/mind', { timeout: 12000 });
-      if (res && res.mind && typeof res.mind === 'object') state.mind = res.mind;
-      state.mindLoaded = true;
-      state.mindError = '';
-      state.mindServerUpdated = false;
-    } catch (err) {
-      if (err && err.status === 401) return handleAuthLost(err.message);
-      state.mindError = err && err.status === 404 ? tr('mind.unsupported') : str(err && err.message) || tr('mind.loadFailed');
-      if (!silent) toast(state.mindError, 'error');
-    } finally {
-      renderMind();
-    }
-  }
-
-  function ensureMindLoaded() {
-    if (!state.connected || state.mindLoaded || state.mindBusy) return;
-    void loadMind();
-  }
-
-  function onMindUpdated(payload) {
-    const mind = payload && payload.mind && typeof payload.mind === 'object' ? payload.mind : null;
-    if (!mind) return;
-    state.mind = mind;
-    state.mindLoaded = true;
-    if (!state.mindDirty) {
-      state.mindError = '';
-      state.mindServerUpdated = false;
-      renderMind();
-      return;
-    }
-    // 用户正在编辑：只提示服务端已更新，不覆盖未保存内容
-    state.mindServerUpdated = true;
-    renderMind();
-  }
-
-  function updateMindDirty() {
-    state.mindDirty = mindIsDirtyNow();
-    if (!state.mindDirty) state.mindServerUpdated = false;
-    renderMind();
-  }
-
-  function mindValidationError() {
-    const limits = mindLimits();
-    const soul = mindTrimmed('soul');
-    const skill = mindTrimmed('skill');
-    if (!soul) return tr('mind.emptySoul');
-    if (!skill) return tr('mind.emptySkill');
-    if (soul.length > limits.soul) return tr('mind.tooLong', { field: tr('mind.soulTitle'), max: limits.soul });
-    if (skill.length > limits.skill) return tr('mind.tooLong', { field: tr('mind.skillTitle'), max: limits.skill });
-    return '';
-  }
-
-  async function saveMind() {
-    if (state.mindBusy) return;
-    const validation = mindValidationError();
-    if (validation) {
-      state.mindError = validation;
-      renderMind();
-      toast(validation, 'warn');
-      return;
-    }
-    state.mindBusy = true;
-    state.mindError = '';
-    renderMind();
-    try {
-      const res = await api('/api/mind', {
-        method: 'PATCH',
-        body: { soul: mindTrimmed('soul'), skill: mindTrimmed('skill') },
-        timeout: 20000,
-      });
-      if (res && res.mind && typeof res.mind === 'object') state.mind = res.mind;
-      state.mindLoaded = true;
-      state.mindDirty = false;
-      state.mindServerUpdated = false;
-      toast(tr('mind.saved'), 'success');
-    } catch (err) {
-      if (err && err.status === 401) return handleAuthLost(err.message);
-      state.mindError = tr('mind.saveFailed', { message: str(err && err.message) || tr('mind.loadFailed') });
-      toast(state.mindError, 'error');
-    } finally {
-      state.mindBusy = false;
-      renderMind();
-    }
-  }
-
-  async function resetMind({ field = '' } = {}) {
-    if (state.mindBusy) return;
-    if (!field) {
-      const ok = await confirmDialog({
-        title: tr('mind.resetAll'),
-        message: tr('mind.resetAllConfirm'),
-        okText: tr('mind.resetAll'),
-      });
-      if (!ok) return;
-    }
-    const body = field === 'soul'
-      ? { resetSoul: true }
-      : field === 'skill'
-        ? { resetSkill: true }
-        : { resetSoul: true, resetSkill: true };
-    state.mindBusy = true;
-    state.mindError = '';
-    renderMind();
-    try {
-      const res = await api('/api/mind', { method: 'PATCH', body, timeout: 20000 });
-      if (res && res.mind && typeof res.mind === 'object') state.mind = res.mind;
-      state.mindLoaded = true;
-      state.mindDirty = false;
-      state.mindServerUpdated = false;
-      toast(tr('mind.resetDone'), 'success');
-    } catch (err) {
-      if (err && err.status === 401) return handleAuthLost(err.message);
-      state.mindError = tr('mind.resetFailed', { message: str(err && err.message) || tr('mind.loadFailed') });
-      toast(state.mindError, 'error');
-    } finally {
-      state.mindBusy = false;
-      renderMind();
-    }
-  }
-
-  /* ==================================================================
-   * 提醒（浏览器内只做管理，通知由手机 APK 的原生 AlarmManager 发出）
-   * ================================================================== */
   const REMINDER_REPEATS = ['none', 'daily', 'weekly'];
   const REMINDER_NOTIFY_STYLES = ['gentle', 'alarm'];
 
@@ -6909,6 +7033,38 @@
     );
     wrap.appendChild(languageSection);
 
+    // 派发与母机：项目亲和 / 线程亲和之后，任务的默认归属主机。
+    const devices = [...(state.devices instanceof Map ? state.devices.values() : [])]
+      .filter((device) => device && device.id)
+      .sort((a, b) => deviceDisplayName(a).localeCompare(deviceDisplayName(b), 'zh-CN'));
+    const currentMain = (state.settings && state.settings.mainDeviceId) || '';
+    const mainSelect = el('select', {
+      id: 'main-device',
+      className: 'settings-select',
+      attrs: { 'aria-label': '母机（默认执行主机）' },
+    });
+    const autoOption = el('option', { value: '', text: '本机（自动识别）' });
+    if (!currentMain) autoOption.selected = true;
+    mainSelect.appendChild(autoOption);
+    for (const device of devices) {
+      const label = `${deviceDisplayName(device)}${device.disabled ? '（已禁用）' : ''}`;
+      const option = el('option', { value: device.id, text: label });
+      if (device.id === currentMain) option.selected = true;
+      mainSelect.appendChild(option);
+    }
+    if (currentMain && !devices.some((device) => device.id === currentMain)) {
+      const stale = el('option', { value: currentMain, text: `未知设备（${currentMain}）` });
+      stale.selected = true;
+      mainSelect.appendChild(stale);
+    }
+    const routingSection = el('section', { className: 'settings-section' },
+      el('h3', { text: '派发与母机' }),
+      el('p', { className: 'settings-note', text: '任务优先派给「项目上次成功执行的设备」，其次「同一线程上次执行的主机」，最后这台母机；母机离线或并发已满时任务会排队等待，不会改派给没有项目上下文的设备。显式指定设备（instructions 里的设备要求）仍然优先级最高。' }),
+      el('div', { className: 'settings-actions' }, mainSelect),
+      el('p', { className: 'settings-note', text: '「本机（自动识别）」= Hub 所在主机，或带「本机」标签的设备。选择后立即生效并写入 Hub 状态；任务失败后手动重试会继续留在原主机。' }),
+    );
+    wrap.appendChild(routingSection);
+
     const maintenance = el('section', { className: 'settings-section' },
       el('h3', { text: '系统维护' }),
       el('p', { className: 'settings-note', text: '重启会先通知所有在线设备代理自我重启，随后 Hub 自动重启；运行中的任务会自动重新排队（不占用重试次数）。' }),
@@ -6976,6 +7132,11 @@
       }
     });
     wrap.addEventListener('change', (event) => {
+      const mainDevice = event.target.closest('#main-device');
+      if (mainDevice) {
+        void changeMainDevice(mainDevice.value);
+        return;
+      }
       const select = event.target.closest('#system-language');
       if (!select || !I18N) return;
       void changeLanguage(select.value);
@@ -7018,10 +7179,23 @@
     }
   }
 
+  async function changeMainDevice(deviceId) {
+    const target = typeof deviceId === 'string' ? deviceId : '';
+    try {
+      const res = await api('/api/settings', { method: 'PATCH', body: { mainDeviceId: target } });
+      if (res && res.settings) state.settings = res.settings;
+      toast(target ? '母机已更新：新任务会优先留在该主机' : '母机已改为本机自动识别', 'success');
+      refreshSettings();
+    } catch (err) {
+      if (err.status === 401) handleAuthLost(err.message);
+      else toast(err.message || '保存母机设置失败', 'error');
+    }
+  }
+
   function refreshSettings() {
     const wrap = $('#settings-inline-body');
     if (wrap && state.connected && !$('#app-view').hidden) {
-      const settingsTabActive = !isMobile() || state.tab === 'settings';
+      const settingsTabActive = isMobile() && state.tab === 'settings';
       if (settingsTabActive) wrap.replaceChildren(buildSettings());
     }
     if (state.drawer.open && state.drawer.kind === 'settings') {
@@ -7738,7 +7912,8 @@
         kv('平台', `${device.platform || '—'} / ${device.kind || '—'}`),
         kv('注册时间', fmtDateTime(device.registeredAt)),
         kv('最后心跳', fmtDateTime(device.lastSeenAt)),
-        kv('标签', tagsOf(device).join('、') || '—'),
+        kv('标签', manifestTagsOf(device).join('、') || '—'),
+        kv('自动标签', arr(device.autoTags).join('、') || '—'),
       ),
     );
     body.appendChild(infoSection);
@@ -8086,10 +8261,23 @@
         kv('优先级', String(num(task.priority, 5))),
         kv('超时', Number.isFinite(task.timeoutSec) ? `${task.timeoutSec} 秒` : '—'),
         kv('尝试次数', `${num(task.attempts, 0)} / ${num(task.maxAttempts, 1)}`),
+        kv('执行器', (() => {
+          const data = task.output && task.output.data ? task.output.data : {};
+          if (!data.executor) return '—';
+          const backend = data.backend && data.backend !== data.executor ? `（${data.backend}）` : '';
+          return `${data.executor === 'cli' ? '本机 CLI' : data.executor}${backend}`;
+        })()),
+        kv('模型', (() => {
+          const data = task.output && task.output.data ? task.output.data : {};
+          return data.model || requirements.model || '—';
+        })()),
         kv('耗时', (() => {
           const duration = durationView(task);
           return duration ? duration.text : '—';
         })()),
+        ACTIVE_STATUS.has(status) && task.startedAt
+          ? kv('已运行', fmtDuration(Date.now() - Date.parse(task.startedAt)))
+          : null,
         kv('创建时间', fmtDateTime(task.createdAt)),
         kv('开始时间', task.startedAt ? fmtDateTime(task.startedAt) : '—'),
         kv('结束时间', task.finishedAt ? fmtDateTime(task.finishedAt) : '—'),
@@ -8179,9 +8367,13 @@
       body.appendChild(outSection);
     }
     if (task.error && normStatus(task.status) !== 'completed') {
+      const stalledHint = /超时|stalled|无进度|硬上限|timeout/i.test(task.error)
+        ? '本机 CLI 单次执行有硬性上限：建议把任务拆成 2–3 个更小的任务（实现 / 发布 / 验证），或创建时把 timeoutSec 调大（如 900–1800 秒）后重试。卡死类失败在尝试次数内会自动重排一次。'
+        : '';
       const errSection = el('section', { className: 'detail-section' },
         el('div', { className: 'detail-section-head' }, el('h3', { text: '错误' })),
         el('div', { className: 'task-error' }, icon('alert'), el('span', { text: task.error })),
+        stalledHint ? el('p', { className: 'detail-hint', text: stalledHint }) : null,
       );
       body.appendChild(errSection);
     }
@@ -8628,9 +8820,38 @@
     }
   }
 
+  /**
+   * 解析地址栏 hash，返回 { cat, brainView }。
+   * 兼容旧链接：#status / #command / #journal / #brainstorm / #mind，
+   * 新链接：#overview / #tasks / #brain / #brain:journal / #brain:brainstorm / #goals / #reminders / #developer。
+   */
   function currentTabFromHash() {
-    const hash = (window.location.hash || '').replace('#', '').trim();
-    return TABS.has(hash) ? hash : 'status';
+    const raw = String(window.location.hash || '').replace(/^#/, '').trim().toLowerCase();
+    if (!raw) return { cat: DEFAULT_CAT, brainView: 'card' };
+    const idx = raw.indexOf(':');
+    const head = idx >= 0 ? raw.slice(0, idx) : raw;
+    const sub = idx >= 0 ? raw.slice(idx + 1) : '';
+    const cat = normalizeTab(head);
+    if (cat === 'brain') {
+      if (sub === 'journal' || sub === 'brainstorm' || sub === 'card') return { cat, brainView: sub };
+      if (head === 'journal') return { cat, brainView: 'journal' };
+      if (head === 'brainstorm') return { cat, brainView: 'brainstorm' };
+      return { cat, brainView: 'card' };
+    }
+    if (cat) return { cat, brainView: 'card' };
+    return { cat: DEFAULT_CAT, brainView: 'card' };
+  }
+
+  /** 把当前分类写回地址栏 hash（不产生历史记录）。 */
+  function syncTabHash(cat = state.tab, brainView = state.brainView) {
+    const next = cat === 'brain' && brainView && brainView !== 'card'
+      ? `${cat}:${brainView}`
+      : cat;
+    try {
+      history.replaceState(null, '', '#' + next);
+    } catch {
+      /* ignore */
+    }
   }
 
   function devRememberJob(id) {
@@ -8849,46 +9070,110 @@
     updateMobileNavPosition(nav, $('#nav-toggle'));
   }
 
-  function setTab(tab, { scroll = true } = {}) {
-    const next = TABS.has(tab) ? tab : 'status';
-    // 心智页有未保存修改时先确认，避免切换 tab 丢失编辑
-    if (state.tab === 'mind' && next !== 'mind' && state.mindDirty) {
-      void confirmDialog({
-        title: tr('mind.leaveTitle'),
-        message: tr('mind.leaveMessage'),
-        okText: tr('mind.leaveOk'),
-        danger: false,
-      }).then((ok) => {
-        if (!ok) return;
-        state.mindDirty = false;
-        renderMind();
-        setTab(next, { scroll });
-      });
-      return;
-    }
-    state.tab = next;
-    $$('.mobile-tab').forEach((btn) => {
-      const on = btn.dataset.tab === next;
+  /** 手机底部导航的一级分类（其余分类收进「更多」二级菜单）。 */
+  const MOBILE_PRIMARY_CATS = new Set(['overview', 'tasks', 'brain', 'goals', 'reminders']);
+
+  function closeMobileMore() {
+    const menu = $('#mobile-more-menu');
+    const btn = $('#nav-more');
+    if (menu) menu.hidden = true;
+    if (btn) btn.setAttribute('aria-expanded', 'false');
+  }
+
+  function toggleMobileMore(force) {
+    const menu = $('#mobile-more-menu');
+    const btn = $('#nav-more');
+    if (!menu || !btn) return;
+    const open = typeof force === 'boolean' ? force : menu.hidden;
+    menu.hidden = !open;
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+
+  /** 按分类刷新桌面/手机导航与各分类视图的显隐；大脑分类额外切换二级视图。 */
+  function applyCategoryView(cat, brainView) {
+    $$('.cat-tab').forEach((btn) => {
+      const on = btn.dataset.tab === cat;
       btn.classList.toggle('is-active', on);
       btn.setAttribute('aria-selected', on ? 'true' : 'false');
     });
-    $$('[data-tab-panel]').forEach((panel) => {
-      panel.classList.toggle('is-active', panel.dataset.tabPanel === next);
+    $$('.mobile-tab').forEach((btn) => {
+      const on = Boolean(btn.dataset.tab) && btn.dataset.tab === cat;
+      btn.classList.toggle('is-active', on);
+      btn.setAttribute('aria-selected', on ? 'true' : 'false');
     });
-    if (next === 'settings') {
+    const moreBtn = $('#nav-more');
+    if (moreBtn) {
+      const on = !MOBILE_PRIMARY_CATS.has(cat);
+      moreBtn.classList.toggle('is-active', on);
+      moreBtn.setAttribute('aria-selected', on ? 'true' : 'false');
+    }
+    $$('.mobile-more-item').forEach((item) => {
+      const on = item.dataset.moreAction === cat;
+      item.classList.toggle('is-active', on);
+      item.setAttribute('aria-current', on ? 'true' : 'false');
+    });
+    $$('[data-cat-view]').forEach((view) => {
+      const on = view.dataset.catView === cat;
+      view.hidden = !on;
+      view.classList.toggle('is-active', on);
+    });
+    $$('.brain-subtab').forEach((btn) => {
+      const on = cat === 'brain' && btn.dataset.brainView === brainView;
+      btn.classList.toggle('is-active', on);
+      btn.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    $$('[data-brain-panel]').forEach((panel) => {
+      panel.hidden = cat !== 'brain' || panel.dataset.brainPanel !== brainView;
+    });
+    const page = $('#page');
+    if (page) page.dataset.cat = cat;
+    if (cat === 'settings') {
+      const inline = $('#section-settings');
+      if (inline) inline.hidden = !isMobile();
+    }
+  }
+
+  /** 概览「快速入口」上的数字/时间提示。 */
+  function renderQuickNav() {
+    const view = statsView();
+    const activeTasks = view.running + view.assigned + view.queued + view.waiting;
+    setText('#quick-tasks-meta', activeTasks > 0 ? `${activeTasks} 个进行中` : '暂无进行中');
+    const brain = state.brain;
+    setText('#quick-brain-meta', !brain
+      ? (state.brainUnavailable ? '未启用' : '未连接')
+      : (brain.lastThinkAt ? tx(fmtRel(brain.lastThinkAt)) : '待思考'));
+    const goals = arr(state.goals).filter((goal) => goal && goal.id && goal.status !== 'completed').length;
+    setText('#quick-goals-meta', goals > 0 ? `${goals} 个未完成` : (state.goalsLoaded ? '暂无目标' : '—'));
+    const activeReminders = state.reminders.filter((item) => item && item.enabled !== false).length;
+    setText('#quick-reminders-meta', state.remindersLoaded ? (activeReminders > 0 ? `${activeReminders} 个启用` : '暂无提醒') : '—');
+  }
+
+  function setTab(tab, { scroll = true, brainView = null } = {}) {
+    let next = normalizeTab(tab);
+    if (!next) next = DEFAULT_CAT;
+    // 桌面端没有「设置」分类页：改为打开右上角设置抽屉（手机端仍保留分类页）。
+    if (next === 'settings' && !isMobile()) {
+      openSettingsDrawer();
+      next = DEFAULT_CAT;
+    }
+    state.tab = next;
+    if (next === 'brain') state.brainView = brainViewOrDefault(brainView || state.brainView);
+    applyCategoryView(next, state.brainView);
+    closeMobileMore();
+    if (next === 'settings' && isMobile()) {
       const body = $('#settings-inline-body');
       if (body) body.replaceChildren(buildSettings());
     }
     if (next === 'developer') void resumeDevJob();
     if (next === 'reminders') ensureRemindersLoaded();
-    if (next === 'journal') void ensureJournalLoaded();
-    if (next === 'brainstorm') ensureBrainstormLoaded();
-    if (next === 'mind') ensureMindLoaded();
-    if (next === 'goals') {
-      ensureGoalsLoaded();
-      void refreshBrain();
+    if (next === 'goals') ensureGoalsLoaded();
+    if (next === 'brain') {
+      if (state.brainView === 'card' || !state.brain) void refreshBrain();
+      if (state.brainView === 'journal') void ensureJournalLoaded();
+      if (state.brainView === 'brainstorm') ensureBrainstormLoaded();
     }
-    if (isMobile() && scroll) {
+    renderQuickNav();
+    if (scroll) {
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
   }
@@ -8919,6 +9204,16 @@
       state.autoOpenDone = true;
       setTab('goals');
       if (id && goalById(id)) openGoalDrawer(id);
+    } else if (kind === 'brain') {
+      state.autoOpenDone = true;
+      setTab('brain', { brainView: 'card' });
+      void refreshBrain();
+      const brainCard = $('#brain-card');
+      if (brainCard) {
+        brainCard.classList.add('is-flash');
+        window.setTimeout(() => brainCard.classList.remove('is-flash'), 2400);
+        window.setTimeout(() => brainCard.scrollIntoView({ behavior: 'smooth', block: 'center' }), 120);
+      }
     } else if (kind === 'reminders') {
       state.autoOpenDone = true;
       setTab('reminders');
@@ -9125,6 +9420,28 @@
     if (brainToggle) brainToggle.addEventListener('click', () => void toggleBrain());
     const brainOwnerAck = $('#brain-owner-ack');
     if (brainOwnerAck) brainOwnerAck.addEventListener('click', () => void ackBrainOwnerAsk());
+    const brainReplyForm = $('#brain-reply-form');
+    if (brainReplyForm) {
+      brainReplyForm.addEventListener('submit', (event) => {
+        event.preventDefault();
+        const replyInput = $('#brain-reply-input');
+        const replySend = $('#brain-reply-send');
+        if (replySend && replySend.disabled) return;
+        if (replySend) replySend.disabled = true;
+        void replyBrainOwnerAsk(replyInput ? replyInput.value : '').then((ok) => {
+          if (ok && replyInput) replyInput.value = '';
+          if (replySend) replySend.disabled = false;
+        });
+      });
+    }
+    const brainAskDetail = $('#brain-ask-detail');
+    if (brainAskDetail) {
+      brainAskDetail.addEventListener('click', () => {
+        if (brainAskDetail.disabled) return;
+        brainAskDetail.disabled = true;
+        void replyBrainOwnerAsk(tr('brain.askDetailRequest')).then(() => { brainAskDetail.disabled = false; });
+      });
+    }
 
     /* 管家心路 */
     const journalSummaryNow = $('#journal-summary-now');
@@ -9150,6 +9467,25 @@
         if (event.target.closest('#journal-enabled') || event.target.closest('#journal-time')) {
           void saveJournalSettings();
         }
+      });
+    }
+
+    /* 心路内容区：手机端折叠展开 + 每日复盘重生成 */
+    const journalBody = $('#journal-body');
+    if (journalBody) {
+      journalBody.addEventListener('click', (event) => {
+        const toggle = event.target.closest('[data-journal-toggle]');
+        if (toggle) {
+          toggleJournalCard(toggle);
+          return;
+        }
+        const dayBtn = event.target.closest('[data-journal-day-summary]');
+        if (dayBtn) {
+          void generateJournalSummary(dayBtn.dataset.journalDaySummary);
+          return;
+        }
+        const head = event.target.closest('.journal-entry-head, .journal-summary-head');
+        if (head && !event.target.closest('button, a, input, select, textarea')) toggleJournalCard(head);
       });
     }
 
@@ -9180,6 +9516,25 @@
         if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.ctrlKey || event.metaKey) return;
         event.preventDefault();
         void sendBrainstorm();
+      });
+    }
+    const brainstormAttach = $('#brainstorm-attach');
+    const brainstormFile = $('#brainstorm-file');
+    if (brainstormAttach && brainstormFile) {
+      brainstormAttach.addEventListener('click', () => brainstormFile.click());
+      brainstormFile.addEventListener('change', () => {
+        const files = brainstormFile.files;
+        brainstormFile.value = '';
+        void addBrainstormFiles(files);
+      });
+    }
+    const brainstormAttachmentBox = $('#brainstorm-attachments');
+    if (brainstormAttachmentBox) {
+      brainstormAttachmentBox.addEventListener('click', (event) => {
+        const removeBtn = event.target.closest('[data-remove-brainstorm-attachment]');
+        if (!removeBtn) return;
+        event.preventDefault();
+        removeBrainstormAttachment(removeBtn.dataset.removeBrainstormAttachment);
       });
     }
     const brainstormSessions = $('#brainstorm-sessions');
@@ -9228,30 +9583,6 @@
         }
       });
     }
-
-    /* 心智 */
-    const mindEditors = $('#mind-editors');
-    if (mindEditors) {
-      mindEditors.addEventListener('input', () => updateMindDirty());
-      mindEditors.addEventListener('click', (event) => {
-        const resetBtn = event.target.closest('[data-mind-reset]');
-        if (resetBtn) {
-          event.preventDefault();
-          void resetMind({ field: resetBtn.dataset.mindReset });
-        }
-      });
-    }
-    const mindSave = $('#mind-save');
-    if (mindSave) mindSave.addEventListener('click', () => void saveMind());
-    const mindResetAll = $('#mind-reset-all');
-    if (mindResetAll) mindResetAll.addEventListener('click', () => void resetMind({}));
-    // 心智页有未保存修改时，刷新/关闭前给出浏览器原生提示
-    window.addEventListener('beforeunload', (event) => {
-      if (!state.mindDirty) return undefined;
-      event.preventDefault();
-      event.returnValue = '';
-      return '';
-    });
 
     const goalList = $('#goal-list');
     if (goalList) {
@@ -9330,8 +9661,9 @@
       });
     }
 
-    /* 手机 Tab / 汉堡菜单 */
+    /* 手机底部导航 */
     $$('.mobile-tab').forEach((btn) => {
+      if (btn.id === 'nav-more') return;
       btn.addEventListener('click', () => {
         if (btn.dataset.action === 'records') {
           setMobileNav(false);
@@ -9340,11 +9672,62 @@
         }
         setTab(btn.dataset.tab);
         setMobileNav(false);
-        try {
-          history.replaceState(null, '', '#' + btn.dataset.tab);
-        } catch {
-          /* ignore */
+        syncTabHash(state.tab, state.brainView);
+      });
+    });
+
+    /* 手机底部「更多」二级菜单（执行记录 / 开发 / 设置） */
+    const moreBtn = $('#nav-more');
+    const moreMenu = $('#mobile-more-menu');
+    if (moreBtn && moreMenu) {
+      moreBtn.addEventListener('click', (event) => {
+        event.stopPropagation();
+        toggleMobileMore();
+      });
+      moreMenu.addEventListener('click', (event) => {
+        const item = event.target.closest('[data-more-action]');
+        if (!item) return;
+        event.stopPropagation();
+        closeMobileMore();
+        const action = item.dataset.moreAction;
+        if (action === 'records') {
+          openRecordsDrawer();
+          return;
         }
+        setTab(action);
+        syncTabHash(state.tab, state.brainView);
+      });
+      document.addEventListener('click', (event) => {
+        if (moreMenu.hidden) return;
+        if (moreMenu.contains(event.target) || moreBtn.contains(event.target)) return;
+        closeMobileMore();
+      });
+      window.addEventListener('scroll', () => {
+        if (!moreMenu.hidden) closeMobileMore();
+      }, { passive: true });
+    }
+
+    /* 桌面分类导航 */
+    $$('.cat-tab').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        setTab(btn.dataset.tab);
+        syncTabHash(state.tab, state.brainView);
+      });
+    });
+
+    /* 大脑二级视图（自主大脑 / 心路 / 头脑风暴） */
+    $$('.brain-subtab').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        setTab('brain', { scroll: false, brainView: btn.dataset.brainView });
+        syncTabHash('brain', state.brainView);
+      });
+    });
+
+    /* 概览：快速入口 */
+    $$('.quick-nav-card').forEach((card) => {
+      card.addEventListener('click', () => {
+        setTab(card.dataset.goto);
+        syncTabHash(state.tab, state.brainView);
       });
     });
     const navToggle = $('#nav-toggle');
@@ -9360,10 +9743,13 @@
         setMobileNav(false);
       });
     }
-    window.addEventListener('hashchange', () => setTab(currentTabFromHash(), { scroll: false }));
+    window.addEventListener('hashchange', () => {
+      const parsed = currentTabFromHash();
+      setTab(parsed.cat, { scroll: false, brainView: parsed.brainView });
+    });
     MOBILE_MQ.addEventListener('change', () => {
       setMobileNav(false);
-      setTab(state.tab, { scroll: false });
+      setTab(state.tab, { scroll: false, brainView: state.brainView });
     });
 
     /* 键盘 */
@@ -9373,6 +9759,11 @@
         return;
       }
       if (event.key === 'Escape') {
+        const moreMenuEl = $('#mobile-more-menu');
+        if (moreMenuEl && !moreMenuEl.hidden) {
+          closeMobileMore();
+          return;
+        }
         const nav = $('#mobile-nav');
         if (nav && nav.classList.contains('is-open')) {
           setMobileNav(false);
@@ -9409,13 +9800,13 @@
       renderTasks();
       renderGoals();
       renderBrainCard();
-      renderMind();
-      if (state.tab === 'journal') ensureJournalLoaded();
-      if (state.tab === 'brainstorm') ensureBrainstormLoaded();
+      if (state.tab === 'brain' && state.brainView === 'journal') void ensureJournalLoaded();
+      if (state.tab === 'brain' && state.brainView === 'brainstorm') ensureBrainstormLoaded();
       renderReminders();
       renderNightlyReview();
       renderComposerOptions();
       renderActivity();
+      renderQuickNav();
       refreshSettings();
     } catch (err) {
       // 渲染异常不能让整个界面停摆

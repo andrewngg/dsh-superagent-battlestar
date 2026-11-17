@@ -7,8 +7,10 @@
  * 结构见 docs/GOAL-BRAIN-DESIGN.md §7。
  */
 
+const path = require('node:path');
 const protocol = require('../../shared/protocol.js');
 const util = require('./util.js');
+const { MAX_ATTACHMENTS, MAX_TOTAL_CHARS } = require('./file-reader.js');
 const { brainModelConfig, createBrainThinker } = require('./brain');
 
 const MAX_SESSIONS = 30;
@@ -45,6 +47,40 @@ function nowIso() {
   return protocol.nowIso();
 }
 
+/** 附件元数据（消息里只存名称/路径/大小，不存正文）。 */
+function normalizeAttachmentMeta(raw) {
+  if (!util.isPlainObject(raw)) return null;
+  const name = util.str(raw.name, 200) || (raw.path ? String(raw.path).split(/[\\/]/).pop() : '');
+  if (!name) return null;
+  const meta = { name };
+  const pathValue = util.str(raw.path, 4000);
+  if (pathValue) meta.path = pathValue;
+  const size = Number(raw.size);
+  if (Number.isFinite(size) && size >= 0) meta.size = Math.floor(size);
+  if (raw.truncated === true) meta.truncated = true;
+  return meta;
+}
+
+/** 请求里的附件：{path}（Hub 本机文件）或 {name,text}（前端上传文本）。 */
+function normalizeAttachmentInputs(raw) {
+  if (!Array.isArray(raw)) return { ok: true, value: [] };
+  if (raw.length > MAX_ATTACHMENTS) return { ok: false, error: `附件最多 ${MAX_ATTACHMENTS} 个` };
+  const value = [];
+  for (const item of raw) {
+    if (!util.isPlainObject(item)) return { ok: false, error: '附件格式无效' };
+    if (typeof item.path === 'string' && item.path.trim()) {
+      value.push({ path: util.str(item.path, 4000) });
+      continue;
+    }
+    if (typeof item.text === 'string') {
+      value.push({ name: util.str(item.name, 200) || 'attachment', text: item.text });
+      continue;
+    }
+    return { ok: false, error: '附件格式无效（需要 {path} 或 {name,text}）' };
+  }
+  return { ok: true, value };
+}
+
 function makeMessage(raw = {}, at = nowIso()) {
   const role = ROLES.includes(raw.role) ? raw.role : null;
   if (!role) return null;
@@ -59,6 +95,11 @@ function makeMessage(raw = {}, at = nowIso()) {
   const model = util.str(raw.model, 80);
   if (model) message.model = model;
   if (raw.error) message.error = util.str(raw.error, 800);
+  const attachmentMeta = (Array.isArray(raw.attachments) ? raw.attachments : [])
+    .map(normalizeAttachmentMeta)
+    .filter(Boolean)
+    .slice(0, MAX_ATTACHMENTS);
+  if (attachmentMeta.length) message.attachments = attachmentMeta;
   return message;
 }
 
@@ -183,7 +224,18 @@ function normalizeChatRequest(body) {
   if (src.sessionId && (!sessionId || String(src.sessionId).trim().length > MAX_SESSION_ID)) {
     errors.push('sessionId 过长');
   }
-  return errors.length ? { ok: false, errors } : { ok: true, value: { sessionId: sessionId || null, message } };
+  const attachments = normalizeAttachmentInputs(src.attachments);
+  if (!attachments.ok) errors.push(attachments.error);
+  return errors.length
+    ? { ok: false, errors }
+    : {
+        ok: true,
+        value: {
+          sessionId: sessionId || null,
+          message,
+          attachments: attachments.ok ? attachments.value : [],
+        },
+      };
 }
 
 /** 把 Hub 侧上下文对象渲染成提示词文本（也接受现成字符串）。 */
@@ -235,28 +287,172 @@ const BRAINSTORM_SYSTEM_PROMPT = [
   '4. 不编造上下文里没有的任务 ID、目标 ID、数据或进度。',
   '5. 信息不足时，先用 1–2 个关键问题澄清，不要凭空假设。',
   '6. 结尾给出「下一步」：可执行、可验收的行动建议。',
+  '7. BattleStar Hub 会把主人指定的文件内容注入本轮提示词（见「用户提供的文件」）。你本身没有文件系统访问权，但注入内容就是文件全文；不要声称「无法访问本地文件系统」。若「附件读取失败」列出了文件，请直接说明失败路径与原因，并建议改用附件上传或放到 Hub 主机后再试。',
 ].join('\n');
 
-/** 组装模型调用参数：system + user（上下文 + 最近历史 + 本轮消息）。 */
-function buildBrainstormPrompt({ history = [], userMessage, context } = {}) {
+const LANGUAGE_BY_EXT = {
+  '.js': 'javascript',
+  '.mjs': 'javascript',
+  '.cjs': 'javascript',
+  '.ts': 'typescript',
+  '.json': 'json',
+  '.md': 'markdown',
+  '.py': 'python',
+  '.ps1': 'powershell',
+  '.psm1': 'powershell',
+  '.sh': 'bash',
+  '.bat': 'batch',
+  '.cmd': 'batch',
+  '.html': 'html',
+  '.css': 'css',
+  '.yml': 'yaml',
+  '.yaml': 'yaml',
+  '.toml': 'toml',
+  '.sql': 'sql',
+  '.java': 'java',
+  '.xml': 'xml',
+  '.csv': 'csv',
+  '.log': 'text',
+  '.txt': 'text',
+};
+
+function fenceFor(text) {
+  return String(text || '').includes('```') ? '````' : '```';
+}
+
+/** 把附件渲染成提示词段落；正文过长时截断并注明。 */
+function renderAttachments(attachments) {
+  const list = (Array.isArray(attachments) ? attachments : []).slice(0, MAX_ATTACHMENTS);
+  if (!list.length) return '';
+  const blocks = [];
+  for (const item of list) {
+    if (!item || !item.text) continue;
+    const name = util.str(item.name, 200) || '附件';
+    const meta = [
+      item.path ? `路径：${item.path}` : '',
+      item.size ? `${Math.max(1, Math.round(item.size / 1024))} KB` : '',
+      item.truncated ? '内容已截断' : '',
+    ].filter(Boolean).join(' · ');
+    const fence = fenceFor(item.text);
+    const lang = LANGUAGE_BY_EXT[String(item.path ? path.extname(item.path) : path.extname(name)).toLowerCase()] || '';
+    blocks.push(`### ${name}${meta ? `（${meta}）` : ''}\n${fence}${lang}\n${item.text}\n${fence}`);
+  }
+  if (!blocks.length) return '';
+  return [
+    '## 用户提供的文件',
+    '以下内容由 BattleStar Hub 从 Hub 所在机器的文件系统读取后原样注入，就是文件全文；你无需再次访问文件系统，请直接基于这些内容回答，不要声称“无法访问本地文件系统”。',
+    '',
+    blocks.join('\n\n'),
+  ].join('\n');
+}
+
+/** 渲染附件读取失败提示（让模型直接说明哪个文件读不到、怎么处理）。 */
+function renderAttachmentErrors(errors) {
+  const list = (Array.isArray(errors) ? errors : [])
+    .map((item) => util.str(item, 300))
+    .filter(Boolean)
+    .slice(0, MAX_ATTACHMENTS);
+  if (!list.length) return '';
+  return [
+    '## 附件读取失败',
+    '以下文件在 Hub 所在机器上未能读取（可能路径不在 Hub 主机、权限不足、文件不存在或不是文本文件）。请在回答里直接说明读取失败的路径与原因，并建议主人：① 用输入框的「附件」按钮上传文件；② 或把文件放到 Hub 所在机器上再发一次路径。',
+    '',
+    ...list.map((item) => `- ${item}`),
+  ].join('\n');
+}
+
+/** 组装模型调用参数：system + user（上下文 + 附件 + 最近历史 + 本轮消息）。 */
+function buildBrainstormPrompt({ history = [], userMessage, context, attachments = [], attachmentErrors = [] } = {}) {
   const parts = [];
   const contextText = renderContext(context);
   if (contextText) parts.push(`## 管家上下文\n${contextText}`);
+  const attachmentText = renderAttachments(attachments);
+  if (attachmentText) parts.push(attachmentText);
+  const errorText = renderAttachmentErrors(attachmentErrors);
+  if (errorText) parts.push(errorText);
   const recent = (Array.isArray(history) ? history : [])
     .filter((message) => message && (message.role === 'user' || message.role === 'assistant'))
     .slice(-HISTORY_LIMIT)
-    .map((message) => `${message.role === 'user' ? '主人' : '大脑'}：${util.truncate(message.text, 1200)}`);
+    .map((message) => {
+      const attachmentNote = Array.isArray(message.attachments) && message.attachments.length
+        ? `（附件：${message.attachments.map((item) => item.name).join('、')}）`
+        : '';
+      return `${message.role === 'user' ? '主人' : '大脑'}：${util.truncate(message.text, 1200)}${attachmentNote}`;
+    });
   if (recent.length) parts.push(`## 最近对话\n${recent.join('\n')}`);
   parts.push(`## 本轮消息\n${util.str(userMessage, MAX_TEXT)}`);
   return {
     system: BRAINSTORM_SYSTEM_PROMPT,
-    user: util.truncate(parts.join('\n\n'), MAX_CONTEXT + MAX_TEXT + 4000),
+    user: util.truncate(parts.join('\n\n'), MAX_CONTEXT + MAX_TEXT + MAX_TOTAL_CHARS + 4000),
   };
 }
 
-/** 大脑/头脑风暴共用的模型配置；无 key 时 createBrainThinker 会抛错（由 Hub 兜底）。 */
+/**
+ * 头脑风暴模型配置；支持独立覆盖，优先于自主大脑配置。
+ *
+ * 环境变量（均为可选）：
+ * - BRAINSTORM_API_KEY / BRAINSTORM_BASE_URL / BRAINSTORM_MODEL：仅头脑风暴
+ * - DEEPSEEK_API_KEY：自动切换 DeepSeek（brainstorm 与自主大脑共用）
+ * - BRAIN_* / AGNES_*：两者共用（原有配置）
+ */
 function brainstormModelConfig(overrides) {
-  return brainModelConfig(overrides);
+  const env = process.env;
+  const src = util.isPlainObject(overrides) ? { ...overrides } : {};
+  if (!src.apiKey) src.apiKey = util.str(env.BRAINSTORM_API_KEY, 300).trim();
+  if (!src.baseUrl) src.baseUrl = util.str(env.BRAINSTORM_BASE_URL, 300).trim();
+  if (!src.model) src.model = util.str(env.BRAINSTORM_MODEL, 120).trim();
+  return brainModelConfig(src);
+}
+
+const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
+const DEEPSEEK_MODEL = 'deepseek-chat';
+
+/**
+ * 读文件专用模型配置：只要配置了 DEEPSEEK_API_KEY 就用 DeepSeek。
+ *
+ * 可用 BRAINSTORM_FILE_MODEL / BRAINSTORM_FILE_BASE_URL / BRAINSTORM_FILE_API_KEY
+ * 单独覆盖「文件模式」的模型（默认 deepseek-chat）；未配置 key 时返回 null。
+ */
+function brainstormFileModelConfig(overrides = {}) {
+  const env = process.env;
+  const src = util.isPlainObject(overrides) ? overrides : {};
+  const apiKey = util.str(src.apiKey, 300).trim()
+    || util.str(env.BRAINSTORM_FILE_API_KEY, 300).trim()
+    || util.str(env.DEEPSEEK_API_KEY, 300).trim();
+  if (!apiKey) return null;
+  const model = util.str(src.model, 120).trim()
+    || util.str(env.BRAINSTORM_FILE_MODEL, 120).trim()
+    || util.str(env.DEEPSEEK_MODEL, 120).trim()
+    || DEEPSEEK_MODEL;
+  const baseUrl = (
+    util.str(src.baseUrl, 300).trim()
+    || util.str(env.BRAINSTORM_FILE_BASE_URL, 300).trim()
+    || DEEPSEEK_BASE_URL
+  ).replace(/\/+$/, '');
+  const rawTimeout = src.timeoutMs !== undefined ? src.timeoutMs : env.BRAIN_TIMEOUT_MS;
+  const timeoutNumber = Number(rawTimeout);
+  const timeoutMs =
+    rawTimeout === undefined || rawTimeout === null || rawTimeout === '' || !Number.isFinite(timeoutNumber)
+      ? 60000
+      : util.clampInt(timeoutNumber, 60000, 5000, 300000);
+  return { apiKey, baseUrl, model, timeoutMs, provider: 'deepseek' };
+}
+
+/**
+ * 选择本轮头脑风暴使用的模型。
+ *
+ * - 普通对话：沿用默认配置（配了 Agnes key 就用 Agnes）；
+ * - 本轮涉及文件（显式附件或消息里提到文件路径）：切到 DeepSeek 读取与回答，
+ *   未配置 DEEPSEEK_API_KEY 时回退默认模型（附件内容仍会注入，模型可自行解释）。
+ */
+function selectBrainstormModel({ fileMode = false, overrides = {} } = {}) {
+  const base = brainstormModelConfig(overrides);
+  const fallback = {
+    ...base,
+    provider: /api\.deepseek\.com/i.test(base.baseUrl) ? 'deepseek' : 'default',
+  };
+  if (!fileMode) return fallback;
+  return brainstormFileModelConfig(overrides) || fallback;
 }
 
 function createBrainstormThinker(overrides = {}) {
@@ -264,6 +460,7 @@ function createBrainstormThinker(overrides = {}) {
   return createBrainThinker({
     model: config.model,
     baseUrl: config.baseUrl,
+    apiKey: config.apiKey,
     timeoutMs: config.timeoutMs,
     fetchImpl: overrides.fetchImpl,
   });
@@ -278,21 +475,27 @@ module.exports = {
   MAX_TITLE_TEXT,
   MAX_PREVIEW,
   MAX_SESSION_ID,
+  MAX_ATTACHMENTS,
   HISTORY_LIMIT,
   DEFAULT_TITLE,
   ROLES,
   BRAINSTORM_SYSTEM_PROMPT,
   appendMessage,
+  brainstormFileModelConfig,
   brainstormModelConfig,
   brainstormToJson,
   buildBrainstormPrompt,
   createBrainstormThinker,
   createSession,
   findSession,
+  normalizeAttachmentInputs,
+  normalizeAttachmentMeta,
   normalizeChatRequest,
   normalizeSession,
+  renderAttachments,
   renderContext,
   restoreBrainstorm,
+  selectBrainstormModel,
   sessionSummary,
   titleFromText,
 };

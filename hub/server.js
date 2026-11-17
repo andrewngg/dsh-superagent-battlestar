@@ -18,6 +18,21 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 
 const { createHub, startHub, Hub } = require('./lib/hub');
+const { loadEnvFiles } = require('./lib/env-file');
+
+// 可选：加载仓库根目录 / hub/ 下的 .env（已存在的环境变量优先，不覆盖系统环境）。
+// 用于把 DEEPSEEK_API_KEY、BRAINSTORM_MODEL 等模型配置放在本地文件中；.env 已被 .gitignore 忽略。
+const envLoad = loadEnvFiles([
+  path.join(__dirname, '..', '.env'),
+  path.join(__dirname, '.env'),
+]);
+if (require.main === module) {
+  const loadedEnvKeys = envLoad.flatMap((item) => item.applied);
+  if (loadedEnvKeys.length) {
+    // 只打印键名，避免密钥进入终端/日志。
+    console.log(`[hub] 已从 .env 加载配置：${loadedEnvKeys.join(', ')}（值不打印）`);
+  }
+}
 
 function readPackageVersion() {
   try {

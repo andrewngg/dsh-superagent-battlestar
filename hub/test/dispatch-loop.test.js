@@ -136,6 +136,54 @@ test('结果收敛：重复结果与旧 attempt 结果均返回 200 ignored，�
   assert.equal(completed.error, null);
 });
 
+test('attempt 归因：自动重试后，旧 attempt 的超时结果返回 200 ignored，不终结新 attempt', async (t) => {
+  const env = await startTestHub(t, { timeoutOverrideMs: 120 });
+  const device = await registerDevice(env, makeManifest());
+
+  const task = await createTask(env, {
+    instruction: '自动重试与旧结果竞态',
+    requirements: { deviceId: device.deviceId },
+  });
+  await ackTask(env, device, task.id);
+
+  const retried = await waitFor(
+    async () => {
+      const current = await getTask(env, task.id);
+      return current.status === 'assigned' && current.attempts === 2 ? current : null;
+    },
+    { label: '超时后自动重试', timeout: 5000 },
+  );
+  assert.equal(retried.assignedDeviceId, device.deviceId, '本例重派给同一台设备');
+
+  // 旧 attempt 的「执行超时」迟到：必须被忽略，任务仍由 attempt 2 持有。
+  const stale = await resultTask(env, device, task.id, {
+    ok: false,
+    error: '执行超时',
+    attempt: retried.attempts - 1,
+  });
+  assert.equal(stale.status, 200);
+  assert.equal(stale.json.ignored, true);
+  assert.match(String(stale.json.reason || ''), /旧尝试|attempt/);
+
+  const stillAssigned = await getTask(env, task.id);
+  assert.equal(stillAssigned.status, 'assigned');
+  assert.equal(stillAssigned.attempts, 2);
+  assert.equal(stillAssigned.error, null);
+
+  // 本次 attempt 的结果正常收下。
+  await ackTask(env, device, task.id);
+  const done = await resultTask(env, device, task.id, {
+    ok: true,
+    output: { text: 'ok' },
+    attempt: 2,
+  });
+  assert.equal(done.status, 200);
+  assert.equal(done.json.ignored, false);
+
+  const finished = await getTask(env, task.id);
+  assert.equal(finished.status, 'completed');
+});
+
 test('派发预算：attempts 达到上限时不再派发', async (t) => {
   const env = await startTestHub(t);
   const task = await createTask(env, {

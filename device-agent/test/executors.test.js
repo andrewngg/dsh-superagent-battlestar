@@ -182,6 +182,16 @@ test('makeProgressThrottle：800ms 内只放行一次', async () => {
   assert.deepEqual(sent, ['第一步:10']);
 });
 
+test('makeProgressThrottle：force 上报不被节流窗口吞掉', async () => {
+  const sent = [];
+  const report = makeProgressThrottle(async (message, percent) => {
+    sent.push(`${message}:${percent}`);
+  });
+  await report('已接收任务', 2);
+  await report('正在执行本机 CLI（auto）…', 10, { force: true });
+  assert.deepEqual(sent, ['已接收任务:2', '正在执行本机 CLI（auto）…:10']);
+});
+
 // ---------------------------------------------------------------------------
 // dsh-cli / shell（命令模板 + 文件重定向 + 超时 + 截断）
 // ---------------------------------------------------------------------------
@@ -452,6 +462,69 @@ test('cli 执行器：任务级项目传给 worker，设备默认项目使用工
     await configured.run({ task: { id: 't3', instruction: 'z' } });
     args = readArgs();
     assert.equal(args[args.indexOf('--project') + 1], '图像处理主机', '设备配置项目优先于设备名');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// A+B 卡死治理：无进度 watchdog 与任务预算
+// ---------------------------------------------------------------------------
+
+test('cli 执行器：无进度 watchdog 会终止卡住的 worker 并返回 stalled', { timeout: 20000 }, async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'butler-cli-stall-'));
+  const workerFile = path.join(dir, 'hang-worker.js');
+  fs.writeFileSync(workerFile, ["'use strict';", 'setTimeout(() => {}, 60000);'].join('\n'));
+  const calls = [];
+  const executor = createCliExecutor({
+    executorCfg: {
+      worker: workerFile,
+      mode: 'auto',
+      workdir: dir,
+      timeoutMs: 8000,
+      stallTimeoutMs: 1200,
+      heartbeatMs: 5000,
+    },
+    cwd: dir,
+    stateDir: dir,
+  });
+  try {
+    const outcome = await executor.run({
+      task: { id: 'task_stall', instruction: '跑一个会卡住的命令', timeoutSec: 600 },
+      progress: async (message, percent) => calls.push([message, percent]),
+    });
+    assert.ok(outcome.error, '卡死应返回错误');
+    assert.match(outcome.error, /stalled|无进度/);
+    assert.equal(outcome.output.data.stalled, true);
+    assert.ok(calls.some(([message]) => message.includes('正在执行本机 CLI')));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('cli 执行器：worker 超时预算取 max(cli.timeoutMs, task.timeoutSec)', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'butler-cli-budget-'));
+  const workerFile = path.join(dir, 'budget-worker.js');
+  fs.writeFileSync(
+    workerFile,
+    [
+      "'use strict';",
+      "const fs = require('node:fs');",
+      "const path = require('node:path');",
+      "fs.writeFileSync(path.join(__dirname, 'budget.json'), JSON.stringify({ args: process.argv.slice(2), env: process.env.BUTLER_CLI_TIMEOUT_MS || '' }));",
+      "process.stdout.write(`${JSON.stringify({ ok: true, backend: 'hermes', model: 'fake', profile: '', text: 'done', exitCode: 0, durationMs: 1, commandPreview: 'fake', fallbackFrom: null, fallbackReason: null, at: new Date().toISOString() })}\\n`);",
+    ].join('\n'),
+  );
+  const executor = createCliExecutor({
+    executorCfg: { worker: workerFile, mode: 'auto', workdir: dir, timeoutMs: 8000 },
+    cwd: dir,
+    stateDir: dir,
+  });
+  try {
+    await executor.run({ task: { id: 'task_budget', instruction: '长任务', timeoutSec: 1800 } });
+    const recorded = JSON.parse(fs.readFileSync(path.join(dir, 'budget.json'), 'utf8'));
+    assert.equal(recorded.args[recorded.args.indexOf('--timeout-ms') + 1], '1800000');
+    assert.equal(recorded.env, '1800000');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

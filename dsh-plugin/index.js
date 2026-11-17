@@ -1245,6 +1245,16 @@ export function apply(ctx, rawConfig = {}) {
         const key = typeof body.key === 'string' ? body.key : ''
         return json(res, 200, await testCredential(key))
       }
+      // 心智（Soul / Skill）已从 Web 控制台迁移到本插件面板：Host 只做鉴权代理，逻辑仍在 Hub。
+      if (method === 'GET' && (sub === '/api/mind' || sub === '/api/mind/')) {
+        const out = await hubRequest('/api/mind')
+        return json(res, out.status, out.data)
+      }
+      if ((method === 'PATCH' || method === 'PUT') && (sub === '/api/mind' || sub === '/api/mind/')) {
+        const body = await readBody(req)
+        const out = await hubRequest('/api/mind', { method: 'PATCH', body })
+        return json(res, out.status, out.data)
+      }
       if (method === 'GET' && sub === '/api/snapshot') {
         const limit = clampInt(Number(url.searchParams.get('limit')), 50, 1, 200)
         const out = await hubRequest(`/api/snapshot?limit=${limit}`)
@@ -1376,9 +1386,9 @@ export function apply(ctx, rawConfig = {}) {
       if (method === 'GET' && (sub === '/' || sub === '')) {
         return json(res, 200, {
           name: 'BattleStar',
-          routes: ['/api/status', '/api/settings', '/api/snapshot', '/api/tasks', '/api/tasks/:id/status', '/api/tasks/:id/follow-up', '/api/tasks/:id/answer', '/api/tasks/:id/archive', '/api/tasks/:id', '/api/devices/:id', '/api/test-credential', '/api/hub/start', '/api/hub/stop', '/api/hub/restart'],
+          routes: ['/api/status', '/api/settings', '/api/snapshot', '/api/tasks', '/api/tasks/:id/status', '/api/tasks/:id/follow-up', '/api/tasks/:id/answer', '/api/tasks/:id/archive', '/api/tasks/:id', '/api/devices/:id', '/api/test-credential', '/api/mind', '/api/hub/start', '/api/hub/stop', '/api/hub/restart'],
           // 用于确认 Host 侧插件是否已加载最新实现（DSH 桌面端会热加载插件文件）。
-          features: ['task-status-manual', 'task-status-cancel-first', 'hub-restart'],
+          features: ['task-status-manual', 'task-status-cancel-first', 'hub-restart', 'mind-proxy'],
         })
       }
       return json(res, 404, { error: { code: 'not_found', message: `未知路由：${method} ${sub}` } })

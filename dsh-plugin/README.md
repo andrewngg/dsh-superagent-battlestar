@@ -35,6 +35,17 @@ Host route for this feature: `POST /super-butler/api/tasks/:id/status` with
 reads that flag and keeps 标记完成 / 标记失败 disabled (with a restart hint) on a Host that still runs the old
 logic. Client changes apply after refreshing the DSH page; reload the plugin or restart DSH to pick up Host changes.
 
+## Mind tab
+
+The **心智 (Mind)** tab edits the butler soul and workflow (Soul / Skill) that used to live on the Web
+console page. The Hub still owns the data (`state.json.mind`); the plugin Host only proxies it:
+
+- `GET /super-butler/api/mind` → Hub `GET /api/mind` (`{ mind, hubTime }`).
+- `PATCH|PUT /super-butler/api/mind` → Hub `PATCH /api/mind`; body accepts `soul`, `skill`,
+  `resetSoul`, `resetSkill` (explicit text wins over reset, missing fields keep their current value).
+- The tab shows both texts with character limits (6000 / 12000), a default/custom badge, save,
+  per-field reset and reset-all. Host route changes need a DSH restart; client changes only need a page refresh.
+
 ## Tests
 
 ```bash
@@ -43,5 +54,5 @@ npm test   # node --test --test-isolation=none "test/*.test.mjs"
 
 Node ≥ 22.8 is required for the `--test-isolation=none` flag (the sandbox cannot spawn child test processes).
 The tests load `client.js` in a VM with a stubbed React (render smoke tests for `TaskRow`, `TaskDetail`,
-`Dialog`, `ConsoleTab`) and exercise the Host `/status` route against a stubbed Hub, including the
+`Dialog`, `ConsoleTab`, `MindTab`) and exercise the Host `/status` route against a stubbed Hub, including the
 cancel-before-finish flow for active tasks and the plan-parent rejection.

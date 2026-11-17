@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.superbutler.app"
-    android:versionCode="5"
-    android:versionName="0.1.4">
+    android:versionCode="6"
+    android:versionName="0.1.5">
 
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="36" />
 
@@ -59,6 +59,11 @@
         <!-- 提醒闹钟接收器：只由应用内 AlarmManager 的显式 PendingIntent 触发 -->
         <receiver
             android:name=".ReminderReceiver"
+            android:exported="false" />
+
+        <!-- 大脑决策通知的选项按钮：只由本应用通知里的 PendingIntent 触发 -->
+        <receiver
+            android:name=".DecisionActionReceiver"
             android:exported="false" />
 
         <!-- 开机/应用更新后从 SharedPreferences 重排提醒闹钟 -->

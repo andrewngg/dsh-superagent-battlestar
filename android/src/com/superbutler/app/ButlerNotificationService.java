@@ -31,6 +31,9 @@ public class ButlerNotificationService extends Service {
     private static final String TAG = "SuperButlerNotify";
     private static final String CHANNEL_ID = "butler_persistent";
     private static final int NOTIFICATION_ID = 7400;
+    /** 自主大脑需要主人决定时的通知（通道 + 固定 id）。 */
+    private static final String DECISION_CHANNEL_ID = "butler_decision";
+    private static final int DECISION_NOTIFICATION_ID = 7600;
     private static final long POLL_MS = 5000L;
     private static final String PREFS_NAME = "butler_config";
     private static final String KEY_HUB = "hub_url";
@@ -40,6 +43,8 @@ public class ButlerNotificationService extends Service {
     private Thread worker;
     private SharedPreferences prefs;
     private NotificationManager notificationManager;
+    /** 上一次已发布的决策问题签名：内容没变就不重复弹通知。 */
+    private volatile String lastDecisionSignature = "";
 
     @Override
     public void onCreate() {
@@ -97,6 +102,12 @@ public class ButlerNotificationService extends Service {
         channel.setShowBadge(false);
         channel.setSound(null, null);
         notificationManager.createNotificationChannel(channel);
+        // 大脑需要主人决定时：高优先级，允许提示音/横幅（内容由 Hub 的 ownerAsk 驱动）
+        NotificationChannel decision = new NotificationChannel(
+                DECISION_CHANNEL_ID, "BattleStar 管家决策", NotificationManager.IMPORTANCE_HIGH);
+        decision.setDescription("自主大脑需要你决定时提醒，可直接在通知栏点选");
+        decision.setShowBadge(true);
+        notificationManager.createNotificationChannel(decision);
     }
 
     private void startForegroundCompat(Notification notification) {
@@ -148,6 +159,9 @@ public class ButlerNotificationService extends Service {
         // 每次 snapshot 轮询顺便把提醒同步到原生闹钟（App 停在后台也能排程）
         syncReminders(snapshot);
 
+        // 大脑需要主人决定时，发一条可点选的通知
+        syncBrainAsk(snapshot);
+
         JSONArray tasks = snapshot.optJSONArray("tasks");
         JSONObject active = findActiveTask(tasks);
         if (active != null) {
@@ -190,6 +204,87 @@ public class ButlerNotificationService extends Service {
             ReminderScheduler.sync(this, reminders);
         } catch (Exception e) {
             Log.w(TAG, "sync reminders failed", e);
+        }
+    }
+
+    /**
+     * 自主大脑提出 ownerAsk 时，发一条「管家需要你决定」通知：前 3 个选项做成通知动作按钮，
+     * 点击直接回写 Hub；没有选项时提供一个「打开决策」按钮，点进 App 的大脑海报。
+     * ownerAsk 被处理（选项被点/「知道了」）后取消通知。
+     */
+    private void syncBrainAsk(JSONObject snapshot) {
+        try {
+            JSONObject brain = snapshot == null ? null : snapshot.optJSONObject("brain");
+            JSONObject ask = brain == null ? null : brain.optJSONObject("ownerAsk");
+            String text = ask == null ? "" : ask.optString("text", "").trim();
+            if (text.isEmpty()) {
+                lastDecisionSignature = "";
+                if (notificationManager != null) {
+                    try {
+                        notificationManager.cancel(DECISION_NOTIFICATION_ID);
+                    } catch (Exception ignored) {
+                        // ignore
+                    }
+                }
+                return;
+            }
+            JSONArray options = ask.optJSONArray("options");
+            String signature = text + "|" + (options == null ? "" : options.toString());
+            if (signature.equals(lastDecisionSignature)) return;
+            lastDecisionSignature = signature;
+            publishBrainAsk(text, options);
+        } catch (Exception e) {
+            Log.w(TAG, "sync brain ask failed", e);
+        }
+    }
+
+    private void publishBrainAsk(String text, JSONArray options) {
+        if (notificationManager == null) return;
+        Intent open = new Intent(this, MainActivity.class);
+        open.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        open.putExtra("open_tab", "brain");
+        PendingIntent contentIntent = PendingIntent.getActivity(this, DECISION_NOTIFICATION_ID, open,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        Notification.Builder builder = new Notification.Builder(this, DECISION_CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setContentTitle("管家需要你决定")
+                .setContentText(text)
+                .setStyle(new Notification.BigTextStyle().bigText(text))
+                .setContentIntent(contentIntent)
+                .setAutoCancel(false)
+                .setOnlyAlertOnce(true)
+                .setCategory(Notification.CATEGORY_MESSAGE)
+                .setVisibility(Notification.VISIBILITY_PUBLIC)
+                .setShowWhen(true)
+                .setWhen(System.currentTimeMillis());
+        int actionCount = 0;
+        if (options != null) {
+            for (int i = 0; i < options.length() && actionCount < 3; i++) {
+                JSONObject option = options.optJSONObject(i);
+                if (option == null) continue;
+                String id = option.optString("id", "").trim();
+                String label = option.optString("label", "").trim();
+                if (id.isEmpty() || label.isEmpty()) continue;
+                Intent choose = new Intent(this, DecisionActionReceiver.class);
+                choose.setAction(DecisionActionReceiver.ACTION_CHOOSE);
+                choose.putExtra(DecisionActionReceiver.EXTRA_OPTION_ID, id);
+                choose.putExtra(DecisionActionReceiver.EXTRA_OPTION_LABEL, label);
+                choose.putExtra(DecisionActionReceiver.EXTRA_NOTIFICATION_ID, DECISION_NOTIFICATION_ID);
+                PendingIntent pending = PendingIntent.getBroadcast(this, DECISION_NOTIFICATION_ID + 1 + actionCount, choose,
+                        PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+                builder.addAction(android.R.drawable.ic_menu_send, label, pending);
+                actionCount += 1;
+            }
+        }
+        if (actionCount == 0) {
+            builder.addAction(android.R.drawable.ic_menu_view, "打开决策", contentIntent);
+        }
+        try {
+            notificationManager.notify(DECISION_NOTIFICATION_ID, builder.build());
+        } catch (Exception e) {
+            Log.w(TAG, "post brain ask notification failed", e);
         }
     }
 

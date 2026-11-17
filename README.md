@@ -9,13 +9,13 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%E2%89%A518-339933)](package.json)
 [![DSH Plugin](https://img.shields.io/badge/DeepSeek%20Harness-plugin-4B67B4)](docs/DSH-PLUGIN.md)
-[![Android](https://img.shields.io/badge/Android-8.0%2B-3DDC84)](dist/BattleStar-0.1.2.apk)
+[![Android](https://img.shields.io/badge/Android-8.0%2B-3DDC84)](dist/BattleStar-0.1.5.apk)
 
 一个可私有部署的**多设备 AI 编排中枢**：
 
 - 🧠 **能力申报**：每台设备接入时申报自己的 `models`、`profiles`、`gateways`、`skills`、资源与并发上限；
 - 🟢 **在线检测**：10s 心跳 + 30s TTL，离线自动重派任务，恢复后自动上线；
-- 🎯 **能力路由**：按模型 / 技能 / profile / gateway / 标签匹配，结合负载与新鲜度评分，并解释「为什么选它」；
+- 🎯 **能力路由**：按模型 / 技能 / profile / gateway / 标签匹配，结合负载与新鲜度评分，并解释「为什么选它」；在此基础上再做**派发亲和**——显式设备 > 任务原主机（重试/跟进）> 同线程上次主机 > 项目上次成功设备 > 母机，首选主机离线或并发满时排队等待，避免把缺少项目上下文的主机接走导致失败；设备成功执行过某项目后会**自动获得项目名与项目标签别名**（`autoTags`，无需手工给设备加标签），大脑在任务里写的项目标签也会被登记为该项目的别名，不会因无人声明标签而永久排队；显式钉住的设备只缺标签时按能力放行，缺模型/技能等硬能力仍排除；
 - 📋 **任务闭环**：`queued → assigned → running → completed`，支持进度、超时、取消、重试、改派；APK/网页可对失败/超时任务手动 **「标记成功」**；
 - 👀 **执行过程可见**：本机 CLI（Hermes）任务运行时会实时上报「正在执行：工具 / 子任务 / 执行步骤」，任务卡片与事件时间线显示最新步骤，不再只显示「进行中」直到完成（依赖 Hermes `--format stream-json`，旧版自动回退粗粒度进度）；
 - 🗂️ **Hermes 项目归属**：本机 Hermes 任务默认以 `--source cli` 记录会话（可在 Hermes 桌面/TUI 会话列表看到），并按「任务项目 > 设备默认项目 > 设备名」归入 Hermes 项目；首次使用时自动在对应 profile 的 `projects.db` 创建项目（目录 `<workdir>/projects/<slug>`；也可给绝对路径），控制台指令框可填「项目（可选）」；
@@ -34,15 +34,16 @@
 - 📱 **任务列表优化**：APK/手机端任务列表内部滚动，底部导航栏固定，不再需要先滚到底才能切页；任务页默认筛选「进行中」（可切换全部/已完成/失败/已归档）；卡片收起时仍显示「子任务 N/M」和恢复操作（重试失败子任务 / 继续任务），任务详情新增「子任务」「任务线程」区块，可一键重试失败子任务或从某一步继续；失败任务在列表顶部提示并可一键跳到「失败」筛选；
 - 📊 **任务输出表格**：任务卡片、任务详情与任务记录中的 Markdown 表格按 GFM 渲染（列对齐、表头、斑马纹、横向滚动，手机窄屏自动转卡片式），任务输出还可一键切换「渲染 / 原文」；任务详情中过长的指令默认折叠（右上角「展开指令 / 收起指令」），且指令含 Markdown 时同样按可视化渲染并可切「渲染 / 原文」，把视觉重点留给输出结果；
 - 🖥️ **多种工作机**：本机 CLI（Hermes / OpenCode / shell）、ComfyUI 图像生成、Ollama、HTTP 服务；
+- 🩺 **执行卡死治理与可见进度**：本机 CLI 起步「正在执行本机 CLI」不再被 800ms 节流吞掉，OpenCode 的 JSONL 输出会增量转成「OpenCode：工具/输出/开始新一轮」步骤，执行期间每 15s 至少一次「执行中（已 Xs）」心跳；连续 5 分钟无真实进度（`cli.stallTimeoutMs` 可调，0 关闭）会被 watchdog 终止并回报 `stalled`，不再静默等满 15 分钟；CLI 超时取 `max(cli.timeoutMs, task.timeoutSec)`（最长 1 小时），Hub 即使收到 keepalive 也不会把任务续期超过 `max(30 分钟, timeoutSec×6)`；设备上报 stalled / 无进度 / 本机 CLI 硬上限类失败时，Hub 在尝试次数预算内自动重排一次并保留原主机（普通内容错误不自动重排）；任务详情新增执行器/后端/模型与「已运行」时长，超时失败会提示拆分任务或调大 `timeoutSec`；自主大脑会把「多仓库 / 发布 / 部署 / 迁移 / 全量验证」类工作拆成 2–3 个 15 分钟内可完成的任务；
 - 📱 **手机工作机**：通过 [Mika](https://github.com/wangzan101/Mika) 指挥 Android 手机执行 App/网页任务；
 - 📲 **手机控制端**：Android APK（WebView + 本地配置页）加载 `/m`，看设备、发指令、看任务；它只是控制端，不执行 AI 任务；任务进度/完成/失败可在 Android 通知栏以进度条和提醒显示；
 - ⏰ **提醒（Reminders）**：控制台新增「提醒」Tab，可增删改查一次性 / 每天 / 每周提醒，并可选择**通知方式**（温和通知 / 闹钟）；提醒保存在 Hub 的 `state.json`，到点由 **Android APK 用原生通知**弹出（App 被杀死或手机重启后仍有效），浏览器只负责管理、不弹通知；
 - 🔗 **智能关联目标**：任务可关联长期目标（`task.goalId` ↔ `goal.taskIds`），计划父任务关联后子任务自动继承目标上下文；目标详情列出关联任务与 `linkedStats`（运行 / 完成 / 失败 / 计划进度），任务结束按 `taskId` 去重回写目标检查；「继续此任务」与带 `goalId` 创建的任务自动登记到目标，也可用 `POST /api/goals/:id/link|unlink` 手动关联/取消关联；
 - 📋 **复制目标 ID**：控制台目标卡片 / 详情提供一键复制目标 ID，方便直接拼 `curl` 或插件接口（如 `POST /api/goals/:id/check`、`/link`）；
-- 🧠 **自主大脑（Brain）**：Hub 按间隔读取目标 / 任务 / 提案 / 设备快照，让模型按固定六步（目标 → 进度 → 更好的工作方式 → 要改进哪里 → 我能做什么 → 是否提醒主人）输出严格 JSON 决策，按白名单自动「重试失败任务 / 继续已结束任务 / 新建任务 / 关联任务到目标」；没活时按空闲次数指数退避、跳过模型调用省 token（有效间隔封顶 1800s），有活立即回到基准间隔；`auto`（默认，单轮最多 2 个动作，置信度 <0.6 拒绝）与 `suggest`（只建议不执行）两种模式，决策历史保留 30 条并含六步结论与「需要主人」提醒（`ownerAsk`，`PATCH /api/brain {ownerAskAck:true}` 回执），可通过 `GET/PATCH /api/brain` 与 `POST /api/brain/think` 查看、调整和手动触发；
+- 🧠 **自主大脑（Brain）**：Hub 按间隔读取目标 / 任务 / 提案 / 设备快照，让模型按固定六步（目标 → 进度 → 更好的工作方式 → 要改进哪里 → 我能做什么 → 是否提醒主人）输出严格 JSON 决策，按白名单自动「重试失败任务 / 继续已结束任务 / 新建任务 / 关联任务到目标」；没活时按空闲次数指数退避、跳过模型调用省 token（有效间隔封顶 1800s），有活立即回到基准间隔；模型输出夹带 ```json 围栏、前后解释文字、尾随逗号或被输出上限截断时会先自动清洗/修复，仍解析失败则带修复提示重试一次，避免偶发格式问题让整轮思考作废；单轮输出上限默认 4000 tokens（`BRAIN_MAX_TOKENS` 可调 1000–8000），DeepSeek 网关自动启用 JSON 输出模式；`auto`（默认，单轮最多 2 个动作，置信度 <0.6 拒绝）与 `suggest`（只建议不执行）两种模式，决策历史保留 30 条并含六步结论与「需要主人」提醒（`ownerAsk`，可用 `POST /api/brain/owner-ask/choose` 点选选项、`POST /api/brain/owner-ask/reply {text}` 直接写一段回复，或 `PATCH /api/brain {ownerAskAck:true}` 回执；控制台「大脑」页与大脑抽屉常驻「直接告诉大脑」输入框，没有待决定问题时也能主动给方向，回答会回显并在下一轮思考中带上；**提问的选项可带 detail 细节**（每个选项做什么、大概多久、成功/失败会怎样，≤240 字），控制台按「按钮 + 说明」展示，细节缺失时显示「让大脑补充细节」按钮，提示词要求选项没有细节就先查清楚再问），可通过 `GET/PATCH /api/brain` 与 `POST /api/brain/think` 查看、调整和手动触发；**需要主人决定时会推送 Android 通知**：通知栏直接列出最多 3 个可点选项，点一下即把选择写回 Hub，下一轮思考按选择推进；没有选项时点通知打开 App 的决策卡片；**任务里提到的文件路径会先在 Hub 主机上实测存在性/同名候选位置（「路径核查」，`BRAIN_PATH_ROOTS` 可追加扫描根），并明确要求大脑不要拿文件路径、是否存在这类机器可查事实去问主人（应建自包含 create_task 让有文件的设备自查）；最近决策会带出已经问过的问题，避免反复问同一件事**；**缺少只有某台设备才知道的项目上下文时，可用 `consult_worker` 向「项目 ↔ 主机」映射里的设备提一个只读问题**（Hub 建咨询任务，回答写入下一轮的「咨询记录」，同一问题不再重复问）；**长期约定可用 `remember` 写入「管家记忆」**（最多 20 条、每轮注入、随 `state.json` 持久化）；
 - 🧭 **管家心路（Journal）**：把管家思考与工作结果按天记入 `state.json` 的 `journal` 时间线（思考 / 工作 / 里程碑 / 每日总结），每天 `summaryTime`（默认 23:30）自动生成《每日总结》（今天实质推进 / 卡点 / 明天方向），模型不可用时自动降级为本地汇总；控制台「管家心路」页可按天回看并手动生成总结，也可用 `GET/PATCH /api/journal` 与 `POST /api/journal/summary` 管理；
-- 🗣️ **头脑风暴（Brainstorm，对话大脑）**：控制台「头脑风暴」页可与管家大脑多轮对话，结合长期目标 / 任务 / 管家心路上下文给出结构化思路、方案与下一步；首条消息自动命名会话（最多 30 个会话、每个 200 条消息），模型不可用时回复带错误但仍保存、可继续追问；可一键把某条大脑回复「转成任务」（`priority=6`、可同时关联长期目标），也可用 `GET /api/brainstorm`、`POST /api/brainstorm/chat|sessions|to-task`、`DELETE /api/brainstorm/sessions/:id` 管理；
-- 🧬 **心智（Soul / Skill）**：给自主大脑一段稳定的「灵魂」（个性、价值观、语气、面对不确定与失败的态度，≤6000 字）和一份可迭代的「工作方法」（观察 → 抓主要矛盾 → 评估 → 小步执行 → 复盘 → 请示的步骤化流程，≤12000 字），每次思考都会注入提示词；控制台「心智」页可编辑、单卡/全部恢复默认，`GET/PATCH /api/mind` 管理，持久化在 `state.json` 的 `mind` 字段；
+- 🗣️ **头脑风暴（Brainstorm，对话大脑）**：控制台「头脑风暴」页可与管家大脑多轮对话，结合长期目标 / 任务 / 管家心路上下文给出结构化思路、方案与下一步；支持一次附上多个文本文件，或直接在消息里写 Hub 本机文件路径，Hub 会读取内容一起讨论（拒绝密钥/凭据与二进制文件）；首条消息自动命名会话（最多 30 个会话、每个 200 条消息），模型不可用时回复带错误但仍保存、可继续追问；可一键把某条大脑回复「转成任务」（`priority=6`、可同时关联长期目标），也可用 `GET /api/brainstorm`、`POST /api/brainstorm/chat|sessions|to-task`、`DELETE /api/brainstorm/sessions/:id` 管理；
+- 🧬 **心智（Soul / Skill）**：给自主大脑一段稳定的「灵魂」（个性、价值观、语气、面对不确定与失败的态度，≤6000 字）和一份可迭代的「工作方法」（观察 → 抓主要矛盾 → 评估 → 小步执行 → 复盘 → 请示的步骤化流程，≤12000 字），每次思考都会注入提示词；编辑入口已迁到 **DSH 插件面板 → BattleStar → 心智 Tab**（Web 控制台不再显示），单卡/全部恢复默认，`GET/PATCH /api/mind` 管理，持久化在 `state.json` 的 `mind` 字段；
 - 🧩 **DSH 插件**：在 DeepSeek Harness 侧边栏查看只读仪表盘（母机状态、在线设备、任务统计、最近任务），一键在浏览器打开完整控制台，内置 PC / 手机工作机接入教程，并在插件里保存私人 API 密钥；
 - 🪶 **零依赖**：Hub / 设备代理 / 前端全部零 npm 依赖，Node.js 单进程即可跑；APK 约 0.12 MB。
 
@@ -220,12 +221,13 @@ node device-agent/agent.js \
 > APK 品牌名已改为 **BattleStar**（包名仍为 `com.superbutler.app`，可直接覆盖安装旧版）。
 
 - 浏览器直接打开 `http://<母机IP>:7317/m?token=<管理员令牌>`，可添加到主屏幕；
-- 或安装 [dist/BattleStar-0.1.2.apk](dist/BattleStar-0.1.2.apk)（Android 8+，测试签名；构建/安装见 [docs/APK.md](docs/APK.md)）。
+- 或安装 [dist/BattleStar-0.1.5.apk](dist/BattleStar-0.1.5.apk)（Android 8+，测试签名；构建/安装见 [docs/APK.md](docs/APK.md)）。
 - APK 首次打开会自动扫描同一 Wi-Fi 网段的 Hub（默认端口 7317），发现后只需填管理员令牌，不用记母机 IP；也可改端口手动扫描。
 - 首次打开自动发现母机（或手动填 Hub 地址），再填管理员令牌，点「测试连接」→「进入管家」。
 - 任务执行时通知栏显示**常驻进度条**，完成后推送完成/失败提醒；Android 13+ 首次启动需允许通知权限。
 - APK「设置 → 手机通知（APK）」可开启**常驻通知**：有任务时显示任务进度，没有任务时显示 `X 台在线 · Y 台待命`。
 - 「提醒」Tab 创建的提醒由 APK 原生 `AlarmManager` 在到点弹出系统通知（App 被杀死/手机重启后仍有效），每条提醒可选择温和通知或闹钟式提醒；浏览器可管理提醒但不会弹通知，详见下方「提醒（Reminders）」。
+- **决策通知**：自主大脑需要主人拍板时，通知栏弹出「管家需要你决定」，直接带最多 3 个选项按钮（点选即回传 Hub，下一轮按选择推进）；没有选项时点通知会打开 App 并定位到「自主大脑」卡片，也可以在控制台点选。
 
 ### DSH 插件（可选，推荐）
 
@@ -268,7 +270,7 @@ super-butler/
 ├─ shared/                 # manifest 规范化 / 匹配 / 评分（Hub 与代理共用）
 ├─ dsh-plugin/             # DSH 插件：侧边栏控制台 + 私人密钥设置
 ├─ android/                # APK 工程 + 手工构建流水线
-├─ dist/                   # 构建产物：BattleStar-0.1.2.apk、icon-512.png
+├─ dist/                   # 构建产物：BattleStar-0.1.5.apk、icon-512.png
 ├─ scripts/                # demo.js / smoke-test.js / simulate-devices.js
 ├─ docs/                   # INSTALL / WORKER-SETUP / PROTOCOL / ARCHITECTURE / DEPLOY / APK / SECOND-MACHINE / MIKA-PHONE / DSH-PLUGIN
 ├─ CREDITS.md              # 第三方来源、许可证、商标与 AGPL 合规说明
@@ -324,6 +326,14 @@ curl -X PATCH -H "X-Butler-Token: <adminToken>" -H "Content-Type: application/js
   -d '{"mode":"suggest","intervalSec":300}' http://<母机IP>:7317/api/brain
 curl -X POST -H "X-Butler-Token: <adminToken>" http://<母机IP>:7317/api/brain/think
 
+# 大脑提问选项：点选一个选项（手机通知/控制台按钮都调用它）
+curl -X POST -H "X-Butler-Token: <adminToken>" -H "Content-Type: application/json" \
+  -d '{"optionId":"o1"}' http://<母机IP>:7317/api/brain/owner-ask/choose
+
+# 大脑自由回复：直接写一段话（如「选 B，先手动补投递」），下一轮思考会带上
+curl -X POST -H "X-Butler-Token: <adminToken>" -H "Content-Type: application/json" \
+  -d '{"text":"选 B，先手动补投递，同时重建自动投递任务"}' http://<母机IP>:7317/api/brain/owner-ask/reply
+
 # 管家心路：查看日志与设置 / 生成今日总结
 curl -H "X-Butler-Token: <adminToken>" "http://<母机IP>:7317/api/journal?days=10&entries=50"
 curl -X PATCH -H "X-Butler-Token: <adminToken>" -H "Content-Type: application/json" \
@@ -361,7 +371,7 @@ curl -X POST http://<母机IP>:7317/api/reminders \
 ## 测试与验收
 
 ```bash
-# 单元测试：Hub 257 + 设备代理 90 + 共享协议 9（共 356）
+# 单元测试：Hub 286 + 设备代理 91 + 共享协议 9（共 386）
 node --test hub/test device-agent/test shared/test
 
 # 受限沙箱（Node 测试运行器无法 spawn 子进程）时：
@@ -381,11 +391,13 @@ node scripts/demo.js
 
 **实测结果**
 
-- `hub/test` 257/257、`device-agent/test` 90/90、`shared/test` 9/9（合计 356/356）；`dsh-plugin/test` 44 项（43 通过 + 1 项真实 `git push` 集成测试在受限沙箱下跳过，沙箱外应全绿）；
-- 关键回归覆盖：进度 keepalive 续期超时、超时自动重试（含关闭开关）、系统自重启（设备通知 + Hub re-exec + 自重启后任务自动重新排队）、并发满载时重启/取消指令优先、**重复派发防护（设备忙碌时 ack 超时不重派并重投同一 command id、派发预算 guard、重复/旧 attempt 结果 200 ignored 收敛、设备收到即 ack、taskId 去重、队列上限与排队 keepalive）**、自主大脑自适应节律（空闲跳过与指数退避封顶、有活/执行动作/失败重置节律、手动思考不受跳过影响、六步 assessment 与 ownerAsk 持久化及回执、心路六步摘要、HTTP PATCH adaptive/ownerAskAck）、计划子任务上下文（parentTaskId/主任务目标/计划步骤/兄弟子任务、planner 自包含要求）与子任务按 taskId 隔离 Hermes 会话、规划子任务超时兜底与旧数据迁移、Agnes 执行计划（并行组同时派发 / 依赖闸门 / 失败卡点暂停与重试恢复 / Mika 单并发排队 / 取消级联 / 计划元数据持久化）、Hermes 退出码 1 的可读诊断与沙箱提示、任务执行记录（Markdown + 索引 + 离线导出）、执行记录 API、系统语言设置持久化、长期目标（计划归一化/CRUD/立即跟进/定时扫描/持久化恢复/暂停止（跳过下一次、暂停到点自动恢复）/新的指导指令（校验、追加、注入跟进任务、提案刷新）/恢复自动跟进（paused 与 stopped））、管家心路（思考/工作/里程碑条目、每日总结模型生成与降级、设置与周期、持久化、HTTP 接口、历史回填）、头脑风暴（对话落盘与多轮历史、模型失败降级、空回复、to-task 生成任务与目标关联、会话创建/删除与 activeId、持久化、HTTP 接口、SSE 不写常规事件）、心智（默认灵魂/工作方法与上限、PATCH 合并语义与 resetSoul/resetSkill、显式文本优先、提示词注入且保留六步、持久化重启恢复、HTTP 接口与 SSE 不写常规事件）、提醒（归一化/nextDueAt/CRUD/鉴权/SSE/持久化/到点回写与重复推进/通知方式 notifyStyle 默认与校验）、设备用途昵称（设置/清除/超长拒绝/设备重报 manifest 不覆盖/持久化恢复/任务展示名回退）、插件密钥存储（优先 Harness credentials，服务不可用时回退本机文件并标注来源）、插件 Git Push（非 loopback 拒绝/无仓库提示/仓库分支远端读取/推送已提交内容/自动设置上游）、DSH bridge 地址同步（插件写入 + POST 更新、无效地址 400、Hub 重启后复用、旧端口自愈重试）、插件重启 Hub（外部进程走自重启接口、旧 Hub 无自重启时给出原因）、DSH Host 服务惰性解析（credentials / sessionController 在挂载后才激活也能用）；
+- `hub/test` 307/307、`device-agent/test` 94/94、`shared/test` 9/9（合计 410/410）；`dsh-plugin/test` 45 项（44 通过 + 1 项真实 `git push` 集成测试在受限沙箱下跳过，沙箱外应全绿）；
+- 关键回归覆盖：进度 keepalive 续期超时、超时自动重试（含关闭开关）、系统自重启（设备通知 + Hub re-exec + 自重启后任务自动重新排队）、并发满载时重启/取消指令优先、**重复派发防护（设备忙碌时 ack 超时不重派并重投同一 command id、派发预算 guard、重复/旧 attempt 结果 200 ignored 收敛、设备收到即 ack、taskId 去重、队列上限与排队 keepalive）**、任务结果 attempt 归因（自动重试后旧 attempt 的超时/取消结果不会终结新 attempt）、派发亲和（显式 deviceId 硬锁 > 任务原主机 > 同线程上次主机 > 项目上次成功设备 > 母机；离线/并发满时排队等待而非改派；任务失败重试留在原主机；`settings.mainDeviceId` 指定与持久化；计划并行子任务不被线程亲和阻塞）、自动标签（设备成功执行项目后自动获得项目名与项目别名 `autoTags`、任务里的项目标签登记为项目别名、显式钉住设备只缺标签不阻塞、缺硬能力仍排除、`state.routing.projectTags` 持久化）、自主大脑路径核查（Hub 主机实测文件存在性/同名候选、任务项目与设备上下文、历史提问防重复、提示词禁止用路径等机器可查事实问主人）、自主大脑咨询 worker 与管家记忆（`consult_worker` 只读咨询任务钉到指定设备、回答回写「咨询记录」并注入下一轮、同设备咨询不重复；`remember` 写入/去重/持久化「管家记忆」、项目↔主机映射）、自主大脑自适应节律（空闲跳过与指数退避封顶、有活/执行动作/失败重置节律、手动思考不受跳过影响、六步 assessment 与 ownerAsk 持久化及回执、心路六步摘要、HTTP PATCH adaptive/ownerAskAck）、自主大脑 create_task 的 timeoutSec/requirements（默认 600 秒、显式范围 60–3600 与设备要求透传）、计划子任务上下文（parentTaskId/主任务目标/计划步骤/兄弟子任务、planner 自包含要求）与子任务按 taskId 隔离 Hermes 会话、规划子任务超时兜底与旧数据迁移、Agnes 执行计划（并行组同时派发 / 依赖闸门 / 失败卡点暂停与重试恢复 / Mika 单并发排队 / 取消级联 / 计划元数据持久化）、Hermes 退出码 1 的可读诊断与沙箱提示、任务执行记录（Markdown + 索引 + 离线导出）、执行记录 API、系统语言设置持久化、长期目标（计划归一化/CRUD/立即跟进/定时扫描/持久化恢复/暂停止（跳过下一次、暂停到点自动恢复）/新的指导指令（校验、追加、注入跟进任务、提案刷新）/恢复自动跟进（paused 与 stopped））、管家心路（思考/工作/里程碑条目、每日总结模型生成与降级、设置与周期、持久化、HTTP 接口、历史回填）、头脑风暴（对话落盘与多轮历史、模型失败降级、空回复、to-task 生成任务与目标关联、会话创建/删除与 activeId、持久化、HTTP 接口、SSE 不写常规事件、附件（本机路径自动读取、上传多文件、敏感/二进制拒绝、元数据持久化）、模型切换（BRAINSTORM_* 覆盖与 DEEPSEEK_API_KEY 自动切换））、心智（默认灵魂/工作方法与上限、PATCH 合并语义与 resetSoul/resetSkill、显式文本优先、提示词注入且保留六步、持久化重启恢复、HTTP 接口与 SSE 不写常规事件）、提醒（归一化/nextDueAt/CRUD/鉴权/SSE/持久化/到点回写与重复推进/通知方式 notifyStyle 默认与校验）、设备用途昵称（设置/清除/超长拒绝/设备重报 manifest 不覆盖/持久化恢复/任务展示名回退）、心智迁移（插件 MindTab 渲染与 Host `/api/mind` 代理、Web 控制台不再渲染心智页）、插件密钥存储（优先 Harness credentials，服务不可用时回退本机文件并标注来源）、插件 Git Push（非 loopback 拒绝/无仓库提示/仓库分支远端读取/推送已提交内容/自动设置上游）、DSH bridge 地址同步（插件写入 + POST 更新、无效地址 400、Hub 重启后复用、旧端口自愈重试）、插件重启 Hub（外部进程走自重启接口、旧 Hub 无自重启时给出原因）、DSH Host 服务惰性解析（credentials / sessionController 在挂载后才激活也能用）；
+- 主人决定（ownerAsk 选项 / ownerReply）：选项 2–4 个、稳定 id、超长截断；`POST /api/brain/owner-ask/choose` 写入 `ownerReply`、清空 `ownerAsk`；下一轮提示词包含「主人对上次提问的选择」且要求不再追问；非法/过期选项 400；控制台卡片与通知栏按钮共用该接口；Android 通知栏最多 3 个动作、无选项时打开 App 决策卡片；
+- 大脑 JSON 容错与输出上限：```json 围栏（含未闭合）、前后解释文字、尾随逗号、字符串内花括号、被截断的 JSON 都能解析/修复；无法修复时错误信息带模型输出开头（`大脑返回不是合法 JSON（开头：…）`），Hub 会带修复提示重试一次，第二次成功则整轮正常、清空 `lastError`；`BRAIN_MAX_TOKENS` 默认 4000、可配 1000–8000；DeepSeek 网关自动加 `response_format:json_object`，网关 400 不识别时自动去掉重试；模型返回 `content` 数组片段或 `reasoning_content` 时也能取到正文；
 - `scripts/smoke-test.js` 全绿：注册 → 按 skills/model 路由 → 杀掉设备后 TTL 离线 → 新任务 queued 且带 `route.excluded` → 新设备上线后自动完成 → SSE 首帧 snapshot；
 - `scripts/demo.js` 3 条示例任务分别路由到 3 台设备并 `completed`；
-- APK 静态校验：`com.superbutler.app` / minSdk 26 / targetSdk 36 / versionCode 5 / versionName 0.1.4，`apksigner` v1+v2+v3、`zipalign` 通过。
+- APK 静态校验：`com.superbutler.app` / minSdk 26 / targetSdk 36 / versionCode 6 / versionName 0.1.5（132,019 bytes），`apksigner` v1+v2+v3、`zipalign` 通过。
 
 ## 长期目标（Goals）
 
@@ -420,21 +432,23 @@ node scripts/demo.js
 
 - 入口：桌面端「头脑风暴」区块 / 手机端底部导航 →「对话」（头脑风暴）；
 - 上下文：每一轮都会带上长期目标（活跃/暂停）、进行中与失败任务、最近 3 天「管家心路」总结和待确认提案；system 提示词要求先给结论、区分事实与假设、给 2–3 个方案并推荐一个、结尾给出「下一步」，不要输出 JSON；
+- 附件：输入框下方可一次选择多个文本文件（最多 6 个、单个 ≤256KB，浏览器端读取为文本）；也可以直接在消息里写 Hub 本机的绝对路径或 UNC 路径，Hub 会自动识别并读取。Hub 侧单文件上限 512KB、单次最多 8 个附件、注入提示词总长 160K 字，超出会截断并注明；读取失败（不存在 / 权限 / 二进制 / 目录）只在提示词里说明，不阻断对话；
+- 安全边界：不会读取疑似密钥/凭据文件（`.env`、`id_rsa`、`*.pem`、`*.key`、`.npmrc`、`.git-credentials` 等），也不读取二进制文件；附件正文不会写入 `state.json`，只保存名称/路径/大小元数据；
 - 会话：首条用户消息自动生成标题；Hub 最多保留 30 个会话、每个会话 200 条消息、单条正文 8000 字；可新建、切换、删除会话；
-- 模型与降级：复用自主大脑的模型配置（`BRAIN_API_KEY` / `AGNES_API_KEY` 等）；未配置 Key 或调用失败时，回复会带错误提示但对话仍然保存，可继续追问；
+- 模型与降级：默认使用 Agnes；当本轮带附件、消息里提到本机文件路径、或已读到文件时，自动切到 DeepSeek（`DEEPSEEK_API_KEY` + `https://api.deepseek.com` + `deepseek-chat`）读取并回答，普通对话仍走默认模型；文件模式可用 `BRAINSTORM_FILE_MODEL` / `BRAINSTORM_FILE_BASE_URL` / `BRAINSTORM_FILE_API_KEY` 单独覆盖。只配置 `DEEPSEEK_API_KEY` 时整体自动使用 DeepSeek，也可用 `BRAINSTORM_MODEL` / `BRAINSTORM_BASE_URL` / `BRAINSTORM_API_KEY` 只覆盖头脑风暴，`BRAIN_*` / `AGNES_*` 同时作用于自主大脑与头脑风暴；这些变量可以写在仓库根目录或 `hub/.env`（启动时自动加载，`.env` 已被 gitignore，日志只打印键名不打印值）。未配置 Key 或调用失败时，回复会带错误提示但对话仍然保存，可继续追问；
 - 一键转任务：把某条大脑回复转成普通任务（`priority=6`），可在弹窗里选择关联到某个长期目标；生成的任务会出现在任务列表并自动登记到目标；
 - 事件：`brainstorm.updated` 只通过 SSE 推送、不写入常规事件列表（避免刷屏）。
 
 ## 心智（Soul / Skill）
 
-除了模型和能力，管家还需要一个稳定的「人设」和一套可复用的「工作方法」。控制台的**心智**页把这两样做成可编辑文本：每次自主大脑思考时都会连同目标、任务一起注入提示词。
+除了模型和能力，管家还需要一个稳定的「人设」和一套可复用的「工作方法」。DSH 插件面板的**心智** Tab 把这两样做成可编辑文本（Web 控制台已不再显示该页，配置统一放在插件里）：每次自主大脑思考时都会连同目标、任务一起注入提示词。
 
 - 灵魂（`soul`）：管家的个性、价值观、语气、面对不确定与失败的态度、与主人的关系；默认文本由知识蒸馏生成，稳定少改，上限 6000 字；
 - 工作方法（`skill`）：观察 → 抓主要矛盾 → 评估方案 → 小步执行 → 复盘 → 请示的步骤化流程，可随使用迭代，上限 12000 字；
 - 注入方式：`buildBrainPrompt(snapshot, {mind})` 在身份、严格 JSON 与六步协议之后插入「你的灵魂」「你的工作方法」两段与一句衔接说明，再进入动作白名单；未配置 `mind` 时提示词保持原样，便于回滚；
-- 编辑与恢复默认：页面提供两张编辑卡（字数统计 / 默认或自定义标识 / 单卡恢复默认、全部恢复默认）；`PATCH /api/mind {soul?,skill?,resetSoul?,resetSkill?}` 字段可选，只传一个字段不会清空另一个，显式文本优先于 `reset`，空文本或超长返回 400；
+- 编辑与恢复默认：插件面板提供两张编辑卡（字数统计 / 默认或自定义标识 / 单卡恢复默认、全部恢复默认）；`PATCH /api/mind {soul?,skill?,resetSoul?,resetSkill?}` 字段可选，只传一个字段不会清空另一个，显式文本优先于 `reset`，空文本或超长返回 400；
 - 持久化：保存在 `hub/data/state.json` 的 `mind` 字段（`{soul,skill,updatedAt}`）；非法或超长内容在恢复时回退默认 / 截断，不会让 Hub 启动失败；
-- 接口：`GET /api/mind` 返回含 `defaults`、`limits`、字数与 `soulIsDefault/skillIsDefault` 的视图；`PATCH /api/mind` 修改；事件 `mind.updated` 只通过 SSE 推送、不写入常规事件列表；控制台内也可直接编辑心智。
+- 接口：`GET /api/mind` 返回含 `defaults`、`limits`、字数与 `soulIsDefault/skillIsDefault` 的视图；`PATCH /api/mind` 修改；事件 `mind.updated` 只通过 SSE 推送、不写入常规事件列表；编辑入口在 DSH 插件面板的「心智」Tab。
 - 默认文本来源：由五个决策系统仓库（毛泽东方法论、丁元英思维、孙子兵法、问道五门、韩非子）蒸馏为原创中文表述，逐仓库要点见 [docs/SOUL-SKILL-RESEARCH.md](docs/SOUL-SKILL-RESEARCH.md)，归属与许可说明见 [CREDITS.md](CREDITS.md) §3。
 
 ## 提醒（Reminders）
@@ -470,7 +484,7 @@ task-records/
 ### 控制台查看执行记录
 
 - 手机端：**底部导航（可左右滑动）→ 执行记录**；桌面端：设置 → 系统维护 → 浏览执行记录；
-- 手机端底部导航常显且可横向滑动（状态/任务/目标/心路/对话/心智/提醒/指令/开发/设置/执行记录），桌面端直接滚动页面查看各区块；
+- 手机端底部导航常显且可横向滑动（状态/任务/目标/心路/对话/提醒/指令/开发/设置/执行记录），桌面端直接滚动页面查看各区块；
 - 支持搜索（任务 ID / 指令 / 设备 / 错误）、按状态筛选、点击查看；
 - 记录以 Markdown 渲染（标题/表格/代码块/时间线），可**复制**或**下载 .md**，父子任务可直接互跳；
 - 深链：`/?open=records` 直接打开执行记录；`/?open=settings` 直接打开设置。
@@ -483,6 +497,17 @@ task-records/
 - 回收按线程生效：同任务线程的后续任务、计划父任务与其子任务会一起进回收站；已归档任务回收时自动取消归档（两者互斥）；
 - 默认任务列表、统计与自主大脑思考都忽略回收站任务；`GET /api/tasks?includeTrashed=1` 或 `/api/snapshot` 可看到它们（前者是列表，后者供控制台垃圾桶视图）；
 - 彻底删除（`POST /api/tasks/:id/purge`）会删除任务、同线程任务与计划子任务，清理长期目标里的任务引用（`taskIds` / `runningTaskId` / `lastTaskId`），并删除对应执行记录 Markdown，操作不可撤销。
+
+### 派发亲和（母机 / 项目 / 线程）
+
+同一件事尽量交给「知道上下文」的那台机器，而不是每次按分数随机换机：
+
+- **优先级**：显式 `requirements.deviceId`（硬锁）> 任务原主机 `task.affinity`（重试 / 继续此任务）> 同线程上次执行的主机 > **项目上次成功执行的设备**（项目亲和）> **母机**（`settings.mainDeviceId`，未配置时为 Hub 所在主机或带「本机」标签的设备）> 常规能力评分；
+- 首选主机**离线或并发已满**时任务保持 `queued` 并显示「亲和等待：…」，等它上线/空槽后自动接走；只有设备不存在、已禁用或缺能力时才回退普通路由；
+- 项目亲和按任务 `requirements.project` 记录，成功完成后写入 `state.json` 的 `routing.projectAffinity`（最多 200 条），重启后继续生效；失败任务手动重试会留在原主机，ack 超时/掉线这种“根本没跑起来”的情况才会清掉亲和重新派发；
+- 设置 → **派发与母机** 可选择母机设备（或「本机（自动识别）」），对应 `PATCH /api/settings {mainDeviceId}`；显式 `deviceId` 的任务以及计划并行子任务不受亲和阻塞；
+- **自动标签**：设备除了 manifest 里的标签，Hub 还会按「这台机器成功执行过哪些项目」推导自动标签 `autoTags`（项目名 + 项目别名，随设备 JSON 下发并参与 `tags` 匹配）；任务 `requirements.project` 下出现过的标签会写入 `state.json` 的 `routing.projectTags` 作为项目别名，大脑把项目名/任务名当标签时也能自动匹配；显式 `deviceId` 钉住的设备只缺标签时按无 tags 需求评分派发，但缺模型/技能等硬能力仍会排除；
+- 回归测试：`hub/test/routing-affinity.test.js`（母机优先、线程/项目亲和与重启恢复、容量/离线等待、硬 deviceId、失败重试粘性、设置校验）、`hub/test/auto-tags.test.js`（自动标签推导与项目别名持久化、钉住设备标签宽松、缺硬能力仍排队）。
 
 ### 多语言（简体中文 / English）
 
@@ -504,11 +529,12 @@ task-records/
 ## 已知限制
 
 - Hub 是单点，需要一台常开设备；断网时无法下发任务。
-- 当前路由是**确定性能力评分**，不是 LLM 规划器；Agnes 拆分已支持并行组 + 线性依赖 + 卡点暂停，但还不是通用多设备 DAG 调度器。
+- 当前路由是**确定性能力评分 + 亲和锁定**，不是 LLM 规划器；亲和优先保证「项目上下文不丢」，不保证跨项目的最优负载均衡。Agnes 拆分已支持并行组 + 线性依赖 + 卡点暂停，但还不是通用多设备 DAG 调度器。
 - DSH/CLI 接口因版本而异；`dsh-cli` 与 `cli` 执行器使用可配置命令模板，需按实际环境调整。
 - ComfyUI 生成的图片保存在工作机本地，暂不回传 Web 控制台（任务结果含路径）。
 - APK 是 WebView 壳：自签名 HTTPS 会被拒绝（家庭内网建议 http）；无服务端推送/离线缓存/自适应图标；任务通知依赖页面保持运行，App 被系统彻底杀死后不再更新（**提醒通知例外**：由原生 `AlarmManager` 发送，不依赖页面）。
 - 提醒的「闹钟」方式仍是普通高优先级通知加闹钟音与震动（不是系统级闹钟 App，不会全屏弹出）；受勿扰/音量/渠道设置影响，Android 12+ 精确闹钟权限被撤销时会退化为非精确排程。
+- 大脑「需要你决定」的通知栏动作按钮最多显示 3 个（Android 限制）；选项更多时或没有选项时，点通知进入 App 后在「自主大脑」卡片里选择。
 - 手机端 UI 已通过真实 Hub DOM 级验证；近期已更新 README 补充正式截图（见上方「界面预览」）。
 - **设备代理必须运行在普通用户会话**：如果它在受限沙箱（例如 DSH 的 workspace-write 文件沙箱）里被拉起，Hermes CLI 无法访问 `%LOCALAPPDATA%\hermes`，任务会以「Hermes CLI 退出码 1（无输出）」在 1~2 秒内失败。此时用本机的 `worker-workspace\restart-butler.cmd`（等价于在普通 PowerShell 里运行 `worker-workspace\start-workers.ps1 -Restart`）一键重启；启动器会做沙箱自检，告警写入 `worker-workspace\logs\launcher.warnings.log`。
 

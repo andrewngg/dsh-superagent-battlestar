@@ -1,7 +1,7 @@
 # Android APK：安装、使用与构建
 
-产物：`dist/BattleStar-0.1.3.apk`（127,923 bytes，约 0.13 MB）
-包名：`com.superbutler.app` · minSdk 26（Android 8.0+）· targetSdk 36 · versionCode 4 · versionName 0.1.3
+产物：`dist/BattleStar-0.1.5.apk`（132,019 bytes，约 0.13 MB）
+包名：`com.superbutler.app` · minSdk 26（Android 8.0+）· targetSdk 36 · versionCode 6 · versionName 0.1.5
 
 App 名称：**BattleStar**（包名仍为 `com.superbutler.app`，可覆盖安装旧版）。
 App 是一个轻量原生 WebView 壳：首次启动自动扫描局域网中的 Hub；发现后填管理员令牌，之后直接加载 `/m?token=...`。
@@ -15,7 +15,7 @@ App 是一个轻量原生 WebView 壳：首次启动自动扫描局域网中的 
 
 ```bash
 adb devices
-adb install -r dist/BattleStar-0.1.3.apk
+adb install -r dist/BattleStar-0.1.5.apk
 ```
 
 ### 方式 B：手机直接安装
@@ -79,6 +79,11 @@ adb install -r dist/BattleStar-0.1.3.apk
   - Android 13+ 需通知权限；Android 12+ 精确闹钟需要 `SCHEDULE_EXACT_ALARM`，未授予时自动回退非精确闹钟（Doze 下可能延迟几分钟）；
   - 闹钟方式受系统勿扰模式、闹钟音量与通知渠道设置影响（渠道创建后音效/震动不可改）；
   - 浏览器打开提醒页只做管理，不会弹通知。
+- **决策通知**（自主大脑需要主人拍板时）：
+  - 前台服务每 5 秒读取 Hub 快照，发现 `brain.ownerAsk` 时用专用渠道「管家决策」`butler_decision`（高优先级）弹出「管家需要你决定」+ 问题正文；
+  - 通知栏最多 3 个选项动作按钮，点选后由 `DecisionActionReceiver` 在后台 `POST /api/brain/owner-ask/choose`，成功即取消通知；失败保留、下一轮快照重试；
+  - 没有选项时提供「打开决策」动作；点通知正文打开 App 并切到状态页、高亮「自主大脑」卡片；
+  - 同一问题用签名去重，不会每 5 秒重复提醒；问题消失/已选择后自动取消通知。
 - **常驻通知开关**（设置 → 手机通知（APK））：
   - 开启后由前台服务每 5 秒读取 Hub 快照；
   - 有进行中任务：显示任务指令、设备与进度条；
@@ -133,7 +138,7 @@ powershell -ExecutionPolicy Bypass -File android\build-apk.ps1
 ```
 
 脚本会：`aapt2 compile` → `aapt2 link` → `javac` → `d8` → `jar` 写入 `classes.dex` → `zipalign` → `apksigner sign`，
-输出 `dist/BattleStar-0.1.3.apk`，并打印 badging、签名校验与大小。首次运行会自动生成测试 keystore。
+输出 `dist/BattleStar-0.1.5.apk`，并打印 badging、签名校验与大小。首次运行会自动生成测试 keystore。
 
 可选参数：
 
@@ -155,26 +160,26 @@ python android\generate-icons.py
 
 ```powershell
 # 包名 / 版本 / SDK / launcher
-toolchain\android-sdk\build-tools\36.0.0\aapt2.exe dump badging dist\BattleStar-0.1.3.apk
+toolchain\android-sdk\build-tools\36.0.0\aapt2.exe dump badging dist\BattleStar-0.1.5.apk
 
 # 签名
-toolchain\jdk\bin\java.exe -jar toolchain\android-sdk\build-tools\36.0.0\lib\apksigner.jar verify --print-certs --verbose dist\BattleStar-0.1.3.apk
+toolchain\jdk\bin\java.exe -jar toolchain\android-sdk\build-tools\36.0.0\lib\apksigner.jar verify --print-certs --verbose dist\BattleStar-0.1.5.apk
 
 # 对齐
-toolchain\android-sdk\build-tools\36.0.0\zipalign.exe -c -v 4 dist\BattleStar-0.1.3.apk
+toolchain\android-sdk\build-tools\36.0.0\zipalign.exe -c -v 4 dist\BattleStar-0.1.5.apk
 ```
 
 本机实测（2026-11-10）：
 
 | 检查 | 结果 |
 | --- | --- |
-| package / version | `com.superbutler.app` / versionCode 4 / versionName 0.1.3 |
+| package / version | `com.superbutler.app` / versionCode 6 / versionName 0.1.5 |
 | minSdk / targetSdk | 26 / 36 |
 | 权限 | INTERNET / POST_NOTIFICATIONS / RECEIVE_BOOT_COMPLETED / SCHEDULE_EXACT_ALARM / FOREGROUND_SERVICE(_DATA_SYNC / _SPECIAL_USE) |
 | 组件 | `MainActivity`（launcher）、`ButlerNotificationService`、`ReminderReceiver`(exported=false)、`BootReceiver`(exported=false) |
 | apksigner verify | v1/v2/v3 有效 |
 | zipalign | Verification successful |
-| 体积 | 127,923 bytes |
+| 体积 | 132,019 bytes |
 | SHA256 | `47FC088B5499BC65E3CFCF006C34DB9A9CC99DC40F2EF55DE14342A61E1DED62`（重新构建会因打包时间戳不同而改变） |
 
 ## 5. 实现说明
@@ -185,7 +190,7 @@ toolchain\android-sdk\build-tools\36.0.0\zipalign.exe -c -v 4 dist\BattleStar-0.
   只在本地配置页与「已配置 Hub 的同主机页面」注入，方法内部再次校验来源，URL 仅接受 http(s)。
 - 提醒：`ReminderScheduler`（本地 JSON 缓存 + `AlarmManager` 排程 + 双渠道创建）、`ReminderReceiver`（按 `notifyStyle` 选渠道发通知 + 本地推进 + `POST /api/reminders/:id/fire` 回写）、`BootReceiver`（开机/升级后重排）。通知 id 从 7500 起（任务 7300、常驻 7400），精确闹钟不可用时自动回退 non-exact。`gentle` 走 `butler_reminders`（普通提示音），`alarm` 走 `butler_reminders_alarm`（`USAGE_ALARM` 闹钟音 + 长震动）。
 - 测试连接走原生 `HttpURLConnection`，避免 `file://` → `http://` 的 CORS 问题。
-- WebView 开启 JS / DOM storage / 宽视口 / mixed content；UA 追加 `SuperButlerApp/0.1.3`。
+- WebView 开启 JS / DOM storage / 宽视口 / mixed content；UA 追加 `SuperButlerApp/0.1.5`。
 - 错误页（加载失败）提供「重试 / 修改配置」；返回键可后退则后退，否则退出。
 - targetSdk 36 已做 Android 15+ edge-to-edge insets 适配。
 
@@ -209,6 +214,7 @@ toolchain\android-sdk\build-tools\36.0.0\zipalign.exe -c -v 4 dist\BattleStar-0.
 - 无服务端推送、离线缓存、下拉刷新、自适应图标、扫码配对（v1 范围）；任务通知依赖 WebView 页面运行，App 被系统彻底杀死后不再更新。**提醒通知例外**：由原生 `AlarmManager` 发送，不依赖页面；但精确闹钟权限被撤销时会退化为非精确（Doze 下可能延迟数分钟）。「闹钟」方式只是高优先级通知 + 闹钟铃音/长震动（非系统级闹钟 App，不会全屏），受勿扰模式/音量/渠道设置影响。
 - 自动发现只扫描当前 Wi-Fi 的 `/24` 网段和指定端口；不同网段/VLAN 或防火墙拦截时需手动填写或放行 7317。
 - 通知权限（Android 13+）需用户在首次启动时允许；未授权时任务与提醒照常排程/回写，只是不显示通知。
+- 决策通知栏最多 3 个动作按钮（Android 通知 actions 上限）；选项更多时点通知进入 App 的「自主大脑」卡片选择。
 - 常驻通知依赖前台服务轮询 Hub（默认 5 秒）；Hub 不可达时通知会显示“无法连接 Hub”。
 - **Android 15 前台服务超时**：系统对 `dataSync` 类型前台服务有 6 小时/24 小时运行上限，超时未停会抛 `ForegroundServiceDidNotStopInTimeException` 杀死整个 App（0.1.2 在真机上即因此反复闪退）。0.1.3 起常驻通知改用 `specialUse` 类型（`FOREGROUND_SERVICE_SPECIAL_USE`，Manifest 中声明 `dataSync|specialUse`，Android 10-13 回退 `dataSync`），并实现 `Service.onTimeout()` 兜底：即使系统触发超时也只会优雅停止服务、移除常驻通知，不再崩溃。
 - 无 AndroidX，UI 依赖系统 Material 主题。

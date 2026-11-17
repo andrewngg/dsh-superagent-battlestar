@@ -8,6 +8,8 @@ hub/data/
 .butler-device.json
 device-agent/.state/
 worker-workspace/
+applications.db
+*.db-journal
 
 # 任务执行记录（含任务原文/输出，可能含私人信息，绝不提交）
 /task-records/

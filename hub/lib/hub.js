@@ -20,6 +20,7 @@ const {
   DEFAULT_SETTINGS,
   SUPPORTED_LANGUAGES,
   assertLanguage,
+  assertMainDeviceId,
   mergeSettings,
   readSettings,
   writeSettings,
@@ -39,7 +40,11 @@ const {
 } = require('./goals');
 const {
   BRAIN_ACTIONS,
+  MAX_CONSULT_ANSWER,
+  MAX_CONSULTATIONS,
   MAX_IDLE_SEC,
+  MAX_NOTES,
+  MAX_OWNER_REPLY_LENGTH,
   MIN_AUTO_CONFIDENCE,
   brainToJson,
   buildBrainPrompt,
@@ -86,8 +91,14 @@ const {
   findSession: findBrainstormSession,
   normalizeChatRequest: normalizeBrainstormChatRequest,
   restoreBrainstorm,
+  selectBrainstormModel,
   sessionSummary: brainstormSessionSummary,
 } = require('./brainstorm');
+const {
+  attachmentMeta: brainstormAttachmentMeta,
+  extractFilePaths,
+  readAttachments: readBrainstormAttachments,
+} = require('./file-reader');
 const {
   MAX_SKILL_CHARS,
   MAX_SOUL_CHARS,
@@ -136,6 +147,15 @@ function planExecutionLabel(execution) {
   if (strategy === 'parallel') return '并行执行';
   if (strategy === 'sequential') return '按顺序执行';
   return '并行 + 顺序依赖';
+}
+
+/**
+ * 是否为「模型输出格式问题」（可通过重试修复）：非法 JSON、空输出、没有结论。
+ * 网络/鉴权/配置类错误不在此列，直接向上抛。
+ */
+function isBrainParseFailure(err) {
+  const message = String((err && err.message) || err || '');
+  return /不是合法 JSON|没有给出任何结论|返回为空|没有返回内容/.test(message);
 }
 
 function normalizeOutput(input) {
@@ -257,8 +277,13 @@ class Hub {
     this._recordTimers = new Map();
     this._recordIndexTimer = null;
     this._recordWarned = false;
-    // 系统设置（目前只有系统默认语言）；持久化到 <dataDir>/settings.json。
+    // 系统设置（系统默认语言 / 派发主设备）；持久化到 <dataDir>/settings.json。
     this.settings = mergeSettings(DEFAULT_SETTINGS, options.settings || {});
+    // 项目亲和：project → 最近一次成功执行该项目的设备 id（随 state.json 持久化）。
+    this.projectAffinity = new Map();
+    // 项目别名标签：project → 该项目在任务要求里出现过的标签（随 state.json 持久化）。
+    // 用途：设备做过某个项目后，自动获得该项目名与别名标签，避免大脑写的项目标签无人声明而永久排队。
+    this.projectTags = new Map();
     // 长期目标：按计划自动创建跟进任务，goalTickMs 为调度扫描间隔。
     this.goalTickMs = util.clampInt(options.goalTickMs, 30000, 1000, 3600 * 1000);
     this.goals = new Map();
@@ -377,9 +402,32 @@ class Hub {
       const device = this._restoreDevice(raw);
       if (device) this.devices.set(device.id, device);
     }
+    // 项目亲和（项目 → 上次成功设备）：恢复后仍优先回到该项目熟悉的主机。
+    const savedAffinity = util.isPlainObject(savedObj.routing) ? savedObj.routing.projectAffinity : null;
+    if (util.isPlainObject(savedAffinity)) {
+      for (const [project, deviceId] of Object.entries(savedAffinity)) {
+        const key = util.str(project, 120);
+        const id = util.str(deviceId, 80);
+        if (key && id) this.projectAffinity.set(key, id);
+      }
+    }
+    // 项目别名标签（project → tags）：恢复后设备仍能凭项目历史自动匹配这些标签。
+    const savedProjectTags = util.isPlainObject(savedObj.routing) ? savedObj.routing.projectTags : null;
+    if (util.isPlainObject(savedProjectTags)) {
+      for (const [project, tags] of Object.entries(savedProjectTags)) {
+        this._learnProjectTags(project, tags);
+      }
+    }
     for (const raw of util.arr(savedObj.tasks)) {
       const task = this._restoreTask(raw);
       if (task) this.tasks.set(task.id, task);
+    }
+    // 旧任务里已经写过的项目标签（如「反腐AI」）补学成项目别名，升级后不再丢标签语义。
+    for (const task of this.tasks.values()) {
+      const project = this._taskProject(task);
+      if (project && util.arr(task.requirements && task.requirements.tags).length) {
+        this._learnProjectTags(project, task.requirements.tags);
+      }
     }
     this.events = util.arr(savedObj.events).slice(-this.eventLimit);
 
@@ -622,6 +670,12 @@ class Hub {
         ...this.taskToJson(task),
         attachments: (task.attachments || []).map((file) => ({ ...file })),
       })),
+      // 派发亲和：项目 → 最近一次成功执行该项目的设备，重启后继续沿用。
+      routing: {
+        projectAffinity: Object.fromEntries(this.projectAffinity),
+        projectTags: Object.fromEntries([...this.projectTags].map(([project, tags]) => [project, [...tags]])),
+        mainDeviceId: this.settings.mainDeviceId || '',
+      },
       goals: [...this.goals.values()].map((goal) => goalToJson(goal)),
       brain: this._brainStateForPersist(),
       journal: this._journalStateForPersist(),
@@ -767,6 +821,22 @@ class Hub {
           }
         : null,
       routingAdvice: this.normalizeRoutingAdvice(raw.routingAdvice),
+      affinity:
+        util.isPlainObject(raw.affinity) && util.str(raw.affinity.deviceId, 80)
+          ? {
+              deviceId: util.str(raw.affinity.deviceId, 80),
+              reason: util.str(raw.affinity.reason, 200) || '',
+              at: util.str(raw.affinity.at, 40) || null,
+            }
+          : null,
+      consult:
+        util.isPlainObject(raw.consult) && util.str(raw.consult.question, 600)
+          ? {
+              question: util.str(raw.consult.question, 600),
+              deviceId: util.str(raw.consult.deviceId, 80) || null,
+              project: util.str(raw.consult.project, 120) || null,
+            }
+          : null,
       _avoidDeviceIds: [],
     };
   }
@@ -783,6 +853,8 @@ class Hub {
       agentVersion: device.agentVersion,
       endpoint: device.endpoint,
       tags: [...device.tags],
+      // 自动标签：由设备成功执行过的项目（项目名 + 项目别名标签）推导，只用于能力匹配，不改 manifest。
+      autoTags: this._autoTagsForDevice(device.id),
       online: device.online,
       status: device.status,
       registeredAt: device.registeredAt,
@@ -838,6 +910,9 @@ class Hub {
       trashed: Boolean(task.trashedAt),
       trashedAt: task.trashedAt || null,
       routingAdvice: task.routingAdvice ? JSON.parse(JSON.stringify(task.routingAdvice)) : null,
+      // 派发亲和：首次派发到哪台主机，后续重试继续粘在同一台（避免丢失项目上下文）。
+      affinity: task.affinity ? { ...task.affinity } : null,
+      consult: task.consult ? { ...task.consult } : null,
       route: {
         reason: task.route.reason,
         candidates: task.route.candidates.map((c) => ({ ...c })),
@@ -906,9 +981,9 @@ class Hub {
   }
 
   /**
-   * 更新系统设置（目前只有 language）。
-   * @param {{language?: string}} patch
-   * @returns {{language:string}}
+   * 更新系统设置（language / mainDeviceId）。
+   * @param {{language?: string, mainDeviceId?: string}} patch
+   * @returns {{language:string, mainDeviceId:string}}
    */
   updateSettings(patch = {}) {
     const input = util.isPlainObject(patch) ? patch : {};
@@ -920,6 +995,17 @@ class Hub {
         throw badRequest(err.message);
       }
     }
+    if (input.mainDeviceId !== undefined) {
+      try {
+        next.mainDeviceId = assertMainDeviceId(input.mainDeviceId);
+      } catch (err) {
+        throw badRequest(err.message);
+      }
+      // 指定的主设备必须已注册（空字符串表示自动使用本机）。
+      if (next.mainDeviceId && !this.devices.has(next.mainDeviceId)) {
+        throw badRequest(`主设备不存在：${next.mainDeviceId}`);
+      }
+    }
     const changed = JSON.stringify(next) !== JSON.stringify(this.settings);
     if (!changed) return this.getSettings();
     this.settings = next;
@@ -929,7 +1015,7 @@ class Hub {
       this.log('warn', `系统设置写入失败：${err && err.message ? err.message : err}`);
     }
     this.broadcast('settings.updated', { settings: this.getSettings(), at: protocol.nowIso() });
-    this.log('info', `系统设置更新：language=${this.settings.language}`);
+    this.log('info', `系统设置更新：language=${this.settings.language} mainDeviceId=${this.settings.mainDeviceId || '(本机)'}`);
     this.schedulePersist();
     return this.getSettings();
   }
@@ -1956,6 +2042,10 @@ class Hub {
       lastSummary: this.brain.lastSummary,
       lastAssessment: this.brain.lastAssessment,
       ownerAsk: this.brain.ownerAsk,
+      ownerReply: this.brain.ownerReply || null,
+      // 咨询 worker 的回答与管家长期记忆：跨轮/跨重启都要保留。
+      consultations: util.arr(this.brain.consultations).map((item) => ({ ...item })),
+      notes: util.arr(this.brain.notes).map((item) => ({ ...item })),
       decisions: this.brain.decisions.slice(-30).map((decision) => ({ ...decision })),
     };
   }
@@ -2012,6 +2102,56 @@ class Hub {
       'info',
       `自主大脑设置更新：enabled=${this.brain.enabled} mode=${this.brain.mode} interval=${this.brain.intervalSec}s adaptive=${this.brain.adaptive !== false}`,
     );
+    this.schedulePersist();
+    return this.getBrain();
+  }
+
+  /**
+   * 主人在通知栏/控制台里选择了 ownerAsk 的某个选项：
+   * 记录选择供下一轮思考使用，并清除当前提问；没有选项时用 PATCH /api/brain {ownerAskAck:true} 确认。
+   */
+  chooseBrainOwnerAsk(optionId) {
+    const ask = this.brain.ownerAsk;
+    if (!ask) throw badRequest('当前没有等待主人决定的问题');
+    const id = util.str(optionId, 40).trim();
+    if (!id) throw badRequest('缺少选项 id');
+    const picked = util.arr(ask.options).find((item) => item && item.id === id);
+    if (!picked) throw badRequest('无效的选项');
+    this.brain.ownerReply = {
+      optionId: picked.id,
+      label: picked.label,
+      question: ask.text,
+      goalId: ask.goalId || null,
+      at: protocol.nowIso(),
+    };
+    this.brain.ownerAsk = null;
+    const at = protocol.nowIso();
+    this.broadcast('brain.updated', { brain: this.getBrain(), at });
+    this.log('info', `主人选择（大脑提问）：${util.truncate(picked.label, 60)}`);
+    this.schedulePersist();
+    return this.getBrain();
+  }
+
+  /**
+   * 主人回复大脑：可以是选项之外的文字，也可以在没有待决定问题时主动给方向
+   * （例如「先放弃自动化，手动补投递」）。写入 ownerReply 供下一轮思考使用。
+   */
+  replyBrainOwnerAsk(text) {
+    const ask = this.brain.ownerAsk || null;
+    const reply = util.str(text, MAX_OWNER_REPLY_LENGTH).trim();
+    if (!reply) throw badRequest('缺少回复内容');
+    this.brain.ownerReply = {
+      optionId: null,
+      label: util.truncate(reply, 40),
+      text: reply,
+      question: ask ? ask.text : '',
+      goalId: ask && ask.goalId ? ask.goalId : null,
+      at: protocol.nowIso(),
+    };
+    this.brain.ownerAsk = null;
+    const at = protocol.nowIso();
+    this.broadcast('brain.updated', { brain: this.getBrain(), at });
+    this.log('info', `主人回复（大脑）：${util.truncate(reply, 60)}`);
     this.schedulePersist();
     return this.getBrain();
   }
@@ -2263,7 +2403,21 @@ class Hub {
       const prompt = buildBrainPrompt(snapshot, { mind: this.mind, maxActions: this.brain.maxActions });
       const think = this._getBrainThinker();
       const reply = await think(prompt);
-      const parsed = parseBrainReply(reply);
+      let parsed;
+      try {
+        parsed = parseBrainReply(reply);
+      } catch (err) {
+        // 模型偶尔会输出解释文字、Markdown 围栏或截断的 JSON：带修复提示重试一次，
+        // 成功就照常决策；仍失败才记为错误（错误里带输出开头，方便在控制台定位）。
+        if (!isBrainParseFailure(err)) throw err;
+        this.log('warn', `自主大脑输出无法解析，带修复提示重试一次：${err.message}`);
+        parsed = parseBrainReply(
+          await think({
+            system: prompt.system,
+            user: `${prompt.user}\n\n【重要】你上一次的输出无法解析为 JSON（${err.message}）。请重新只输出一个完整合法的 JSON 对象：不要 Markdown 代码围栏、不要任何解释；字符串正确转义、括号闭合；内容过长时压缩 assessment 与 instruction。`,
+          }),
+        );
+      }
       decision.summary = parsed.summary;
       decision.assessment = parsed.assessment;
       decision.ownerAsk = parsed.ownerAsk;
@@ -2290,6 +2444,8 @@ class Hub {
       this.brain.lastThinkAt = protocol.nowIso();
       this._brainUpdateCadence(decision, workload);
       recordBrainDecision(this.brain, decision);
+      // 主人上一轮的选项已被本轮思考消费，清空以免重复引用。
+      this.brain.ownerReply = null;
       this.broadcast('brain.updated', { brain: this.getBrain(), at: this.brain.lastThinkAt });
       this._journalBrainDecision(decision);
       this.schedulePersist();
@@ -2352,6 +2508,8 @@ class Hub {
         instruction: util.truncate(task.instruction || '', 300),
         status: task.status,
         goalId: task.goalId || null,
+        project: util.isPlainObject(task.requirements) && task.requirements.project ? util.str(task.requirements.project, 120) : null,
+        assignedDeviceId: task.assignedDeviceId || null,
         isPlan: Boolean(task.isPlan),
         parentTaskId: task.parentTaskId || null,
         threadId: task.threadId || null,
@@ -2438,6 +2596,7 @@ class Hub {
     const decisions = this.brain.decisions.slice(-3).map((item) => ({
       at: item.at || null,
       summary: util.truncate(item.summary || '', 160),
+      ownerAsk: item.ownerAsk && item.ownerAsk.text ? util.truncate(item.ownerAsk.text, 200) : null,
       actions: util.arr(item.actions).slice(0, 3).map((action) => ({
         action: action.action,
         taskId: action.taskId || null,
@@ -2447,7 +2606,208 @@ class Hub {
         error: action.error ? util.truncate(action.error, 80) : null,
       })),
     }));
-    return { now: protocol.nowIso(), stats: this.stats(), goals, tasks, decisions, approvals, devices };
+    const pathAudit = this._brainPathAudit(picked);
+    // 项目 ↔ 主机：大脑据此把「问哪台设备」一步到位；咨询记录与管家记忆给跨轮上下文。
+    const projectHosts = this._brainProjectHosts();
+    const consultations = this.brain.consultations.slice(-5).map((item) => ({
+      at: item.at || null,
+      deviceId: item.deviceId || null,
+      deviceName: item.deviceName || null,
+      project: item.project || null,
+      question: util.truncate(item.question || '', 200),
+      answer: util.truncate(item.answer || '', 400),
+      ok: item.ok === true,
+    }));
+    const notes = this.brain.notes.slice(-8).map((item) => ({
+      at: item.at || null,
+      text: util.truncate(item.text || '', 300),
+    }));
+    return {
+      now: protocol.nowIso(),
+      stats: this.stats(),
+      goals,
+      tasks,
+      decisions,
+      approvals,
+      devices,
+      ownerReply: this.brain.ownerReply || null,
+      pathAudit,
+      projectHosts,
+      consultations,
+      notes,
+      host: { user: os.userInfo().username, platform: process.platform },
+    };
+  }
+
+  /**
+   * 项目 → 主机映射：让大脑知道「这个问题该问谁」。
+   * 优先用成功执行过的项目亲和，其次用最近任务的执行设备补齐。
+   * @returns {Array<{project:string,deviceId:string,deviceName:string|null,source:'affinity'|'task'}>}
+   */
+  _brainProjectHosts() {
+    const entries = new Map();
+    for (const [project, deviceId] of this.projectAffinity) {
+      entries.set(project, { project, deviceId, deviceName: null, source: 'affinity' });
+    }
+    const recent = [...this.tasks.values()]
+      .filter((task) => util.isPlainObject(task.requirements) && task.requirements.project && task.assignedDeviceId)
+      .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
+      .slice(0, 60);
+    for (const task of recent) {
+      const project = util.str(task.requirements.project, 120);
+      if (!project || entries.has(project)) continue;
+      entries.set(project, {
+        project,
+        deviceId: task.assignedDeviceId,
+        deviceName: task.assignedDeviceName || null,
+        source: 'task',
+      });
+    }
+    // 亲和表按写入顺序保存；取最近写入的 10 个项目，避免旧项目挤掉新项目。
+    return [...entries.values()].slice(-10).map((entry) => {
+      const device = this.devices.get(entry.deviceId);
+      return { ...entry, deviceName: entry.deviceName || (device ? deviceDisplayName(device) : null) };
+    });
+  }
+
+  /**
+   * 大脑路径核查：从失败/排队任务的文件引用里提取路径，在 Hub 主机上探测存在性。
+   * 目的：文件在不在母机是机器可查的事实，不能让大脑把这种问题升级成 ownerAsk。
+   * @param {Array<object>} tasks
+   * @returns {Array<{ref:string,status:'exists'|'missing'|'candidates',paths:string[]}>}
+   */
+  _brainPathAudit(tasks) {
+    const refs = [];
+    const seen = new Set();
+    const lower = (value) => (process.platform === 'win32' ? value.toLowerCase() : value);
+    const addRef = (raw) => {
+      const value = util
+        .str(raw, 200)
+        .replace(/^[\s（("'`]+/, '')
+        .replace(/[\s"'`，。；：、）)\]】>,。]+$/, '')
+        .trim();
+      if (value.length < 3) return;
+      const key = lower(value);
+      if (seen.has(key)) return;
+      seen.add(key);
+      refs.push(value);
+    };
+    const taskText = (task) =>
+      [task.instruction, task.error, task.progress && task.progress.message, task.lastEvent && task.lastEvent.message]
+        .filter(Boolean)
+        .join('\n');
+    for (const task of tasks) {
+      const text = taskText(task);
+      if (!text) continue;
+      for (const match of text.matchAll(/[A-Za-z]:[\\/][^\s"'<>|，。；、）】]+/g)) addRef(match[0]);
+      for (const match of text.matchAll(/(?:^|[\s（("'`])(\/[^\s"'<>|，。；、）】]+(?:\/[^\s"'<>|，。；、）】]*)+)/g)) {
+        addRef(match[1]);
+      }
+      if (refs.length >= 10) break;
+    }
+    // 裸文件名：绝对路径里已经出现的同名文件不重复探测。
+    const absKeys = refs.map((ref) => lower(ref.replace(/\\/g, '/')));
+    for (const task of tasks) {
+      const text = taskText(task);
+      if (!text) continue;
+      const pattern =
+        /(?:^|[\s（("'`])([A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]+)*\.(?:py|js|cjs|mjs|ts|json|pdf|md|txt|csv|xlsx?|docx?|zip|gz|ps1|sh|bat|cmd|ya?ml|html?|css|png|jpe?g|gif|webp|log|sqlite|db))(?=$|[\s"'<>|，。；、）】,])/gi;
+      for (const match of text.matchAll(pattern)) {
+        const name = match[1];
+        const tail = lower(`/${name}`);
+        if (absKeys.some((abs) => abs.endsWith(tail))) continue;
+        addRef(name);
+        if (refs.length >= 10) break;
+      }
+      if (refs.length >= 10) break;
+    }
+    if (!refs.length) return [];
+    const roots = this._brainScanRoots();
+    const audit = [];
+    for (const ref of refs.slice(0, 8)) {
+      const entry = this._probeBrainPath(ref, roots);
+      if (entry) audit.push(entry);
+    }
+    return audit;
+  }
+
+  /** 路径核查允许扫描的根目录：BRAIN_PATH_ROOTS（path.delimiter 分隔）优先，其次仓库/工作区/桌面/下载/cwd。 */
+  _brainScanRoots() {
+    const repoRoot = path.resolve(__dirname, '..', '..');
+    const home = os.homedir();
+    const configured = String(process.env.BRAIN_PATH_ROOTS || '')
+      .split(path.delimiter)
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+    const roots = [
+      ...configured,
+      repoRoot,
+      path.join(repoRoot, 'worker-workspace'),
+      path.join(home, 'Desktop'),
+      path.join(home, 'Downloads'),
+      process.cwd(),
+    ];
+    const unique = [];
+    for (const root of roots) {
+      try {
+        if (fs.statSync(root).isDirectory() && !unique.includes(root)) unique.push(root);
+      } catch {
+        // 不存在的根目录直接跳过（例如没有下载目录的环境）。
+      }
+    }
+    return unique.slice(0, 8);
+  }
+
+  /** 探测单个文件引用；绝对路径直接判断，裸文件名在允许根目录内做有界搜索。 */
+  _probeBrainPath(ref, roots) {
+    const home = os.homedir();
+    const normalized = String(ref).replace(/^~(?=[\\/])/, home);
+    const isAbsolute = /^[A-Za-z]:[\\/]/.test(normalized) || normalized.startsWith('/');
+    const baseName = path.basename(normalized.replace(/[\\/]+$/, ''));
+    if (isAbsolute) {
+      try {
+        if (fs.existsSync(normalized) && fs.statSync(normalized).isFile()) {
+          return { ref, status: 'exists', paths: [normalized] };
+        }
+      } catch {
+        // 权限/坏路径按不存在处理，交给模型决定下一步。
+      }
+    }
+    const hasExtension = /\.[A-Za-z0-9]{1,8}$/.test(baseName) && !baseName.includes('*');
+    if (!hasExtension) return { ref, status: 'missing', paths: [] };
+    const candidates = this._brainFindFiles(roots, baseName);
+    if (candidates.length) return { ref, status: 'candidates', paths: candidates.slice(0, 3) };
+    return { ref, status: 'missing', paths: [] };
+  }
+
+  /** 有界广度搜索同名文件：最多 600 个目录、深度 4、命中 3 个即停。 */
+  _brainFindFiles(roots, fileName) {
+    const target = fileName.toLowerCase();
+    const found = [];
+    const queue = roots.map((root) => ({ dir: root, depth: 0 }));
+    const skip = new Set(['node_modules', '.git', '.venv', '__pycache__', 'dist', 'build', 'target', '.cache', '.hermes-test']);
+    let visited = 0;
+    while (queue.length && visited < 600 && found.length < 3) {
+      const item = queue.shift();
+      if (!item || item.depth > 4) continue;
+      let entries;
+      try {
+        entries = fs.readdirSync(item.dir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      visited += 1;
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          if (entry.name.startsWith('.') || skip.has(entry.name)) continue;
+          queue.push({ dir: path.join(item.dir, entry.name), depth: item.depth + 1 });
+        } else if (entry.isFile() && entry.name.toLowerCase() === target) {
+          found.push(path.join(item.dir, entry.name));
+          if (found.length >= 3) break;
+        }
+      }
+    }
+    return found;
   }
 
   /** 按白名单执行大脑动作（auto 模式）；单条失败不影响其它动作。 */
@@ -2462,6 +2822,11 @@ class Hub {
         instruction: action.instruction || '',
         reason: action.reason || '',
         confidence: action.confidence,
+        ...(Number.isFinite(action.timeoutSec) ? { timeoutSec: action.timeoutSec } : {}),
+        ...(util.isPlainObject(action.requirements) ? { requirements: { ...action.requirements } } : {}),
+        // consult_worker 的问题 / remember 的记忆内容留档，便于控制台回溯。
+        ...(action.question ? { question: action.question } : {}),
+        ...(action.note ? { note: action.note } : {}),
         executed: false,
         skippedReason: null,
         error: null,
@@ -2545,10 +2910,29 @@ class Hub {
         );
         if (duplicate) return { skippedReason: 'duplicate' };
         const goalId = action.goalId && this.goals.has(action.goalId) ? action.goalId : null;
+        // 大脑常把项目名/任务名当设备标签（如「反腐AI」「验证」）：有项目时学成项目别名保留，
+        // 设备做过该项目后会自动匹配；没有项目时才丢弃无人声明的标签，避免任务永远卡在 queued。
+        const rawRequirements = util.isPlainObject(action.requirements) ? action.requirements : null;
+        const { requirements, droppedTags, learnedTags } = this._sanitizeBrainRequirements(rawRequirements);
+        if (learnedTags.length) {
+          this.log(
+            'info',
+            `自主大脑 create_task 把标签登记为项目别名：${learnedTags.join('、')}（项目「${requirements.project}」做过之后自动匹配）`,
+          );
+        }
+        if (droppedTags.length) {
+          this.log(
+            'warn',
+            `自主大脑 create_task 忽略了不存在的设备标签：${droppedTags.join('、')}（没有设备声明这些标签）`,
+          );
+        }
         const created = this.createTask({
           instruction,
           goalId,
           priority: 5,
+          // 自主大脑新建任务默认 600s：300s 对多步文件/分析任务常常不够（task_yfllwarp 复盘）。
+          timeoutSec: Number.isFinite(action.timeoutSec) ? action.timeoutSec : 600,
+          ...(requirements ? { requirements } : {}),
           context: { brain: true, reason: action.reason || '' },
         });
         return { taskId: created.id, goalId: created.goalId };
@@ -2560,9 +2944,86 @@ class Hub {
         this.linkGoalTask(action.goalId, action.taskId);
         return { goalId: action.goalId, taskId: action.taskId };
       }
+      case 'consult_worker': {
+        const question = String(action.question || '').trim();
+        if (question.length < 6) return { skippedReason: '缺少可回答的咨询问题' };
+        const requirements = util.isPlainObject(action.requirements) ? action.requirements : {};
+        const targetId = util.str(requirements.deviceId, 80);
+        if (!targetId) return { skippedReason: 'consult_worker 需要 requirements.deviceId（指定问哪台设备）' };
+        const device = this.devices.get(targetId);
+        if (!device) return { skippedReason: 'device-not-found' };
+        if (device.disabled) return { skippedReason: '目标设备已禁用' };
+        const busy = [...this.tasks.values()].find(
+          (task) => task.consult && task.consult.deviceId === targetId && !TERMINAL_TASK_STATUSES.has(task.status),
+        );
+        if (busy) return { skippedReason: '同一设备已有进行中的咨询', taskId: busy.id };
+        const project = util.str(requirements.project, 120) || null;
+        const created = this.createTask({
+          // 只读咨询：明确告诉设备只回答、不改文件，避免把「问事实」变成副作用操作。
+          instruction: `【只读咨询】${question}\n\n请只回答问题，不要修改任何文件或执行有副作用的操作；回答尽量简短（≤400 字），给出具体路径/结论。`,
+          priority: 7,
+          timeoutSec: 300,
+          requirements: { deviceId: targetId, ...(project ? { project } : {}) },
+          context: { brain: true, consult: true, reason: action.reason || '' },
+        });
+        created.consult = { question, deviceId: targetId, project };
+        this.broadcast('task.updated', { task: this.taskToJson(created) });
+        return { taskId: created.id, goalId: created.goalId || null };
+      }
+      case 'remember': {
+        const note = String(action.note || '').trim();
+        if (note.length < 4) return { skippedReason: '缺少要记住的内容' };
+        return this._rememberBrainNote(note);
+      }
       default:
         return { skippedReason: 'unknown-action' };
     }
+  }
+
+  /** 写入一条管家记忆（长期上下文）；完全相同的内容不重复记。 */
+  _rememberBrainNote(text) {
+    const note = util.str(text, 400).trim();
+    if (note.length < 4) return { skippedReason: '缺少要记住的内容' };
+    if (this.brain.notes.some((item) => item.text === note)) return { skippedReason: '这条记忆已存在' };
+    this.brain.notes.push({ at: protocol.nowIso(), text: note });
+    if (this.brain.notes.length > MAX_NOTES) {
+      this.brain.notes.splice(0, this.brain.notes.length - MAX_NOTES);
+    }
+    const at = protocol.nowIso();
+    this.broadcast('brain.updated', { brain: this.getBrain(), at });
+    this.log('info', `管家记忆写入：${util.truncate(note, 60)}`);
+    this.schedulePersist();
+    return {};
+  }
+
+  /** 咨询任务结束后，把设备的回答记进大脑的「咨询记录」，下一轮提示词可见。 */
+  _recordBrainConsultation(task, status) {
+    const consult = util.isPlainObject(task.consult) ? task.consult : null;
+    if (!consult || !consult.question) return;
+    const output = util.isPlainObject(task.output) ? task.output : null;
+    const ok = status === TASK_STATUS.COMPLETED;
+    const rawAnswer = output ? output.text || output.markdown || '' : '';
+    const answer = util.str(
+      rawAnswer || task.error || (ok ? '（设备已完成咨询但没有返回文本）' : '（咨询任务失败）'),
+      MAX_CONSULT_ANSWER,
+    );
+    this.brain.consultations.push({
+      at: task.finishedAt || protocol.nowIso(),
+      taskId: task.id,
+      deviceId: task.assignedDeviceId || consult.deviceId || null,
+      deviceName: task.assignedDeviceName || null,
+      project: consult.project || null,
+      question: consult.question,
+      answer,
+      ok,
+    });
+    if (this.brain.consultations.length > MAX_CONSULTATIONS) {
+      this.brain.consultations.splice(0, this.brain.consultations.length - MAX_CONSULTATIONS);
+    }
+    const at = task.finishedAt || protocol.nowIso();
+    this.broadcast('brain.updated', { brain: this.getBrain(), at });
+    this.log(ok ? 'info' : 'warn', `大脑咨询${ok ? '已获得回答' : '失败'}：${util.truncate(consult.question, 60)}`);
+    this.schedulePersist();
   }
 
   // ---------------------------------------------------------------- 管家心路
@@ -3030,22 +3491,22 @@ class Hub {
     return removed;
   }
 
-  _brainstormModelLabel() {
+  _brainstormModelLabel(config) {
     try {
-      return util.str(brainstormModelConfig().model, 80) || null;
+      const resolved = config && config.model ? config : brainstormModelConfig();
+      return util.str(resolved.model, 80) || null;
     } catch {
       return null;
     }
   }
 
-  _getBrainstormThinker() {
+  _getBrainstormThinker(config) {
     if (this._brainstormThinkInjected) return this.brainstormThink;
-    const model = null; // 与自主大脑同一套 BRAIN_*/AGNES_* 配置，暂不单独指定模型。
-    if (!this._brainstormThinker || this._brainstormThinkerModel !== model) {
-      this._brainstormThinker = createBrainstormThinker({ model });
-      this._brainstormThinkerModel = model;
-    }
-    return this._brainstormThinker;
+    const model = config && config.model ? config.model : null;
+    const baseUrl = config && config.baseUrl ? config.baseUrl : null;
+    const apiKey = config && config.apiKey ? config.apiKey : null;
+    const timeoutMs = config && config.timeoutMs ? config.timeoutMs : undefined;
+    return createBrainstormThinker({ model, baseUrl, apiKey, timeoutMs });
   }
 
   /** 头脑风暴上下文：长期目标、活跃/失败任务、最近心路、待确认。 */
@@ -3083,28 +3544,70 @@ class Hub {
   }
 
   /**
+   * 读取本轮头脑风暴附件：请求里显式给的附件 + 消息正文里提到的本机路径。
+   * 失败项不抛错，转为提示词里的说明（模型会如实告诉主人）。
+   */
+  _collectBrainstormFiles(message, requested) {
+    const cwd = process.cwd();
+    const items = [];
+    const knownPaths = new Set();
+    for (const item of Array.isArray(requested) ? requested : []) {
+      if (item && typeof item.path === 'string' && item.path.trim()) {
+        const resolved = path.resolve(cwd, item.path.trim());
+        if (!knownPaths.has(resolved)) {
+          knownPaths.add(resolved);
+          items.push({ path: resolved });
+        }
+        continue;
+      }
+      items.push(item);
+    }
+    for (const detected of extractFilePaths(message, { cwd })) {
+      const resolved = path.resolve(cwd, detected);
+      if (knownPaths.has(resolved)) continue;
+      knownPaths.add(resolved);
+      items.push({ path: resolved });
+    }
+    return readBrainstormAttachments(items, { cwd });
+  }
+
+  /**
    * 与大脑对话：追加 user 消息 → 模型回答 → 追加 assistant 消息。
    * 模型失败不抛给调用方，assistant 消息带 error 字段。
    */
-  async chatBrainstorm({ sessionId, message } = {}) {
-    const normalized = normalizeBrainstormChatRequest({ sessionId, message });
+  async chatBrainstorm({ sessionId, message, attachments } = {}) {
+    const normalized = normalizeBrainstormChatRequest({ sessionId, message, attachments });
     if (!normalized.ok) throw badRequest(normalized.errors.join('；'));
     const input = normalized.value;
+    const files = this._collectBrainstormFiles(input.message, input.attachments);
+    // 本轮是否在「读文件」：显式附件、已读取到的文件、读取失败、或消息里提到文件路径。
+    // 平时用默认模型（Agnes）分析；涉及文件时切到 DeepSeek，读内容并给结果。
+    const fileMode = (Array.isArray(input.attachments) && input.attachments.length > 0)
+      || files.attachments.length > 0
+      || files.errors.length > 0
+      || extractFilePaths(input.message, { cwd: process.cwd(), requireExists: false }).length > 0;
+    const modelConfig = selectBrainstormModel({ fileMode });
     let session = this._findBrainstormSession(input.sessionId);
     if (!session) session = this.createBrainstormSession();
-    appendBrainstormMessage(session, { role: 'user', text: input.message });
+    appendBrainstormMessage(session, {
+      role: 'user',
+      text: input.message,
+      attachments: files.attachments.map(brainstormAttachmentMeta),
+    });
     this._touchBrainstorm(session);
     const history = session.messages.slice(0, -1).slice(-12);
     const { system, user } = buildBrainstormPrompt({
       history,
       userMessage: input.message,
       context: this._brainstormContext(),
+      attachments: files.attachments,
+      attachmentErrors: files.errors,
     });
-    const modelLabel = this._brainstormModelLabel();
+    const modelLabel = this._brainstormModelLabel(modelConfig);
     let reply = null;
     let error = null;
     try {
-      const thinker = this._getBrainstormThinker();
+      const thinker = this._getBrainstormThinker(modelConfig);
       const answer = await thinker({ system, user });
       const text = util.str(answer, BRAINSTORM_MAX_TEXT);
       if (!text) throw new Error('大脑返回了空回复');
@@ -3125,13 +3628,17 @@ class Hub {
     if (!error) {
       this.log(
         'info',
-        `头脑风暴：${session.id} 第 ${session.messages.length} 条（模型：${modelLabel || 'unknown'}）`,
+        `头脑风暴：${session.id} 第 ${session.messages.length} 条（模型：${modelLabel || 'unknown'}${fileMode ? '，文件模式' : ''}）`,
       );
     }
     return {
       session: this.getBrainstorm({ sessionId: session.id }).session,
       reply,
       error,
+      model: modelLabel,
+      fileMode,
+      attachments: files.attachments.map(brainstormAttachmentMeta),
+      attachmentErrors: files.errors,
     };
   }
 
@@ -3669,6 +4176,137 @@ class Hub {
   }
 
   /**
+   * 派发主设备（「母机」）：
+   * 1. settings.mainDeviceId 显式指定；
+   * 2. 未指定时用 Hub 所在的本机设备（tags 含「本机」或名称匹配主机名）。
+   * 主设备是项目/会话所在的工作机；没有项目亲和时优先把任务留在它上面。
+   */
+  _mainDevice() {
+    const configuredId = util.str(this.settings.mainDeviceId, 120);
+    if (configuredId) {
+      const configured = this.devices.get(configuredId);
+      if (configured && !configured.disabled) return configured;
+    }
+    return this._localDevice();
+  }
+
+  _taskProject(task) {
+    const req = task && task.requirements;
+    return util.str(req && req.project, 120) || null;
+  }
+
+  _projectAffinityDevice(project) {
+    if (!project) return null;
+    const deviceId = this.projectAffinity.get(project);
+    if (!deviceId) return null;
+    const device = this.devices.get(deviceId);
+    if (!device) return null;
+    return device;
+  }
+
+  /** 同一线程（跟进/计划子任务）里最近一次实际执行过的设备；已完成的任务优先。 */
+  _threadAffinityTask(task) {
+    if (!task || !task.threadId) return null;
+    const threadKey = task.threadId || task.id;
+    let best = null;
+    let bestCompleted = -1;
+    let bestStamp = -1;
+    for (const candidate of this.tasks.values()) {
+      if (candidate.id === task.id || !candidate.assignedDeviceId) continue;
+      if ((candidate.threadId || candidate.id) !== threadKey) continue;
+      const completed = candidate.status === TASK_STATUS.COMPLETED ? 1 : 0;
+      const stamp = Date.parse(candidate.finishedAt || candidate.updatedAt || candidate.createdAt) || 0;
+      if (completed > bestCompleted || (completed === bestCompleted && stamp > bestStamp)) {
+        best = candidate;
+        bestCompleted = completed;
+        bestStamp = stamp;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * 计算任务的首选设备（软亲和）。优先级：
+   * 显式 requirements.deviceId（routeTask 硬过滤）> 任务自带 affinity > 同线程上次执行设备 >
+   * 项目亲和（上次成功设备）> 主设备（母机）。
+   * @returns {{deviceId:string, reason:string, kind:string}|null}
+   */
+  _preferredDeviceFor(task) {
+    const affinity = task && task.affinity;
+    if (affinity && affinity.deviceId) {
+      const device = this.devices.get(affinity.deviceId);
+      if (device && !device.disabled) {
+        return {
+          deviceId: device.id,
+          reason: `亲和锁定：${affinity.reason || '沿用上次执行的主机'}`,
+          kind: 'assigned',
+        };
+      }
+    }
+    const thread = this._threadAffinityTask(task);
+    if (thread) {
+      const device = this.devices.get(thread.assignedDeviceId);
+      if (device && !device.disabled) {
+        return {
+          deviceId: device.id,
+          reason: `线程亲和：同一线程上次在「${deviceDisplayName(device)}」执行`,
+          kind: 'thread',
+        };
+      }
+    }
+    const project = this._taskProject(task);
+    const projectDevice = this._projectAffinityDevice(project);
+    if (projectDevice && !projectDevice.disabled) {
+      return {
+        deviceId: projectDevice.id,
+        reason: `项目亲和：「${project}」上次成功在「${deviceDisplayName(projectDevice)}」`,
+        kind: 'project',
+      };
+    }
+    const mainDevice = this._mainDevice();
+    if (mainDevice) {
+      return {
+        deviceId: mainDevice.id,
+        reason: `主设备（母机）优先：${deviceDisplayName(mainDevice)}`,
+        kind: 'main',
+      };
+    }
+    return null;
+  }
+
+  /**
+   * 判断首选设备现在能不能接：
+   * - 能接 → 锁定派发；
+   * - 离线/并发已满 → 排队等待（亲和优先于「换一台机器」）；
+   * - 已被删除/禁用/缺少能力 → 回退普通评分路由。
+   */
+  _affinityDecision(task, preference, occupancy) {
+    if (!preference || !preference.deviceId) return { kind: 'none' };
+    const device = this.devices.get(preference.deviceId);
+    if (!device) return { kind: 'fallback', note: '亲和主机已不存在' };
+    if (device.disabled) return { kind: 'fallback', note: `亲和主机「${deviceDisplayName(device)}」已禁用` };
+    // 计划子任务（并行组）不因为“线程上一位执行者”忙/离线而卡住整个计划：
+    // 软亲和只用于首选排序，拿不到槽位就交给自动路由，保证并行子任务能铺开。
+    if (preference.kind === 'thread' && task.parentTaskId) {
+      if (!device.online) {
+        return { kind: 'fallback', note: `线程亲和主机「${deviceDisplayName(device)}」离线，子任务改走自动路由` };
+      }
+      if ((occupancy.get(device.id) || 0) >= this._maxConcurrent(device)) {
+        return { kind: 'fallback', note: `线程亲和主机「${deviceDisplayName(device)}」并发已满，子任务改走自动路由` };
+      }
+    }
+    if (!device.online) return { kind: 'wait', note: `亲和主机「${deviceDisplayName(device)}」离线，等待上线` };
+    if ((occupancy.get(device.id) || 0) >= this._maxConcurrent(device)) {
+      return { kind: 'wait', note: `亲和主机「${deviceDisplayName(device)}」并发已满，等待空槽` };
+    }
+    const matched = protocol.matchRequirements(this._capabilitiesForMatch(device), task.requirements || {});
+    if (!matched.ok) {
+      return { kind: 'fallback', note: `亲和主机缺少 ${matched.missing.join(', ')}` };
+    }
+    return { kind: 'lock', device };
+  }
+
+  /**
    * 只读预检：指令里提到的本地文件若存在，返回「固定到本机」建议；结果按指令缓存。
    * @returns {null|{deviceId:string, deviceName:string, reason:string, matches:Array}}
    */
@@ -3770,6 +4408,10 @@ class Hub {
   createTask(input, internal = {}) {
     const { ok, errors, value } = protocol.normalizeTaskRequest(input);
     if (!ok) throw badRequest(errors.join('；'));
+    // 任务同时带项目与标签时，把标签登记为该项目的别名：设备成功做过该项目后自动获得这些标签。
+    if (value.requirements.project && value.requirements.tags.length) {
+      this._learnProjectTags(value.requirements.project, value.requirements.tags);
+    }
     const now = protocol.nowIso();
     const taskId = protocol.randomId('task');
     const task = {
@@ -3810,6 +4452,10 @@ class Hub {
       archivedAt: null,
       trashedAt: null,
       route: { reason: '等待路由', candidates: [], excluded: [] },
+      // 派发亲和：首次实际派发后写 {deviceId, reason, at}，重试沿用同一台主机。
+      affinity: null,
+      // 大脑咨询任务：{question, deviceId, project}；完成后回答写入 brain.consultations。
+      consult: null,
       events: [{ at: now, type: 'created', message: '任务已创建' }],
       _avoidDeviceIds: [],
     };
@@ -4403,10 +5049,11 @@ class Hub {
   /** 任务执行记录文件路径（与 task-record.js 的写入口径一致：<recordDir>/<YYYY-MM-DD>/<taskId>.md）。 */
   _taskRecordFile(task) {
     if (!this.recordEnabled || !task || !task.createdAt) return null;
-    const at = new Date(task.createdAt);
-    if (Number.isNaN(at.getTime())) return null;
-    const pad = (n) => String(n).padStart(2, '0');
-    const day = `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`;
+    // 与 task-record.js 的 dayOf 保持一致：按 createdAt 的 UTC 日期分目录
+    // （以前用本地时区分日，跨过本地午夜后删除/查询会指向另一个目录）。
+    const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(task.createdAt));
+    if (!match) return null;
+    const day = `${match[1]}-${match[2]}-${match[3]}`;
     return path.resolve(String(this.recordDir || '.'), day, `${task.id}.md`);
   }
 
@@ -4427,7 +5074,133 @@ class Hub {
   }
 
   _capabilitiesForMatch(device) {
-    return { ...device.capabilities, tags: device.tags };
+    // 设备标签 = manifest 声明的标签 + 按项目/任务历史自动推导的标签（不写回设备 manifest）。
+    const tags = [...new Set([...util.arr(device.tags), ...this._autoTagsForDevice(device.id)])];
+    return { ...device.capabilities, tags };
+  }
+
+  /**
+   * 自动标签：设备成功执行过哪些项目，就自动带上这些项目名与项目别名标签。
+   * 这样大脑写的项目标签（如「反腐AI」）在对应主机做过该项目后就能匹配，不需要人工维护设备标签。
+   * @param {string} deviceId
+   * @returns {string[]} manifest 里还没有的自动标签
+   */
+  _autoTagsForDevice(deviceId) {
+    const device = this.devices.get(deviceId);
+    const manifest = new Set(util.arr(device && device.tags).map((tag) => util.str(tag, 40)).filter(Boolean));
+    const tags = new Set();
+    const addProject = (project) => {
+      const key = util.str(project, 120);
+      if (!key) return;
+      const label = util.str(key, 40);
+      if (label && !manifest.has(label)) tags.add(label);
+      for (const alias of util.arr(this.projectTags.get(key))) {
+        const value = util.str(alias, 40);
+        if (value && !manifest.has(value)) tags.add(value);
+      }
+    };
+    for (const [project, id] of this.projectAffinity) {
+      if (id === deviceId) addProject(project);
+    }
+    for (const task of this.tasks.values()) {
+      if (task.status !== TASK_STATUS.COMPLETED || task.assignedDeviceId !== deviceId) continue;
+      const project = this._taskProject(task);
+      if (project) addProject(project);
+    }
+    return [...tags].slice(-40);
+  }
+
+  /**
+   * 学习项目别名标签：项目任务要求里出现过的标签（例如大脑自造的项目标签）记成该项目的别名，
+   * 后续设备做过该项目就自动获得这些标签，避免任务因「缺少 tag」永久排队。
+   * @param {string} project
+   * @param {string[]} tags
+   */
+  _learnProjectTags(project, tags) {
+    const key = util.str(project, 120);
+    if (!key) return;
+    const previous = util.arr(this.projectTags.get(key));
+    const merged = [...previous];
+    for (const raw of util.arr(tags)) {
+      const tag = util.str(raw, 40);
+      if (tag && !merged.includes(tag)) merged.push(tag);
+    }
+    if (merged.length === previous.length) return;
+    this.projectTags.set(key, merged.slice(-20));
+    // 与项目亲和一样只保留最近 200 个项目，避免长期运行无限增长。
+    while (this.projectTags.size > 200) {
+      const oldest = this.projectTags.keys().next().value;
+      if (!oldest || oldest === key) break;
+      this.projectTags.delete(oldest);
+    }
+  }
+
+  /** 所有设备当前可匹配的标签（manifest 标签 + 自动标签 + 项目别名）。 */
+  _knownDeviceTags() {
+    const known = new Set();
+    for (const device of this.devices.values()) {
+      for (const tag of util.arr(this._capabilitiesForMatch(device).tags)) {
+        const value = util.str(tag, 40);
+        if (value) known.add(value);
+      }
+    }
+    for (const tags of this.projectTags.values()) {
+      for (const tag of util.arr(tags)) {
+        const value = util.str(tag, 40);
+        if (value) known.add(value);
+      }
+    }
+    return known;
+  }
+
+  /**
+   * 匹配设备需求：显式 requirements.deviceId 钉住的设备如果只缺标签（标签可能是描述性/项目别名），
+   * 不因这些标签阻塞派发；缺 model/skills/profile/gateway 等硬能力仍然排除。
+   * @returns {{ok:boolean, matched:string[], missing:string[], effective:object}}
+   */
+  _matchDeviceRequirements(device, requirements) {
+    const matched = protocol.matchRequirements(this._capabilitiesForMatch(device), requirements);
+    if (matched.ok) return { ...matched, effective: requirements };
+    const pinned = requirements && requirements.deviceId === device.id;
+    if (!pinned) return { ...matched, effective: requirements };
+    const hardMissing = matched.missing.filter((item) => !String(item).startsWith('tag:'));
+    if (hardMissing.length) return { ...matched, effective: requirements };
+    return {
+      ok: true,
+      matched: matched.matched,
+      missing: [],
+      effective: { ...requirements, tags: [] },
+    };
+  }
+
+  /**
+   * 自主大脑可能把项目名/任务名当成设备标签写进 requirements.tags（例如「反腐AI」「验证」）。
+   * 有项目时把这些标签学成项目别名并保留（设备做过该项目后自动匹配）；没有项目时只保留真实存在的设备标签，
+   * 避免任务永远排队。
+   * @returns {{requirements: object|null, droppedTags: string[], learnedTags: string[]}}
+   */
+  _sanitizeBrainRequirements(requirements) {
+    if (!util.isPlainObject(requirements)) return { requirements: null, droppedTags: [], learnedTags: [] };
+    const tags = util.arr(requirements.tags).map((tag) => util.str(tag, 40)).filter(Boolean);
+    if (!tags.length) return { requirements, droppedTags: [], learnedTags: [] };
+    const known = this._knownDeviceTags();
+    const project = util.str(requirements.project, 120) || null;
+    const kept = [];
+    const dropped = [];
+    const learned = [];
+    for (const tag of tags) {
+      if (known.has(tag)) kept.push(tag);
+      else if (project) {
+        kept.push(tag);
+        learned.push(tag);
+      } else dropped.push(tag);
+    }
+    if (project && learned.length) this._learnProjectTags(project, learned);
+    if (!dropped.length) return { requirements, droppedTags: [], learnedTags: learned };
+    const next = { ...requirements };
+    if (kept.length) next.tags = kept;
+    else delete next.tags;
+    return { requirements: next, droppedTags: dropped, learnedTags: learned };
   }
 
   _maxConcurrent(device) {
@@ -4515,6 +5288,8 @@ class Hub {
 
     for (const device of this.devices.values()) {
       let reason = null;
+      // 显式钉住的设备只缺描述性标签时不阻塞派发，评分也按去掉标签的需求计算。
+      let effectiveRequirements = requirements;
       if (device.disabled) {
         reason = 'disabled';
       } else if (!device.online) {
@@ -4524,8 +5299,9 @@ class Hub {
       } else if (requirements.deviceId && requirements.deviceId !== device.id) {
         reason = 'deviceId mismatch';
       } else {
-        const matched = protocol.matchRequirements(this._capabilitiesForMatch(device), requirements);
+        const matched = this._matchDeviceRequirements(device, requirements);
         if (!matched.ok) reason = `missing ${matched.missing.join(', ')}`;
+        else effectiveRequirements = matched.effective;
       }
       if (reason) {
         excluded.push({ deviceId: device.id, reason });
@@ -4539,7 +5315,7 @@ class Hub {
           load: { running: occupancy.get(device.id) || 0, max: device.load.max },
           lastSeenAt: device.lastSeenAt,
         },
-        requirements,
+        effectiveRequirements,
       );
       if (scored.score < 0) {
         excluded.push({ deviceId: device.id, reason: `missing ${scored.missing.join(', ')}` });
@@ -4560,7 +5336,50 @@ class Hub {
 
     const avoid = new Set(task._avoidDeviceIds || []);
     const usable = avoid.size ? candidates.filter((c) => !avoid.has(c.deviceId)) : candidates;
-    const pickedCandidate = usable[0] || candidates[0];
+    let pickedCandidate = usable[0] || candidates[0];
+    // 亲和派发：优先回到项目/线程/母机所在的设备，避免让没有项目上下文的主机接走任务。
+    // requirements.deviceId 是显式硬锁，优先级最高，此时不再做软亲和判断。
+    const affinityPreference = requirements.deviceId ? null : this._preferredDeviceFor(task);
+    const affinityDecision = this._affinityDecision(task, affinityPreference, occupancy);
+    let affinityNote = '';
+    if (affinityDecision.kind === 'lock') {
+      const affinityDevice = affinityDecision.device;
+      const scored = protocol.scoreDevice(
+        {
+          id: affinityDevice.id,
+          capabilities: this._capabilitiesForMatch(affinityDevice),
+          load: { running: occupancy.get(affinityDevice.id) || 0, max: affinityDevice.load.max },
+          lastSeenAt: affinityDevice.lastSeenAt,
+        },
+        requirements,
+      );
+      pickedCandidate = {
+        deviceId: affinityDevice.id,
+        score: Math.max(scored.score, 0),
+        matched: scored.matched,
+        lastSeenAt: affinityDevice.lastSeenAt || '',
+      };
+      affinityNote = affinityPreference.reason;
+      // 亲和锁定的设备即使之前失败过也优先继续用（同项目上下文比“换一台”更重要）。
+      task._avoidDeviceIds = [];
+    } else if (affinityDecision.kind === 'wait') {
+      // 首选主机离线/并发已满：排队等它，不把任务交给没有上下文的其它主机。
+      const reason = this._withAdvice(this._routingAdviceText(task.routingAdvice), `亲和等待：${affinityDecision.note}`);
+      const sameReason = Boolean(task.route) && task.route.reason === reason;
+      task.status = TASK_STATUS.QUEUED;
+      task.assignedDeviceId = null;
+      task.assignedDeviceName = null;
+      task.updatedAt = protocol.nowIso();
+      task.route = { reason, candidates: [], excluded: excluded.slice(0, 10) };
+      if (!sameReason) {
+        this._pushTaskEvent(task, 'queued', `亲和等待：${affinityDecision.note}`);
+        this.broadcast('task.updated', { task: this.taskToJson(task) });
+        this.schedulePersist();
+      }
+      return task;
+    } else if (affinityDecision.kind === 'fallback') {
+      affinityNote = `（${affinityDecision.note}，回退普通路由）`;
+    }
 
     if (!pickedCandidate) {
       task.status = TASK_STATUS.QUEUED;
@@ -4593,10 +5412,20 @@ class Hub {
     task.assignedDeviceName = deviceDisplayName(device);
     task.updatedAt = now;
     task.error = null;
+    // 第一次派发即固定亲和设备：后续失败重试/重投继续交给同一台主机，保留项目上下文。
+    if (!task.affinity) {
+      task.affinity = {
+        deviceId: device.id,
+        reason: affinityNote || `首次派发到 ${deviceDisplayName(device)}`,
+        at: now,
+      };
+    }
     task.route = {
       reason: this._withAdvice(
         this._routingAdviceText(task.routingAdvice),
-        `matched ${candidates.length} candidate${candidates.length === 1 ? '' : 's'}; picked ${device.id} (score ${pickedCandidate.score})`,
+        affinityNote
+          ? `${affinityNote}; picked ${device.id} (score ${pickedCandidate.score})`
+          : `matched ${candidates.length} candidate${candidates.length === 1 ? '' : 's'}; picked ${device.id} (score ${pickedCandidate.score})`,
       ),
       candidates: candidates.slice(0, 5).map((c) => ({
         deviceId: c.deviceId,
@@ -4678,6 +5507,8 @@ class Hub {
         priority: task.priority,
         timeoutSec: task.timeoutSec,
         threadId: task.threadId,
+        // 结果归因：设备回传同一个 attempt，Hub 才分得清「上一次尝试的迟到结果」和本次尝试。
+        attempt: task.attempts,
         replyToTaskId: task.replyToTaskId || null,
         threadStep: task.threadStep || 1,
         parentTaskId: task.parentTaskId || null,
@@ -4786,6 +5617,14 @@ class Hub {
    */
   _refreshTaskTimeout(task) {
     if (!task || !ACTIVE_TASK_STATUSES.has(task.status)) return;
+    // 即使设备一直发 keepalive，任务也不能无限延长：到达总运行上限后按运行超时处理
+    // （_timeoutTask 会在 maxAttempts 内自动重试），避免设备侧 15 分钟硬上限与 Hub 计时器脱节。
+    const startedAt = task.startedAt ? Date.parse(task.startedAt) : NaN;
+    const maxRunMs = Math.min(60 * 60 * 1000, Math.max(30 * 60 * 1000, this._timeoutMsFor(task) * 6));
+    if (Number.isFinite(startedAt) && Date.now() - startedAt > maxRunMs) {
+      this._timeoutTask(task);
+      return;
+    }
     this._setTaskTimer(
       task.id,
       'timeout',
@@ -4836,6 +5675,9 @@ class Hub {
       const avoid = new Set(task._avoidDeviceIds || []);
       avoid.add(device.id);
       task._avoidDeviceIds = [...avoid];
+      // 派发失败（ack 超时/设备掉线）说明任务根本没跑起来，此时不应继续死守原主机，
+      // 交给下一轮路由按 avoid + 项目亲和重新挑一台；任务内容层面的失败才保留亲和。
+      task.affinity = null;
       task.status = TASK_STATUS.QUEUED;
       task.assignedDeviceId = null;
       task.assignedDeviceName = null;
@@ -4863,6 +5705,40 @@ class Hub {
       (task) => task.assignedDeviceId === device.id && ACTIVE_TASK_STATUSES.has(task.status),
     );
     for (const task of affected) this._dispatchFailure(task, device, reason);
+  }
+
+  /**
+   * 设备上报“卡死/超时”类失败（stalled、无进度、本机 CLI 硬上限）时自动重排一次。
+   * 这类失败不是任务内容错误，而是执行环境卡住；直接 failed 会让人等满 15 分钟后再手动重试。
+   * 保留 task.affinity（同项目上下文仍在原主机），与派发失败清 affinity 的语义不同。
+   */
+  _retryStalledTask(task, device, reason) {
+    if (![TASK_STATUS.ASSIGNED, TASK_STATUS.RUNNING, TASK_STATUS.WAITING].includes(task.status)) return false;
+    this._clearTaskTimers(task.id);
+    if (device) {
+      this._removeTaskCommand(device, task.id);
+      this._adjustLoad(device.id, -1);
+    }
+    task.status = TASK_STATUS.QUEUED;
+    task.assignedDeviceId = null;
+    task.assignedDeviceName = null;
+    task.startedAt = null;
+    task.finishedAt = null;
+    task.output = null;
+    task.error = null;
+    task.progress = null;
+    task.updatedAt = protocol.nowIso();
+    task.route = { reason: '执行卡死，自动重试', candidates: [], excluded: [] };
+    this._pushTaskEvent(
+      task,
+      'retry',
+      `执行卡死（${util.str(reason, 120)}），自动重试（${task.attempts}/${task.maxAttempts}）`,
+    );
+    this.broadcast('task.updated', { task: this.taskToJson(task) });
+    this.log('warn', `任务执行卡死自动重试：${task.id}（${task.attempts}/${task.maxAttempts}）：${util.str(reason, 160)}`);
+    this.schedulePersist();
+    this.routeTask(task);
+    return true;
   }
 
   _timeoutTask(task) {
@@ -4923,7 +5799,21 @@ class Hub {
     if (wasActive) this._adjustLoad(task.assignedDeviceId, -1);
     if (status === TASK_STATUS.COMPLETED) {
       task.progress = { message: '任务完成', percent: 100, logs: [], at: task.finishedAt };
+      // 项目亲和：记住该项目最近一次成功执行的设备（母机/对应主机），下次同项目任务优先回去。
+      const project = this._taskProject(task);
+      if (project && task.assignedDeviceId) {
+        this.projectAffinity.delete(project);
+        this.projectAffinity.set(project, task.assignedDeviceId);
+        // 防止长期运行无限增长：只保留最近 200 个项目。
+        while (this.projectAffinity.size > 200) {
+          const oldest = this.projectAffinity.keys().next().value;
+          if (!oldest || oldest === project) break;
+          this.projectAffinity.delete(oldest);
+        }
+      }
     }
+    // 咨询任务结束（无论成败）都把结果记进大脑的「咨询记录」。
+    if (task.consult) this._recordBrainConsultation(task, status);
     this._pushTaskEvent(task, status, eventMessage || TASK_MESSAGES[status] || status);
     const eventName =
       status === TASK_STATUS.COMPLETED
@@ -5066,16 +5956,35 @@ class Hub {
       );
       return { task, ignored: true, reason: '旧尝试的结果，任务已被重新派发' };
     }
+    const input = util.isPlainObject(body) ? body : {};
+    // attempt 归因：自动重试会给同一台设备重新派发同一任务，旧 attempt 的超时/取消结果
+    // 如果只按 taskId+deviceId 校验，会被误当成新 attempt 的结果（P0 复盘 task_yfllwarp）。
+    if (Number.isFinite(input.attempt) && input.attempt !== task.attempts) {
+      this.log(
+        'warn',
+        `忽略跨尝试结果：${task.id}（结果 attempt=${input.attempt}，当前 attempt=${task.attempts}）`,
+      );
+      return {
+        task,
+        ignored: true,
+        reason: `旧尝试的结果（attempt ${input.attempt}/${task.attempts}）`,
+      };
+    }
     if (!ACTIVE_TASK_STATUSES.has(task.status)) {
       return { task, ignored: true, reason: `任务状态 ${task.status} 不接受结果` };
     }
-    const input = util.isPlainObject(body) ? body : {};
     const ok = input.ok !== false;
     const output = normalizeOutput(input.output);
     if (ok) {
       this._finishTask(task, TASK_STATUS.COMPLETED, { output, error: null, eventMessage: '任务完成' });
     } else {
       const message = util.str(input.error, 1000) || '设备执行失败';
+      const stalled = /stalled|无进度|执行超时|timeout|超时/i.test(message);
+      const canRetry =
+        stalled && this.autoRetryOnTimeout && task.autoRetry !== false && task.attempts < task.maxAttempts;
+      if (canRetry && this._retryStalledTask(task, device, message)) {
+        return { task, ignored: false, retried: true };
+      }
       this._finishTask(task, TASK_STATUS.FAILED, {
         output,
         error: message,

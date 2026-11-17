@@ -672,7 +672,7 @@ function killTree(child) {
 }
 
 /** 以文件重定向的方式运行子进程（避免管道 spawn 在受限环境被拒绝）。 */
-async function runProcess({ exe, args, cwd, env, timeoutMs, label }) {
+async function runProcess({ exe, args, cwd, env, timeoutMs, label, onStdout = null, pollMs = 1000 }) {
   if (!exe) throw new Error(`${label}：找不到可执行文件`);
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'butler-cli-'));
   const outFile = path.join(dir, 'stdout.log');
@@ -694,10 +694,23 @@ async function runProcess({ exe, args, cwd, env, timeoutMs, label }) {
     fs.closeSync(errFd);
     throw new Error(`${label}启动失败：${err.message}`);
   }
+  // 轮询 stdout 文件把增量输出转成进度（opencode --format json 是 JSONL）。
+  let pollTimer = null;
+  if (typeof onStdout === 'function') {
+    pollTimer = setInterval(() => {
+      try {
+        onStdout(outFile, Date.now() - startedAt);
+      } catch {
+        /* 解析进度失败不影响任务 */
+      }
+    }, pollMs);
+    if (pollTimer.unref) pollTimer.unref();
+  }
   let outcome;
   try {
     outcome = await waitForExit(child, timeoutMs);
   } finally {
+    if (pollTimer) clearInterval(pollTimer);
     try {
       fs.closeSync(outFd);
       fs.closeSync(errFd);
@@ -940,6 +953,34 @@ async function runHermes(ctx) {
   return runHermesLegacy(ctx);
 }
 
+/** 把 opencode `--format json` 的单个事件描述成人类可读进度（无可用信息返回空串）。 */
+function describeOpencodeEvent(event) {
+  if (!event || typeof event !== 'object') return '';
+  const describePart = (part) => {
+    if (!part || typeof part !== 'object') return '';
+    if (part.type === 'text' && typeof part.text === 'string') {
+      return `输出：${shortenLine(part.text, 60)}`;
+    }
+    if (part.type === 'tool') {
+      const name = part.tool || (part.state && part.state.title) || 'tool';
+      const status = part.state && part.state.status ? `（${part.state.status}）` : '';
+      return `工具 ${name}${status}`;
+    }
+    return '';
+  };
+  const direct = describePart(event);
+  if (direct) return direct;
+  const part = event.part || (event.properties && event.properties.part) || null;
+  const nested = describePart(part);
+  if (nested) return nested;
+  if (event.type === 'step-start') return '开始新一轮';
+  if (event.type === 'error') {
+    const data = event.error && event.error.data ? event.error.data : {};
+    return `错误：${shortenLine(data.message || (event.error && event.error.name) || event.message || '', 80)}`;
+  }
+  return '';
+}
+
 async function runOpencode(ctx) {
   const args = buildOpencodeArgs({
     instruction: ctx.instruction,
@@ -947,6 +988,54 @@ async function runOpencode(ctx) {
     workdir: ctx.workdir,
     auto: true,
   });
+  // OpenCode 不支持 Hermes 的 stream-json，但 `--format json` 是 JSONL：
+  // 轮询 stdout 把工具调用/文本增量转成进度，避免整个执行期间控制台停在 2%。
+  const onProgress = typeof ctx.onProgress === 'function' ? ctx.onProgress : null;
+  let offset = 0;
+  let remainder = '';
+  let lastEmitAt = 0;
+  const seen = new Set();
+  const emit = (message, percent) => {
+    if (!onProgress || !message) return;
+    const now = Date.now();
+    if (now - lastEmitAt < 900) return;
+    lastEmitAt = now;
+    try {
+      onProgress({ message: String(message).slice(0, 200), percent });
+    } catch {
+      /* 进度失败不影响任务 */
+    }
+  };
+  const onStdout = (file, elapsedMs) => {
+    let text = '';
+    try {
+      text = fs.readFileSync(file, 'utf8');
+    } catch {
+      return;
+    }
+    if (text.length > offset) {
+      remainder += text.slice(offset);
+      offset = text.length;
+      const lines = remainder.split('\n');
+      remainder = lines.pop() || '';
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('{')) continue;
+        try {
+          const desc = describeOpencodeEvent(JSON.parse(trimmed));
+          if (desc && !seen.has(desc)) {
+            seen.add(desc);
+            emit(`OpenCode：${desc}`, 30);
+          }
+        } catch {
+          /* 非 JSON 行忽略 */
+        }
+      }
+    }
+    if (Date.now() - lastEmitAt >= 15000) {
+      emit(`OpenCode 执行中（已 ${Math.round(elapsedMs / 1000)}s）…`, 20);
+    }
+  };
   const res = await runProcess({
     exe: ctx.opencodeExe,
     args,
@@ -954,6 +1043,8 @@ async function runOpencode(ctx) {
     env: baseEnv(),
     timeoutMs: ctx.timeoutMs,
     label: 'OpenCode CLI',
+    onStdout,
+    pollMs: 1000,
   });
   const parsed = extractOpencodeText(res.stdout);
   if (parsed.error) {

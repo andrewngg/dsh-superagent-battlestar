@@ -399,6 +399,22 @@ async function handleRequest(hub, req, res) {
     throw notFound('接口不存在');
   }
 
+  if (pathname === '/api/brain/owner-ask/choose') {
+    requireAdmin(hub, req, url);
+    if (method !== 'POST') throw notFound('接口不存在');
+    const body = await readJsonBody(req);
+    const brain = hub.chooseBrainOwnerAsk(body && body.optionId);
+    return sendJson(res, 200, { brain, hubTime: protocol.nowIso() });
+  }
+
+  if (pathname === '/api/brain/owner-ask/reply') {
+    requireAdmin(hub, req, url);
+    if (method !== 'POST') throw notFound('接口不存在');
+    const body = await readJsonBody(req);
+    const brain = hub.replyBrainOwnerAsk(body && body.text);
+    return sendJson(res, 200, { brain, hubTime: protocol.nowIso() });
+  }
+
   if (pathname === '/api/brain/think') {
     requireAdmin(hub, req, url);
     if (method !== 'POST') throw notFound('接口不存在');
@@ -492,11 +508,14 @@ async function handleRequest(hub, req, res) {
     const result = await hub.chatBrainstorm({
       sessionId: body && body.sessionId,
       message: body && body.message,
+      attachments: body && body.attachments,
     });
     return sendJson(res, 200, {
       session: result.session,
       reply: result.reply || null,
       error: result.error || null,
+      attachments: result.attachments || [],
+      attachmentErrors: result.attachmentErrors || [],
       hubTime: protocol.nowIso(),
     });
   }

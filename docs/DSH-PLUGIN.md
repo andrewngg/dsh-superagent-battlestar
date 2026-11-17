@@ -6,7 +6,7 @@
 - 插件包：`super-butler/dsh-plugin/`（`@local/dsh-super-butler@0.1.0`）
 - 安装 profile 示例：`desktop`（`~/.dsh/profiles/<profile>/package.json` 的 bundle 列表）
 - 入口：侧边栏「BattleStar」图标（order 5）
-- 面板：`main` 槽位的 `super-butler` 页，含「仪表盘 / 教程 / 设置」三个标签；仪表盘顶部提供
+- 面板：`main` 槽位的 `super-butler` 页，含「仪表盘 / 教程 / 心智 / 设置」四个标签（心智已从 Web 控制台迁到这里）；仪表盘顶部提供
   「在浏览器打开控制台」入口，任务下发、设备管理与任务详情都在浏览器控制台完成
 
 ## 1. 安装
@@ -46,7 +46,7 @@ plugin_manager(action: "install_bundle", target: "<abs>/super-butler/dsh-plugin"
   Settings › Connect a computer 选 USB/Wi-Fi、桥电脑安装 Mika CLI 并用 `mika doctor` 验证、
   复制 `phone-mika.example.json` 后由桥电脑启动代理（手机本身不用装 Node）；
 - **手机当控制端**：浏览器打开 `<hub>/m?token=<管理员令牌>` 或安装
-  `dist/BattleStar-0.1.2.apk`（Android 8+，首次自动扫描同 Wi-Fi Hub，只填令牌）；
+  `dist/BattleStar-0.1.5.apk`（Android 8+，首次自动扫描同 Wi-Fi Hub，只填令牌）；
 - 命令块里的 **Hub 地址与设备加入码取自当前 `/status`**（`hub.origin` / `hub.joinCode`），
   可直接一键复制；教程还列出「设备一直离线 / 加入码无效 / 任务没有派到设备」三项排错与
   `docs/WORKER-SETUP.md`、`docs/MIKA-PHONE.md`、`docs/APK.md` 指引。
@@ -86,7 +86,7 @@ plugin_manager(action: "install_bundle", target: "<abs>/super-butler/dsh-plugin"
   - `GET  /super-butler/api/settings` — 非敏感设置 + 密钥状态 + credentials 可用性；
   - `POST /super-butler/api/settings` — 保存设置 / 设置或清除密钥；保存结果里的
     `results[].storage` 标明该条目落在 Harness 凭据还是本机文件；
-  - `GET  /super-butler/api/snapshot` — 代理 Hub 设备/任务快照；
+  - `GET  /super-butler/api/snapshot` — 代理 Hub 设备/任务快照；`GET /super-butler/api/mind` 代理 Hub 心智视图（`{mind, hubTime}`）；`PATCH|PUT /super-butler/api/mind` 代理灵魂/工作流程修改（body 支持 `soul`、`skill`、`resetSoul`、`resetSkill`），编辑入口已从 Web 控制台迁到插件面板；
   - `GET  /super-butler/api/dsh/open` — 读取 Hub 管理员令牌后 302 到 Web 控制台
     （`http://<hub>/?token=...`，`Cache-Control: no-store`）；仅接受本机 loopback 调用，
     其他来源返回 403 `forbidden`，避免令牌被局域网页面借道；
@@ -140,7 +140,7 @@ APK/控制台发送「开发指令」时，插件通过 `sessionController` 在 
 - `ctx.locale.register('superButler', { zh, en })`，注册中英文案；
 - `ctx.slots.inject('sidebar.panellist', ...)` 注册侧边栏图标；
 - `ctx.slots.inject('main', ...)` 注册 key 为 `super-butler` 的主面板；
-- 面板只渲染只读仪表盘（Hub 状态、统计磁贴、只读设备卡、最近任务）、接入教程与设置页；
+- 面板渲染只读仪表盘（Hub 状态、统计磁贴、只读设备卡、最近任务）、接入教程、心智编辑页（`MindTab`：灵魂/工作流程两张编辑卡、字数上限、默认/自定义标识、保存与恢复默认）与设置页；
   任务下发、任务详情、设备改名/禁用/删除等交互一律跳转浏览器控制台，
   客户端因此不再包含任务 composer、`TaskRow`/`TaskDetail` 与弹窗组件；
 - React 组件使用 `--dsw-alias-*` 主题 token，不引入 Harness Client 包，不操作 DOM/iframe；

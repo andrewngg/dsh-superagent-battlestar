@@ -1,18 +1,20 @@
 'use strict';
 
 /**
- * Hub 系统设置（目前只有「系统默认语言」）。
+ * Hub 系统设置（系统默认语言、派发主设备）。
  *
  * 保存位置：<dataDir>/settings.json（gitignore，和 state.json 同级）。
  * 语言值：'zh-CN'（默认）| 'en'。
+ * 主设备（母机）：mainDeviceId；空字符串表示自动使用 Hub 所在的本机设备。
  */
 
 const fs = require('node:fs');
 const path = require('node:path');
 
-const DEFAULT_SETTINGS = Object.freeze({ language: 'zh-CN' });
+const DEFAULT_SETTINGS = Object.freeze({ language: 'zh-CN', mainDeviceId: '' });
 const SUPPORTED_LANGUAGES = Object.freeze(['zh-CN', 'en']);
 const LANGUAGE_LABELS = Object.freeze({ 'zh-CN': '简体中文', en: 'English' });
+const MAX_MAIN_DEVICE_ID_LENGTH = 120;
 
 function normalizeLanguage(value, fallback = DEFAULT_SETTINGS.language) {
   const text = typeof value === 'string' ? value.trim() : '';
@@ -32,10 +34,28 @@ function assertLanguage(value) {
   return text;
 }
 
+/** 主设备 id：允许空字符串（自动选择本机设备）；仅裁剪空白与长度。 */
+function normalizeMainDeviceId(value, fallback = DEFAULT_SETTINGS.mainDeviceId) {
+  if (value === undefined) return fallback;
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!text) return '';
+  if (text.length > MAX_MAIN_DEVICE_ID_LENGTH) {
+    throw new Error(`mainDeviceId 最多 ${MAX_MAIN_DEVICE_ID_LENGTH} 字符`);
+  }
+  return text;
+}
+
+function assertMainDeviceId(value) {
+  return normalizeMainDeviceId(value, '');
+}
+
 function mergeSettings(base, patch) {
   const next = { ...DEFAULT_SETTINGS, ...(base && typeof base === 'object' ? base : {}) };
   if (patch && typeof patch === 'object' && patch.language !== undefined) {
     next.language = normalizeLanguage(patch.language, next.language);
+  }
+  if (patch && typeof patch === 'object' && patch.mainDeviceId !== undefined) {
+    next.mainDeviceId = normalizeMainDeviceId(patch.mainDeviceId, next.mainDeviceId);
   }
   return next;
 }
@@ -47,7 +67,7 @@ function settingsFile(dataDir) {
 /**
  * 读取持久化设置；不存在或损坏时返回 null。
  * @param {string} dataDir
- * @returns {{language: string}|null}
+ * @returns {{language: string, mainDeviceId: string}|null}
  */
 function readSettings(dataDir) {
   try {
@@ -74,8 +94,11 @@ module.exports = {
   DEFAULT_SETTINGS,
   SUPPORTED_LANGUAGES,
   LANGUAGE_LABELS,
+  MAX_MAIN_DEVICE_ID_LENGTH,
   normalizeLanguage,
   assertLanguage,
+  normalizeMainDeviceId,
+  assertMainDeviceId,
   mergeSettings,
   settingsFile,
   readSettings,

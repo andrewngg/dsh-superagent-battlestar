@@ -820,6 +820,8 @@ class Agent {
       requirements: isPlainObject(payload.requirements) ? payload.requirements : {},
       priority: Number.isFinite(payload.priority) ? payload.priority : 5,
       timeoutSec: Number.isFinite(payload.timeoutSec) ? payload.timeoutSec : 300,
+      // 结果归因：原样回传 Hub 派发时携带的 attempt。
+      attempt: Number.isFinite(payload.attempt) ? payload.attempt : null,
       context,
       parentTaskId,
       attachments: Array.isArray(payload.attachments) ? payload.attachments : [],
@@ -953,6 +955,7 @@ class Agent {
     const record = {
       taskId,
       commandId: command.id,
+      attempt: Number.isFinite(task.attempt) ? task.attempt : null,
       task,
       controller,
       startedAt: Date.now(),
@@ -1118,6 +1121,8 @@ class Agent {
       ok: Boolean(payload.ok),
       durationMs: Number.isFinite(payload.durationMs) ? payload.durationMs : Date.now() - record.startedAt,
     };
+    // 把派发 attempt 回传给 Hub；Hub 据此拒绝“旧尝试的迟到结果”。
+    if (Number.isFinite(record.attempt)) body.attempt = record.attempt;
     if (payload.output !== undefined) body.output = payload.output;
     if (!payload.ok) body.error = String(payload.error || 'unknown').slice(0, 500);
 

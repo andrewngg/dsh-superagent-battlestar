@@ -135,6 +135,7 @@ test('normalizeOwnerAsk：字符串/对象归一化，空值返回 null，超长
     text: '请确认方向',
     at: '2026-01-01T00:00:00.000Z',
     goalId: 'goal_1',
+    options: null,
   });
 
   const long = normalizeOwnerAsk('y'.repeat(MAX_OWNER_ASK_LENGTH + 100));
@@ -211,6 +212,7 @@ test('restoreBrain：自适应新字段容错恢复（裁剪 + 归一化）', ()
     text: '请授权',
     at: '2026-01-31T00:00:00.000Z',
     goalId: 'goal_1',
+    options: null,
   });
 
   // 非法值回退

@@ -23,6 +23,7 @@ const {
   ROLES,
   BRAINSTORM_SYSTEM_PROMPT,
   appendMessage,
+  brainstormFileModelConfig,
   brainstormModelConfig,
   brainstormToJson,
   buildBrainstormPrompt,
@@ -32,6 +33,7 @@ const {
   normalizeChatRequest,
   renderContext,
   restoreBrainstorm,
+  selectBrainstormModel,
   sessionSummary,
   titleFromText,
 } = require('../lib/brainstorm.js');
@@ -45,6 +47,14 @@ const MODEL_ENV_KEYS = [
   'BRAIN_MODEL',
   'AGNES_MODEL',
   'BRAIN_TIMEOUT_MS',
+  'BRAIN_MAX_TOKENS',
+  'DEEPSEEK_API_KEY',
+  'BRAINSTORM_API_KEY',
+  'BRAINSTORM_BASE_URL',
+  'BRAINSTORM_MODEL',
+  'BRAINSTORM_FILE_API_KEY',
+  'BRAINSTORM_FILE_BASE_URL',
+  'BRAINSTORM_FILE_MODEL',
 ];
 
 /** 临时清空/设置模型相关环境变量，结束后恢复（宿主机可能配置了真实密钥）。 */
@@ -285,11 +295,11 @@ test('normalizeChatRequest：消息必填与 sessionId 长度校验', () => {
 
   assert.deepEqual(normalizeChatRequest({ message: '  帮我想想  ', sessionId: ' bs_1 ' }), {
     ok: true,
-    value: { sessionId: 'bs_1', message: '帮我想想' },
+    value: { sessionId: 'bs_1', message: '帮我想想', attachments: [] },
   });
   assert.deepEqual(normalizeChatRequest({ message: 'hi' }), {
     ok: true,
-    value: { sessionId: null, message: 'hi' },
+    value: { sessionId: null, message: 'hi', attachments: [] },
   });
   // 超长正文被截断而不是报错。
   assert.equal(normalizeChatRequest({ message: 'x'.repeat(9000) }).value.message.length, MAX_TEXT);
@@ -410,6 +420,74 @@ test('brainstormModelConfig：复用大脑默认配置与环境变量优先级',
   });
 });
 
+test('brainstormModelConfig：BRAINSTORM_* 独立覆盖，DEEPSEEK_API_KEY 自动切换', async () => {
+  await withModelEnv(
+    {
+      BRAIN_API_KEY: 'brain-key',
+      BRAINSTORM_API_KEY: 'bs-key',
+      BRAINSTORM_BASE_URL: 'https://bs.test/v1///',
+      BRAINSTORM_MODEL: 'bs-model',
+    },
+    async () => {
+      const config = brainstormModelConfig();
+      assert.equal(config.apiKey, 'bs-key');
+      assert.equal(config.baseUrl, 'https://bs.test/v1');
+      assert.equal(config.model, 'bs-model');
+    },
+  );
+
+  await withModelEnv({ DEEPSEEK_API_KEY: 'ds-key' }, async () => {
+    const config = brainstormModelConfig();
+    assert.equal(config.apiKey, 'ds-key');
+    assert.equal(config.baseUrl, 'https://api.deepseek.com');
+    assert.equal(config.model, 'deepseek-chat');
+  });
+
+  await withModelEnv({ BRAINSTORM_MODEL: 'deepseek-reasoner' }, async () => {
+    assert.equal(brainstormModelConfig().model, 'deepseek-reasoner');
+  });
+});
+
+test('selectBrainstormModel：普通对话用默认模型，涉及文件时切 DeepSeek', async () => {
+  await withModelEnv(
+    {
+      AGNES_API_KEY: 'agnes-key',
+      AGNES_BASE_URL: 'https://agnes.test/v1',
+      AGNES_MODEL: 'agnes-model',
+      DEEPSEEK_API_KEY: 'ds-key',
+    },
+    async () => {
+      const normal = selectBrainstormModel({});
+      assert.equal(normal.model, 'agnes-model');
+      assert.equal(normal.provider, 'default');
+      const withFile = selectBrainstormModel({ fileMode: true });
+      assert.equal(withFile.apiKey, 'ds-key');
+      assert.equal(withFile.baseUrl, 'https://api.deepseek.com');
+      assert.equal(withFile.model, 'deepseek-chat');
+      assert.equal(withFile.provider, 'deepseek');
+    },
+  );
+
+  // 没配 DeepSeek key：文件请求回退默认模型（附件内容仍会注入）。
+  await withModelEnv({ AGNES_API_KEY: 'agnes-key', AGNES_MODEL: 'agnes-model' }, async () => {
+    const withFile = selectBrainstormModel({ fileMode: true });
+    assert.equal(withFile.model, 'agnes-model');
+    assert.equal(brainstormFileModelConfig(), null);
+  });
+
+  // 文件模式模型可单独覆盖；只有 DEEPSEEK_API_KEY 时普通对话也用它。
+  await withModelEnv(
+    { DEEPSEEK_API_KEY: 'ds-key', BRAINSTORM_FILE_MODEL: 'deepseek-reasoner' },
+    async () => {
+      assert.equal(brainstormFileModelConfig().model, 'deepseek-reasoner');
+      assert.equal(brainstormFileModelConfig().baseUrl, 'https://api.deepseek.com');
+      const normal = selectBrainstormModel({});
+      assert.equal(normal.model, 'deepseek-chat');
+      assert.equal(normal.provider, 'deepseek');
+    },
+  );
+});
+
 test('createBrainstormThinker：未配置 key 拒绝；配置后按约定调用模型', async () => {
   await withModelEnv({}, async () => {
     const think = createBrainstormThinker();
@@ -437,7 +515,7 @@ test('createBrainstormThinker：未配置 key 拒绝；配置后按约定调用�
     const body = JSON.parse(captured.init.body);
     assert.equal(body.model, 'brainstorm-model');
     assert.equal(body.temperature, 0.2);
-    assert.equal(body.max_tokens, 2000);
+    assert.equal(body.max_tokens, 4000);
     assert.deepEqual(body.messages, [
       { role: 'system', content: 'sys' },
       { role: 'user', content: 'usr' },

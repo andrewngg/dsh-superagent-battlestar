@@ -5,12 +5,13 @@
 
 - 包名：`com.superbutler.app`
 - 名称：**BattleStar**
-- 版本：`versionCode 5` / `versionName 0.1.4`
+- 版本：`versionCode 6` / `versionName 0.1.5`
 - minSdk **26**（Android 8.0）/ targetSdk **36**
-- 产物：`dist/BattleStar-0.1.4.apk`（约 **0.12 MB**，远低于 5 MB 目标）
+- 产物：`dist/BattleStar-0.1.5.apk`（约 **0.13 MB**，远低于 5 MB 目标）
 - 自动发现：扫描当前 Wi-Fi `/24` 的 7317 端口，找到 Hub 后只填令牌
 - 任务通知：通知栏进度条、完成/失败提醒；设置中可开启**常驻通知**，空闲时显示在线/待命主机数
 - 提醒通知：原生 `AlarmManager` 精确/非精确闹钟 + `BroadcastReceiver`，App 被杀后仍能到点弹通知并回写 Hub
+- 决策通知：自主大脑需要主人拍板时，通知栏「管家需要你决定」直接带最多 3 个选项按钮（点选回传 Hub），无选项时点通知打开 App 的决策卡片
 - 任务页默认筛选：打开「任务」时默认选中「进行中」（APK 与浏览器控制台一致；用户仍可手动切到其它筛选）
 - 失败提示校正：任务页「N 个失败任务可重试」按「失败」列表实际可见的根任务重算；没有可重试失败任务时自动隐藏（仅 APK）。
 
@@ -28,6 +29,7 @@ android/
 │  ├─ ButlerNotificationService.java  # 常驻通知前台服务（5s 轮询 Hub）
 │  ├─ ReminderScheduler.java    # 提醒缓存（SharedPreferences）+ AlarmManager 排程
 │  ├─ ReminderReceiver.java     # 提醒到点：弹通知 → 推进下次时间 → POST 回写 Hub
+│  ├─ DecisionActionReceiver.java # 决策通知按钮：POST 选择结果到 Hub
 │  ├─ BootReceiver.java         # 开机 / 应用更新后从本地缓存重排提醒
 │  └─ HubDiscovery.java         # 局域网 Hub 自动发现（7317 端口扫描）
 ├─ assets/
@@ -40,7 +42,7 @@ android/
 └─ build/                       # 中间产物（可删除，构建时重建）
 
 dist/
-├─ BattleStar-0.1.4.apk        # 可安装 APK
+├─ BattleStar-0.1.5.apk        # 可安装 APK
 └─ icon-512.png                 # 512×512 商店/展示图
 ```
 
@@ -116,7 +118,7 @@ JDK          : ...\super-butler\toolchain\jdk
 Build-Tools  : ...\super-butler\toolchain\android-sdk\build-tools\36.0.0
 Platform JAR : ...\super-butler\toolchain\android-sdk\platforms\android-36\android.jar
 
-package: name='com.superbutler.app' versionCode='5' versionName='0.1.4' ... compileSdkVersion='36'
+package: name='com.superbutler.app' versionCode='6' versionName='0.1.5' ... compileSdkVersion='36'
 minSdkVersion:'26'
 targetSdkVersion:'36'
 uses-permission: name='android.permission.INTERNET'
@@ -131,11 +133,11 @@ launchable-activity: name='com.superbutler.app.MainActivity'  label='BattleStar'
 Signer #1 certificate DN: CN=Super Butler, OU=Home Lab, O=Super Butler, L=KL, C=MY
 Signer #1 certificate SHA-256 digest: 45658ac253be038ab8dc6da60a99743afc7a3a5ac9c6b04d9f498cb7f914bb5a
 
-APK : dist\BattleStar-0.1.4.apk
+APK : dist\BattleStar-0.1.5.apk
 大小: 127926 bytes (0.12 MB)    # 上限目标 5 MB
 ```
 
-APK 关键条目（`jar tf dist/BattleStar-0.1.4.apk`）：
+APK 关键条目（`jar tf dist/BattleStar-0.1.5.apk`）：
 
 ```
 AndroidManifest.xml
@@ -156,22 +158,22 @@ Verified using v2 scheme (APK Signature Scheme v2): true
 Verified using v3 scheme (APK Signature Scheme v3): true
 ```
 
-对齐校验：`zipalign -c -v 4 dist\BattleStar-0.1.4.apk` → `Verification successful`。
+对齐校验：`zipalign -c -v 4 dist\BattleStar-0.1.5.apk` → `Verification successful`。
 
 > 每次重新构建 APK 的 SHA-256 可能不同（zip 时间戳/签名块），以 `build-apk.ps1` 末尾打印的值为准。
 >
-> 清单校验：`aapt2 dump xmltree --file AndroidManifest.xml dist\BattleStar-0.1.4.apk` 中可见
+> 清单校验：`aapt2 dump xmltree --file AndroidManifest.xml dist\BattleStar-0.1.5.apk` 中可见
 > `.ReminderReceiver` 与 `.BootReceiver` 均声明为 `exported="false"`，并带 `BOOT_COMPLETED` /
 > `MY_PACKAGE_REPLACED` intent-filter。
 
 ## 5. 安装与使用
 
-APK 在本目录 `dist/BattleStar-0.1.4.apk`。安装方式（任选其一）：
+APK 在本目录 `dist/BattleStar-0.1.5.apk`。安装方式（任选其一）：
 
 ```powershell
 # 手机开启「开发者选项 → USB 调试」并连接后：
 adb devices
-adb install -r "dist\BattleStar-0.1.4.apk"
+adb install -r "dist\BattleStar-0.1.5.apk"
 ```
 
 - 也可以把 APK 拷到手机（微信/网盘/数据线）直接点击安装，需允许「安装未知来源应用」。
@@ -192,7 +194,7 @@ adb install -r "dist\BattleStar-0.1.4.apk"
 ## 6. 实现要点
 
 - **WebView 配置**：JS、DOM storage、database、宽视口（`useWideViewPort` + `loadWithOverviewMode`）、
-  混合内容 `MIXED_CONTENT_ALWAYS_ALLOW`、自定义 UA 追加 `SuperButlerApp/0.1.4`。
+  混合内容 `MIXED_CONTENT_ALWAYS_ALLOW`、自定义 UA 追加 `SuperButlerApp/0.1.5`。
 - **JS Bridge**（对象名 `ButlerBridge`）：`getConfig` / `saveConfig` / `clearConfig` / `openDashboard` /
   `openSetup` / `appVersion` / `toast` / `testConnection` / `setPersistentNotification` /
   `syncReminders(json)` / `getReminderStatus()`。
@@ -266,6 +268,21 @@ adb install -r "dist\BattleStar-0.1.4.apk"
     若渠道被用户关闭或通知权限被拒绝，则到点不显示通知（排程与回写 Hub 仍照常）。
   两个 Receiver 均为 `exported="false"`，不暴露给其他应用。
 
+### 决策通知（自主大脑 ownerAsk）
+
+自主大脑在 `snapshot.brain.ownerAsk` 里给出「需要主人决定」的问题时，APK 会主动提醒：
+
+- `ButlerNotificationService` 每 5 秒拉取 `/api/snapshot?limit=10`，`syncBrainAsk(snapshot)` 读取
+  `brain.ownerAsk.text` 与 `ownerAsk.options`；用 `butler_decision` 通道（`IMPORTANCE_HIGH`，通知 id **7600**）
+  发「管家需要你决定」+ 问题正文（`BigTextStyle`），同一问题用签名去重，避免每 5 秒重复打扰；
+- 有 `options` 时最多放 **3 个动作按钮**（`PendingIntent.getBroadcast` → `DecisionActionReceiver`，`FLAG_UPDATE_CURRENT|FLAG_IMMUTABLE`）；
+  点按钮后 Receiver 在后台 `POST /api/brain/owner-ask/choose`（body `{"optionId":"o1"}`，`X-Butler-Token`），
+  成功取消通知；失败只记日志、通知保留，等下一轮 snapshot 再同步；
+- 没有选项时给一个「打开决策」动作；点通知正文打开 App 并带 `open_tab=brain`，`MainActivity` 会切到状态页、
+  滚动并高亮 `#brain-card`；
+- `ownerAsk` 消失（已在控制台或通知栏选完/知道了）时自动取消通知 7600；
+- 该通道与任务、提醒、常驻通知渠道独立，用户可单独静音/关闭。
+
 ## 7. 签名说明
 
 - 构建脚本首次运行会生成测试密钥库（之后复用，不覆盖）：
@@ -286,6 +303,7 @@ adb install -r "dist\BattleStar-0.1.4.apk"
 - **HTTPS 自签名证书不被接受**：`onReceivedSslError` 直接取消并展示错误页。家庭内网请用 `http://`；
   若 Hub 上 TLS，需配置系统信任的证书。
 - **明文 HTTP**：为家用 LAN 场景显式开启 `usesCleartextTraffic="true"`，请勿把 Hub 端口暴露到公网。
+- **决策通知最多 3 个动作按钮**（Android 通知 actions 上限）；选项更多或无选项时，点通知进入 App 的「自主大脑」卡片再选择。
 - **令牌暴露面**：管理员令牌按协议 §5.6 放在 `/m?token=` 查询串中，可能出现在 WebView 历史/日志；
   同时明文存于应用私有 `SharedPreferences`（协议 §9 约定）。请勿截图分享含 token 的 URL。
 - **Bridge 信任边界按「同主机」判定**（而非严格同 scheme+port），以兼容 http↔https 跳转/反代；
