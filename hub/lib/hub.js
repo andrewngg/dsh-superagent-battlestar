@@ -227,6 +227,12 @@ class Hub {
     // 设备在线但忙碌（正在跑别的任务）时，ack 可能长时间不到。此时不按 ack timeout 重派，
     // 而是重投同一个 command 并按指数退避等待，最多累计等待该上限（避免排队中的任务被无限重派）。
     this.ackWaitMaxMs = Math.max(this.ackTimeoutMs * 4, 10 * 60 * 1000);
+    // 排队寿命：queued 超过该时长仍等不到设备就主动失败（0=永不失效），
+    // 避免历史任务排一整天后和设备重启时的「假满载」互相放大。
+    this.queuedTtlMs = util.clampInt(options.queuedTtlMs, 6 * 3600 * 1000, 0, 30 * 24 * 3600 * 1000);
+    // 单次重派预算：设备上线/重启/空槽释放时，一次最多补派多少条排队任务（0=不限），
+    // 防止历史积压任务在同一秒全部涌出占满所有工作机。
+    this.redispatchBudget = util.clampInt(options.redispatchBudget, 2, 0, 50);
     // 系统自重启：先通知设备代理重启，留出心跳/长轮询窗口后再重启 Hub 自身。
     this.restartDelayMs = util.clampInt(options.restartDelayMs, 12000, 0, 60000);
     this.restartHandler = typeof options.restartHandler === 'function' ? options.restartHandler : null;
@@ -529,7 +535,8 @@ class Hub {
 
     this.reconcilePlans();
     this.schedulePersist();
-    this.retryQueuedTasks('startup');
+    // 启动只恢复「运行中→排队」，不主动把历史 queued 一次性重派：等设备上线/空槽时按预算补派。
+    this.retryQueuedTasks('startup', 0);
     // 启动时补写/刷新全部任务的执行记录（历史任务也能 backtrace）。
     for (const task of this.tasks.values()) this._scheduleTaskRecord(task.id, 30);
     this._scheduleRecordIndex(120);
@@ -2904,14 +2911,18 @@ class Hub {
       case 'create_task': {
         const instruction = String(action.instruction || '').trim();
         if (instruction.length < 4) return { skippedReason: '缺少可执行的任务指令' };
-        const prefix = instruction.slice(0, 40);
-        const duplicate = [...this.tasks.values()].find(
-          (task) =>
-            !TERMINAL_TASK_STATUSES.has(task.status) &&
-            util.str(task.instruction, 40).startsWith(prefix),
-        );
-        if (duplicate) return { skippedReason: 'duplicate' };
         const goalId = action.goalId && this.goals.has(action.goalId) ? action.goalId : null;
+        // 同目标并发闸：同一长期目标下已有在途任务时不再新建，只允许 retry/resume/cancel。
+        // 这是 task_4wr9z4vy / task_kwakhe4f 这类「同一件事排两次」的直接来源。
+        const activeForGoal = this._activeTaskForGoal(goalId);
+        if (activeForGoal) {
+          return {
+            skippedReason: `同目标已有在途任务 ${activeForGoal.id}（${activeForGoal.status}），请用 retry_task/resume_thread 推进`,
+          };
+        }
+        // 去重升级：去掉空白/标点/大小写后前 60 字相同即视为同一件事（旧版只比前 40 字原样前缀，标点一变就漏）。
+        const duplicate = this._findDuplicateTask(instruction, goalId);
+        if (duplicate) return { skippedReason: 'duplicate' };
         // 大脑常把项目名/任务名当设备标签（如「反腐AI」「验证」）：有项目时学成项目别名保留，
         // 设备做过该项目后会自动匹配；没有项目时才丢弃无人声明的标签，避免任务永远卡在 queued。
         const rawRequirements = util.isPlainObject(action.requirements) ? action.requirements : null;
@@ -4166,6 +4177,33 @@ class Hub {
       if (!Number.isFinite(lastSeen)) continue;
       if (now - lastSeen > this.ttlMs) this.markDeviceOffline(device, 'heartbeat timeout');
     }
+    // 顺带清理「排队太久、根本没设备能接」的幽灵任务。
+    this._expireStaleQueuedTasks(now);
+  }
+
+  /**
+   * 排队寿命到期：queued 超过 queuedTtlMs 仍没派发出去的任务主动失败，并写明最后排队原因。
+   * 计划子任务在等前置依赖时不算「没设备可派」，保留给计划依赖闸处理。
+   * @returns {number} 本次终止的任务数
+   */
+  _expireStaleQueuedTasks(now = Date.now()) {
+    if (!this.queuedTtlMs) return 0;
+    let expired = 0;
+    for (const task of [...this.tasks.values()]) {
+      if (task.status !== TASK_STATUS.QUEUED) continue;
+      const createdAt = task.createdAt ? Date.parse(task.createdAt) : NaN;
+      if (!Number.isFinite(createdAt) || now - createdAt < this.queuedTtlMs) continue;
+      const gate = this._planDependencyGate(task);
+      if (gate && !gate.missingOnly) continue;
+      const hours = Math.max(1, Math.round(this.queuedTtlMs / 3600000));
+      const lastReason = task.route && task.route.reason ? `，最后排队原因：${task.route.reason}` : '';
+      this._finishTask(task, TASK_STATUS.FAILED, {
+        error: `排队超时（${hours}h 内没有可用设备）${lastReason}`,
+        eventMessage: `排队超时（超过 ${hours}h 没有可用设备），已终止`,
+      });
+      expired += 1;
+    }
+    return expired;
   }
 
   removeDevice(device, reason = 'device removed') {
@@ -5561,13 +5599,103 @@ class Hub {
     return task;
   }
 
-  /** 设备上线 / 能力变化 / 启动后重试所有排队任务（优先级高者先）。 */
-  retryQueuedTasks(reason = '') {
+  /**
+   * 设备上线 / 能力变化 / 空槽释放后补派排队任务（优先级高者先）。
+   * @param {string} reason 触发原因（用于持久化调度）
+   * @param {number|null} budget 本次最多派发几条；null=按 redispatchBudget 与空闲槽位自动计算
+   * @returns {number} 实际派发出去的任务数
+   */
+  retryQueuedTasks(reason = '', budget = null) {
     const queued = [...this.tasks.values()]
       .filter((task) => task.status === TASK_STATUS.QUEUED)
       .sort((a, b) => b.priority - a.priority || String(a.createdAt).localeCompare(String(b.createdAt)));
-    for (const task of queued) this.routeTask(task);
-    if (queued.length && reason) this.schedulePersist();
+    if (!queued.length) return 0;
+    const limit =
+      budget === null
+        ? this.redispatchBudget
+          ? Math.min(this.redispatchBudget, this._freeDeviceSlots())
+          : queued.length
+        : Math.max(0, Math.trunc(budget));
+    if (limit <= 0) {
+      if (reason) this.schedulePersist();
+      return 0;
+    }
+    let dispatched = 0;
+    for (const task of queued) {
+      if (dispatched >= limit) break;
+      this.routeTask(task);
+      if (this._isDispatchedTask(task)) dispatched += 1;
+    }
+    if (reason) this.schedulePersist();
+    return dispatched;
+  }
+
+  /** routeTask 之后该任务是否真的离开 queued 上到设备。 */
+  _isDispatchedTask(task) {
+    if (!task || !task.assignedDeviceId) return false;
+    return task.status !== TASK_STATUS.QUEUED && !TERMINAL_TASK_STATUSES.has(task.status);
+  }
+
+  /** 在线且未禁用设备的剩余并发槽位总和。 */
+  _freeDeviceSlots() {
+    let free = 0;
+    for (const device of this.devices.values()) {
+      if (!device.online || device.disabled) continue;
+      const running = device.load ? device.load.running : 0;
+      free += Math.max(0, this._maxConcurrent(device) - running);
+    }
+    return free;
+  }
+
+  /** 去重归一化：小写、去掉空白/标点/符号，取前 N 个字符。 */
+  _normalizeForDedupe(instruction, length = 60) {
+    return String(instruction || '')
+      .toLowerCase()
+      .replace(/[\s\p{P}\p{S}]+/gu, '')
+      .slice(0, length);
+  }
+
+  /** 字符二元组集合（用于同目标任务的相似度判定）。 */
+  _dedupeGrams(instruction) {
+    const text = this._normalizeForDedupe(instruction, 200);
+    const grams = new Set();
+    for (let i = 0; i < text.length - 1; i += 1) grams.add(text.slice(i, i + 2));
+    return grams;
+  }
+
+  /** 字符 bigram Jaccard 相似度（0~1）。 */
+  _instructionSimilarity(a, b) {
+    const left = this._dedupeGrams(a);
+    const right = this._dedupeGrams(b);
+    if (!left.size || !right.size) return 0;
+    let shared = 0;
+    for (const gram of left) if (right.has(gram)) shared += 1;
+    return shared / (left.size + right.size - shared);
+  }
+
+  /** 找到与指令近似重复的在途任务：去标点后前 60 字包含，或同目标 bigram Jaccard ≥ 0.6。 */
+  _findDuplicateTask(instruction, goalId = null) {
+    const normalized = this._normalizeForDedupe(instruction);
+    if (!normalized) return null;
+    for (const task of this.tasks.values()) {
+      if (TERMINAL_TASK_STATUSES.has(task.status)) continue;
+      const other = this._normalizeForDedupe(task.instruction);
+      if (other && (other.startsWith(normalized) || normalized.startsWith(other))) return task;
+      if (goalId && task.goalId === goalId && this._instructionSimilarity(instruction, task.instruction) >= 0.6) {
+        return task;
+      }
+    }
+    return null;
+  }
+
+  /** 目标下是否有在途任务（queued/assigned/running/waiting）：同目标并发闸用。 */
+  _activeTaskForGoal(goalId) {
+    if (!goalId) return null;
+    for (const task of this.tasks.values()) {
+      if (task.goalId !== goalId || TERMINAL_TASK_STATUSES.has(task.status)) continue;
+      return task;
+    }
+    return null;
   }
 
   _buildRunCommand(task, device) {

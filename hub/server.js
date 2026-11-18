@@ -11,6 +11,8 @@
  *   BUTLER_ADMIN_TOKEN  固定管理员令牌（缺省自动生成并持久化）
  *   BUTLER_JOIN_CODE    固定设备加入码（缺省自动生成并持久化）
  *   BUTLER_HOST / BUTLER_PORT / BUTLER_DATA_DIR / BUTLER_TTL_MS 同命令行参数（命令行优先）
+ *   BUTLER_QUEUED_TTL_MS     排队超时时间（毫秒，默认 6h，0=关闭自动失效）
+ *   BUTLER_REDISPATCH_BUDGET 设备上线/腾槽时单次最多补派的排队任务数（默认 2）
  */
 
 const fs = require('node:fs');
@@ -205,6 +207,11 @@ async function main() {
   const webDir = options.webDir || path.join(__dirname, 'web');
 
   const isSelfRestart = process.env.BUTLER_RESTART === '1';
+  const envInt = (name) => {
+    if (process.env[name] === undefined || process.env[name] === '') return undefined;
+    const value = Number(process.env[name]);
+    return Number.isFinite(value) ? value : undefined;
+  };
   let hub;
   const hubOptions = {
     port,
@@ -218,6 +225,9 @@ async function main() {
     restartDelayMs: Number(process.env.BUTLER_RESTART_DELAY_MS) || undefined,
     // 长期目标调度扫描间隔（默认 30s；测试/调试可用 BUTLER_GOAL_TICK_MS 覆盖）。
     goalTickMs: Number(process.env.BUTLER_GOAL_TICK_MS) || undefined,
+    // 队列治理：排队超过 queuedTtlMs 仍无设备可派 → 自动 failed（0=关闭）；设备上线/腾槽时每次最多补派 redispatchBudget 条。
+    queuedTtlMs: envInt('BUTLER_QUEUED_TTL_MS'),
+    redispatchBudget: envInt('BUTLER_REDISPATCH_BUDGET'),
     gracefulRestart: isSelfRestart,
     restartHandler: (reason) => relaunchHub(hub, reason),
     recordDir: process.env.BUTLER_RECORD_DIR || path.join(__dirname, '..', 'task-records'),

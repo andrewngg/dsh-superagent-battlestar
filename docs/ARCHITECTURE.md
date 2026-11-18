@@ -132,10 +132,13 @@ score = 100
 - 前序子任务失败/超时/取消：依赖它的子任务显示「卡点：…等待确认（重试该子任务或取消本计划）」，父任务 `progress.blocked = true` 并追加 `blocked` 事件，控制台/手机显示「卡点」标记。
 - 默认 `blockerPolicy = "stop-and-ask"`：卡住后不自动跳过，等用户决定；用户重试失败子任务、或回答等待中的问题后，`_updateParentTask → _advancePlan` 会自动放行后续依赖子任务。
 - 取消某个子任务会级联取消依赖它的后续排队子任务，避免悬空依赖。
+- 依赖子任务被回收站彻底清理（依赖 ID 已不存在）时不再永久卡住：闸门返回 `missingOnly`，任务记录一次「前置子任务已不存在（N 个），已忽略缺失依赖并继续」提示并正常派发；仍存在但未完成的依赖继续等待。
 
 **排队与 Mika 单并发**：设备名额按“真实占用”计算（`assigned` / `running` / `waiting`，含已下发但尚未 ack 的任务），不是只看 `load.running`，避免单并发设备（如 Mika 手机 `limits.maxConcurrentTasks = 1`）在 ack 前被并行塞入多个任务。超出容量的任务保持 `queued`，每次任务结束、失败子任务重试、依赖满足都会触发 `_advancePlan` + `retryQueuedTasks` 重新派发。规划器 prompt 会收到每台设备的并发上限，并明确建议：需要 Mika 手机的子任务超过 2 个时用 `dependsOn` 串行排队。
 
 **并发**：母机 `first-machine` 的 `limits.maxConcurrentTasks` 现为 4；超出容量的任务保持 `queued`，槽位释放后由 Hub 自动重派，拆分出的子任务不会因为一台机器满载就失败。
+
+**队列治理**：排队任务不再无限堆积。① `queued` 超过 `queuedTtlMs`（默认 6h，`BUTLER_QUEUED_TTL_MS`，0=关闭）仍没有设备可派时，`_expireStaleQueuedTasks` 在每轮 `sweepOffline` 里把它标记 `failed`，`error` 与事件写明「排队超时（超过 Nh 没有可用设备）」和最后一次路由排除原因；被依赖闸门挡住（等前置子任务）的计划子任务不在此列。② `retryQueuedTasks` 带预算：非显式预算时每次最多派 `min(redispatchBudget, 空闲槽位)` 条（默认 2，`BUTLER_REDISPATCH_BUDGET`），避免某台设备上线/重启时把历史排队任务一次性灌满；自重启恢复只把 `running` 重新排队（`retryQueuedTasks('startup', 0)`），不在启动瞬间重派历史 `queued`。③ 自主大脑 `create_task` 增加同目标并发闸（该目标下已有在途任务 → 只允许 `retry_task`/`resume_thread` 推进）和去重升级（归一化空白/标点/大小写后前 60 字互相包含，或同目标字符二元组 Jaccard ≥ 0.6 即判 `duplicate`）。测试：`hub/test/queue-governance.test.js`。
 
 #### 3.3.2 派发亲和：母机 / 项目 / 线程（`routing-affinity`）
 
