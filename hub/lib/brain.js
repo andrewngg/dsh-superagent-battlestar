@@ -20,6 +20,7 @@ const BRAIN_ACTIONS = [
   'retry_task',
   'resume_thread',
   'create_task',
+  'update_task',
   'link_task',
   'consult_worker',
   'remember',
@@ -559,9 +560,10 @@ function buildBrainPrompt(snapshot, options = {}) {
     '你是 BattleStar（对战星）的自主管家大脑，负责在用户不在时推动长期目标与任务继续前进。',
     '你只能输出严格 JSON，不要输出 Markdown 代码围栏以外的解释。',
     '每次思考必须按六步走：1) 现在有什么目标 2) 进度在哪里 3) 有什么更好的工作方式 4) 我需要改进哪里 5) 我可以做什么推进进度 6) 是否需要提醒主人做什么、主人参与哪部分能加速。',
-    'JSON 结构：{"assessment":{"goals":"现在有什么目标","progress":"进度在哪里","betterWay":"有什么更好的工作方式","improvement":"我需要改进哪里","myMove":"我可以做什么推进进度","ownerAsk":"需要主人做什么，没有就留空字符串；需要主人在几个方案里选时写成 {\\"text\\":\\"问题背景（发生了什么、为什么需要主人拍板）\\",\\"options\\":[{\\"label\\":\\"选项A（≤20字）\\",\\"detail\\":\\"这个选项具体做什么、大概要多久/多少代价、成功或失败分别会怎样（≤100字）\\"},{\\"label\\":\\"选项B\\",\\"detail\\":\\"...\\"}]}（2–4 个互斥选项，会显示成按钮和说明）"},"summary":"一句话结论","actions":[{"action":"retry_task|resume_thread|create_task|link_task|consult_worker|remember|none","taskId":"可空","goalId":"可空","instruction":"可空，仅 resume_thread/create_task 使用","reason":"为什么这么做","confidence":0.0,"timeoutSec":"可空，仅 create_task/consult_worker 使用，60–3600 秒","question":"可空，仅 consult_worker 使用：向设备提出的只读问题","note":"可空，仅 remember 使用：要长期记住的上下文","requirements":"可空，仅 create_task/consult_worker 使用：{skills:[],project,deviceId,model,tags}"}]}',
-    '动作含义：retry_task 只重试 failed/timeout/cancelled 且有剩余次数的任务（可解开计划卡点）；已完成(completed)的任务想再做，用 resume_thread 说明下一步；resume_thread 对已结束但还需要下一步的任务创建跟进（instruction 写下一步）；create_task 新建任务（只在确有新工作且没有重复任务时）；link_task 把已有任务关联到目标；consult_worker 向指定设备提一个只读问题（需要 requirements.deviceId），系统创建咨询任务并把回答带回下一轮；remember 把长期有用的上下文写入「管家记忆」，之后每轮都会看到。',
+    'JSON 结构：{"assessment":{"goals":"现在有什么目标","progress":"进度在哪里","betterWay":"有什么更好的工作方式","improvement":"我需要改进哪里","myMove":"我可以做什么推进进度","ownerAsk":"需要主人做什么，没有就留空字符串；需要主人在几个方案里选时写成 {\\"text\\":\\"问题背景（发生了什么、为什么需要主人拍板）\\",\\"options\\":[{\\"label\\":\\"选项A（≤20字）\\",\\"detail\\":\\"这个选项具体做什么、大概要多久/多少代价、成功或失败分别会怎样（≤100字）\\"},{\\"label\\":\\"选项B\\",\\"detail\\":\\"...\\"}]}（2–4 个互斥选项，会显示成按钮和说明）"},"summary":"一句话结论","actions":[{"action":"retry_task|resume_thread|create_task|update_task|link_task|consult_worker|remember|none","taskId":"可空","goalId":"可空","instruction":"可空，仅 resume_thread/create_task 使用","reason":"为什么这么做","confidence":0.0,"timeoutSec":"可空，仅 create_task/consult_worker 使用，60–3600 秒","question":"可空，仅 consult_worker 使用：向设备提出的只读问题","note":"可空，仅 remember 使用：要长期记住的上下文","requirements":"可空，仅 create_task/update_task/consult_worker 使用：{skills:[],project,deviceId,model,tags}"}]}',
+    '动作含义：retry_task 只重试 failed/timeout/cancelled 且有剩余次数的任务（可解开计划卡点）；已完成(completed)的任务想再做，用 resume_thread 说明下一步；resume_thread 对已结束但还需要下一步的任务创建跟进（instruction 写下一步）；create_task 新建任务（只在确有新工作且没有重复任务时）；link_task 把已有任务关联到目标；consult_worker 向指定设备提一个只读问题（需要 requirements.deviceId），系统创建咨询任务并把回答带回下一轮；update_task 修改排队中任务的需求（taskId + requirements/priority/timeoutSec，改完系统会立即重新派发，用来补上任务缺的能力/设备）；remember 把长期有用的上下文写入「管家记忆」，之后每轮都会看到。',
     'create_task 的任务默认 600 秒；涉及多步读写文件、代码分析、打包等任务请显式给 timeoutSec（建议 900–1800）。任务需要特定能力时填 requirements：例如纯文件/CLI 任务用 {"skills":[],"deviceId":"主工作机或图像处理机的设备 id"} 或指定 project；不要给日志/代码/文件类任务指定手机或纯 ComfyUI 设备。requirements.tags 是设备能力标签，只能填设备清单里实际出现过的标签（如「本机」「手机」「GPU」）；一般任务不要填 tags，用 project 或 deviceId 定位即可。千万不要用项目名/任务名自造标签（例如「反腐AI」「验证」）——没有任何设备会声明它们，任务会一直排队。任务如果包含「多个仓库 / 发布 / 部署 / 迁移 / 全量验证」等跨阶段工作，拆成 2–3 个 create_task（实现 → 发布或验证），每个任务目标单一、能在 15 分钟内跑完；不要把一段需要 20 分钟以上的工作塞进一个任务，本机 CLI 有硬性执行上限，超时会整单作废。',
+    '队列健康：如果「任务」里有排队超过 2 小时的任务，本轮不要 create_task；先 update_task 补 requirements（deviceId/skills/project）或 retry_task 重派，实在推进不了才考虑取消。',
     '排队中的计划子任务若「依赖」里的前置任务未完成，不要对它 retry（会一直等待）；应先推进前置任务，或选择 none 观察。',
     '六步要求：assessment 六项都要认真填，即使没有变化也要写清结论；ownerAsk 只在确实需要主人做决策/授权/偏好选择/确认方向时填写，否则留空；myMove 要与 actions 一致。',
     'ownerAsk 禁止询问机器可查的事实：文件/目录/脚本/简历的路径、文件是否存在、版本号、密码、设备在线状态、任务 id 等。任务因路径缺失或路径不对而失败时，先看下面的「路径核查」：有候选路径就把候选路径写进自包含的 create_task（指定有文件能力的设备）去处理；确认不存在就创建定位/重规划任务，不要问主人。',
@@ -699,6 +701,36 @@ function buildBrainPrompt(snapshot, options = {}) {
   }
 
   // 决策记忆：把最近几轮结论与失败原因带上，避免模型重复同样的无效动作。
+
+  // 动作命中率（P5）：最近若干轮动作实际执行/跳过的比例与主要跳过原因。
+  const statDecisions = util.arr(snap.decisions).slice(0, 12);
+  const actionStats = { total: 0, executed: 0, skipped: 0 };
+  const skipReasons = new Map();
+  for (const decision of statDecisions) {
+    for (const action of util.arr(decision && decision.actions)) {
+      actionStats.total += 1;
+      if (action.executed) {
+        actionStats.executed += 1;
+        continue;
+      }
+      actionStats.skipped += 1;
+      const reason = clampText(action.skippedReason || action.error || '未执行', 60);
+      skipReasons.set(reason, (skipReasons.get(reason) || 0) + 1);
+    }
+  }
+  if (actionStats.total >= 3) {
+    const rate = Math.round((actionStats.executed / actionStats.total) * 100);
+    const topReasons = [...skipReasons.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([reason, count]) => `${reason}×${count}`)
+      .join('；');
+    lines.push(
+      `\n## 动作命中率（最近 ${statDecisions.length} 轮，共 ${actionStats.total} 个动作：执行率 ${rate}%）`,
+      `跳过 ${actionStats.skipped} 个${topReasons ? `，主要原因：${topReasons}` : ''}。同一类动作反复被跳过/拒绝说明方向不对，下一轮换做法。`,
+    );
+  }
+
   const decisions = util.arr(snap.decisions).slice(0, 3);
   lines.push('\n## 最近决策（最新在前，重复以下无效动作会被再次拒绝）');
   if (!decisions.length) lines.push('（无）');

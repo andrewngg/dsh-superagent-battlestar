@@ -138,6 +138,164 @@ test('去重升级：仅标点/空白不同的重复指令被识别为 duplicate
   assert.equal(second.actions[0].skippedReason, 'duplicate');
 });
 
+test('改需求：PATCH /api/tasks/:id 补 requirements 后排队任务立即派发', async (t) => {
+  const env = await startTestHub(t);
+  const worker = await registerDevice(env, makeManifest({ name: '工作机' }));
+  const task = await queueTask(env, '需要 PDF 能力的历史排队任务');
+  assert.equal(task.status, 'queued');
+
+  const res = await request(env.base, 'PATCH', `/api/tasks/${task.id}`, {
+    headers: adminHeaders(env),
+    body: { requirements: { deviceId: worker.id, skills: [] } },
+  });
+  assert.equal(res.status, 200, res.text);
+  assert.equal(res.json.task.status, 'assigned');
+  assert.equal(res.json.task.assignedDeviceId, worker.id);
+  const stored = await getTask(env, task.id);
+  assert.equal(stored.requirements.deviceId, worker.id);
+  assert.ok(
+    stored.events.some((event) => /需求已修改/.test(event.message)),
+    '事件里要记录需求已修改',
+  );
+
+  // 已结束任务不允许再改需求。
+  const cancelled = await request(env.base, 'POST', `/api/tasks/${task.id}/cancel`, {
+    headers: adminHeaders(env),
+    body: {},
+  });
+  assert.equal(cancelled.status, 200, cancelled.text);
+  const rejected = await request(env.base, 'PATCH', `/api/tasks/${task.id}`, {
+    headers: adminHeaders(env),
+    body: { requirements: { deviceId: worker.id } },
+  });
+  assert.equal(rejected.status, 400, rejected.text);
+});
+
+test('队列健康：有任务排队超过 queueStuckMs 时，大脑不再 create_task', async (t) => {
+  const env = await startTestHub(t, {
+    queueStuckMs: 50,
+    brainThink: async () =>
+      thinkReply('先处理积压', [
+        { action: 'create_task', instruction: '新建一条与积压无关的分析任务', confidence: 0.9 },
+      ]),
+  });
+  await queueTask(env, '缺少设备能力的积压任务');
+  await sleep(120);
+
+  const res = await env.hub.requestBrainThink({ trigger: 'manual' });
+  assert.equal(res.actions[0].executed, false);
+  assert.match(res.actions[0].skippedReason, /队列积压/);
+});
+
+test('大脑 update_task：给排队任务补设备需求后立即派发', async (t) => {
+  let queuedTaskId = null;
+  let workerId = null;
+  const env = await startTestHub(t, {
+    brainThink: async () =>
+      thinkReply('补齐排队任务需求', [
+        {
+          action: 'update_task',
+          taskId: queuedTaskId,
+          requirements: { deviceId: workerId, skills: [] },
+          confidence: 0.9,
+        },
+      ]),
+  });
+  const worker = await registerDevice(env, makeManifest({ name: '工作机' }));
+  workerId = worker.id;
+  const queued = await queueTask(env, '缺少能力的排队任务');
+  queuedTaskId = queued.id;
+  assert.equal(queued.status, 'queued');
+
+  const res = await env.hub.requestBrainThink({ trigger: 'manual' });
+  assert.equal(res.actions[0].executed, true, JSON.stringify(res.actions[0]));
+  const stored = await getTask(env, queued.id);
+  assert.equal(stored.status, 'assigned');
+  assert.equal(stored.assignedDeviceId, worker.id);
+});
+
+test('优先级老化：排队越久有效优先级越高，最多 +3', async (t) => {
+  const env = await startTestHub(t);
+  const now = Date.now();
+  const base = { priority: 1 };
+  assert.equal(env.hub._effectivePriority({ ...base, createdAt: new Date(now).toISOString() }, now), 1);
+  assert.equal(
+    env.hub._effectivePriority({ ...base, createdAt: new Date(now - 3 * 3600 * 1000).toISOString() }, now),
+    4,
+  );
+  assert.equal(
+    env.hub._effectivePriority({ ...base, createdAt: new Date(now - 20 * 3600 * 1000).toISOString() }, now),
+    4,
+  );
+});
+
+test('优先级老化：补派时优先补派排队更久的低优先级任务', async (t) => {
+  const env = await startTestHub(t, { redispatchBudget: 2 });
+  const fresh = await createTask(env, {
+    instruction: '新提交的高优先级任务：需要 PDF 能力',
+    priority: 5,
+    requirements: { skills: ['office-pdf'] },
+  });
+  const stale = await createTask(env, {
+    instruction: '排队很久的低优先级任务：也需要 PDF 能力',
+    priority: 4,
+    requirements: { skills: ['office-pdf'] },
+  });
+  const hub = env.hub;
+  hub.tasks.get(stale.id).createdAt = new Date(Date.now() - 3 * 3600 * 1000).toISOString();
+
+  // 只有 1 个空闲槽位：应补派有效优先级更高（4+3）的那条老任务。
+  await registerDevice(
+    env,
+    makeManifest({ name: 'PDF 设备', skills: [{ id: 'office-pdf' }], limits: { maxConcurrentTasks: 1 } }),
+  );
+  assert.equal((await getTask(env, stale.id)).status, 'assigned');
+  assert.equal((await getTask(env, fresh.id)).status, 'queued');
+});
+
+test('同目标串行：同目标下自主大脑的顶层任务一次只跑一个', async (t) => {
+  const env = await startTestHub(t);
+  await registerDevice(env, makeManifest({ name: '工作机', limits: { maxConcurrentTasks: 1 } }));
+  const goal = await createGoal(env, { title: '求职目标' });
+
+  const first = await createTask(env, {
+    instruction: '第一件求职工作：整理投递清单',
+    goalId: goal.id,
+    context: { brain: true },
+  });
+  assert.equal(first.status, 'assigned');
+
+  const second = await createTask(env, {
+    instruction: '第二件求职工作：更新简历版本',
+    goalId: goal.id,
+    context: { brain: true },
+  });
+  assert.equal(second.status, 'queued');
+  assert.match(second.route.reason, /同目标串行/);
+});
+
+test('动作命中率：大脑提示词带上最近决策的执行率与主要跳过原因', async (t) => {
+  await startTestHub(t);
+  const { buildBrainPrompt } = require('../lib/brain.js');
+  const prompt = buildBrainPrompt({
+    now: new Date().toISOString(),
+    decisions: [
+      {
+        at: new Date().toISOString(),
+        summary: '测试决策',
+        actions: [
+          { action: 'create_task', executed: false, skippedReason: 'duplicate' },
+          { action: 'create_task', executed: false, skippedReason: 'duplicate' },
+          { action: 'retry_task', taskId: 'task_x', executed: true },
+        ],
+      },
+    ],
+  });
+  assert.match(prompt.user, /动作命中率/);
+  assert.match(prompt.user, /执行率 33%/);
+  assert.match(prompt.user, /duplicate×2/);
+});
+
 test('去重辅助：bigram 相似度能识别改写过的同一件事，又不误伤不同任务', async (t) => {
   const env = await startTestHub(t);
   assert.ok(

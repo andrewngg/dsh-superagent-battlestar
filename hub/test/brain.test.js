@@ -83,6 +83,7 @@ test('默认大脑状态与常量符合设计约定', () => {
     'retry_task',
     'resume_thread',
     'create_task',
+    'update_task',
     'link_task',
     'consult_worker',
     'remember',
@@ -506,7 +507,7 @@ test('buildBrainPrompt：包含目标/指导/失败任务/设备与既有约定�
   assert.equal(typeof prompt.system, 'string');
   assert.equal(typeof prompt.user, 'string');
   assert.match(prompt.system, /BattleStar（对战星）的自主管家大脑/);
-  assert.match(prompt.system, /retry_task\|resume_thread\|create_task\|link_task\|consult_worker\|remember\|none/);
+  assert.match(prompt.system, /retry_task\|resume_thread\|create_task\|update_task\|link_task\|consult_worker\|remember\|none/);
   assert.match(prompt.system, /同一轮最多 2 个动作/);
   assert.match(prompt.system, /置信度低于 0.6/);
 

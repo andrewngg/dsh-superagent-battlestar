@@ -8406,6 +8406,12 @@
     if (str(task.goalId)) {
       nodes.push(el('button', { type: 'button', className: 'btn btn-ghost btn-sm', onclick: () => void unlinkTaskGoal(task) }, icon('x'), '取消关联目标'));
     }
+    if (status === 'queued') {
+      nodes.push(el('button', {
+        type: 'button', className: 'btn btn-ghost btn-sm',
+        onclick: () => { hideDrawer(); void editTaskRequirements(task); },
+      }, icon('edit'), '改需求'));
+    }
     if (ACTIVE_STATUS.has(status)) {
       nodes.push(el('button', { type: 'button', className: 'btn btn-danger btn-sm', onclick: () => cancelTask(task.id) }, icon('x'), '取消任务'));
     }
@@ -8523,6 +8529,53 @@
     } catch (err) {
       if (err.status === 401) return handleAuthLost(err.message);
       toast(err.message || '重试失败', 'error');
+    }
+  }
+
+  /** P3：排队任务一键改需求（设备/技能/项目），保存后 Hub 立即重新派发。 */
+  async function editTaskRequirements(task) {
+    const current = task.requirements || {};
+    if (typeof window.prompt !== 'function') return;
+    const deviceId = window.prompt(
+      `指定执行设备 ID（留空=自动路由；当前：${current.deviceId || '自动'}）`,
+      current.deviceId || '',
+    );
+    if (deviceId === null) return;
+    const skills = window.prompt(
+      `需要的技能 ID，逗号分隔（留空=不限；当前：${arr(current.skills).join(',') || '不限'}）`,
+      arr(current.skills).join(','),
+    );
+    if (skills === null) return;
+    const project = window.prompt(
+      `项目名（留空=不限；当前：${current.project || '不限'}）`,
+      current.project || '',
+    );
+    if (project === null) return;
+    const requirements = {
+      deviceId: str(deviceId).trim(),
+      skills: String(skills || '').split(',').map((item) => item.trim()).filter(Boolean),
+      project: str(project).trim(),
+    };
+    try {
+      const res = await api(`/api/tasks/${encodeURIComponent(task.id)}`, {
+        method: 'PATCH',
+        body: { requirements },
+        timeout: 10000,
+      });
+      if (res && res.task) {
+        upsertTask(res.task);
+        state.sigs.stats = '';
+        state.sigs.tasks = '';
+        renderAll();
+        setRouteResult(res.task);
+        toast(
+          res.task.status === 'assigned' ? '需求已更新，任务已重新派发' : '需求已更新，仍在等待匹配设备',
+          res.task.status === 'assigned' ? 'success' : 'info',
+        );
+      }
+    } catch (err) {
+      if (err.status === 401) return handleAuthLost(err.message);
+      toast(err.message || '修改需求失败', 'error');
     }
   }
 

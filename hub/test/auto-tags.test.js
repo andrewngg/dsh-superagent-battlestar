@@ -125,3 +125,25 @@ test('显式钉住设备：只缺描述性标签不阻塞派发，缺硬能力�
   assert.equal(blocked.status, 'queued');
   assert.match(blocked.route.reason, /missing model:gpt-5/);
 });
+
+test('路由软化：无人声明的自造标签降级为提示，不再把任务永久卡在排队', async (t) => {
+  const env = await startTestHub(t);
+  const worker = await registerDevice(env, makeManifest({ name: '普通主机', tags: ['本机'] }));
+
+  // 模型常见的错误：把项目名/任务名写成设备标签；没有任何设备会声明它们。
+  const task = await createTask(env, {
+    instruction: '反腐AI 验证任务（自造标签）',
+    requirements: { tags: ['反腐AI', '验证'] },
+    timeoutSec: 300,
+  });
+  assert.equal(task.status, 'assigned');
+  assert.equal(task.assignedDeviceId, worker.deviceId);
+
+  const stored = env.hub.getTask(task.id);
+  assert.deepEqual(stored.requirements.tags, []);
+  assert.deepEqual(stored.requirements.hint, ['反腐AI', '验证']);
+  assert.ok(
+    stored.events.some((event) => /没有设备支持，已降级为提示/.test(event.message || '')),
+    '应记录标签降级事件',
+  );
+});

@@ -932,6 +932,11 @@ async function handleRequest(hub, req, res) {
     if (!action && method === 'GET') {
       return sendJson(res, 200, { task: hub.taskToJson(hub._requireTask(taskId)) });
     }
+    if (!action && (method === 'PATCH' || method === 'PUT')) {
+      const body = await readJsonBody(req, TASK_BODY_BYTES);
+      const task = hub.updateTask(hub._requireTask(taskId), body);
+      return sendJson(res, 200, { task: hub.taskToJson(task) });
+    }
     if (!action && method === 'DELETE') {
       const task = hub.deleteTask(hub._requireTask(taskId));
       return sendJson(res, 200, { ok: true, task: hub.taskToJson(task) });

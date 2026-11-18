@@ -233,6 +233,8 @@ class Hub {
     // 单次重派预算：设备上线/重启/空槽释放时，一次最多补派多少条排队任务（0=不限），
     // 防止历史积压任务在同一秒全部涌出占满所有工作机。
     this.redispatchBudget = util.clampInt(options.redispatchBudget, 2, 0, 50);
+    // 队列健康：排队的任务超过该时长时，自主大脑本轮不再 create_task，先处理积压（0=关闭）。
+    this.queueStuckMs = util.clampInt(options.queueStuckMs, 2 * 3600 * 1000, 0, 24 * 3600 * 1000);
     // 系统自重启：先通知设备代理重启，留出心跳/长轮询窗口后再重启 Hub 自身。
     this.restartDelayMs = util.clampInt(options.restartDelayMs, 12000, 0, 60000);
     this.restartHandler = typeof options.restartHandler === 'function' ? options.restartHandler : null;
@@ -2908,6 +2910,21 @@ class Hub {
         const followUp = this.createFollowUp(task, { instruction });
         return { taskId: followUp.id };
       }
+      case 'update_task': {
+        if (!action.taskId) return { skippedReason: '缺少 taskId' };
+        const task = this.tasks.get(action.taskId);
+        if (!task) return { skippedReason: 'task-not-found' };
+        const patch = {};
+        if (util.isPlainObject(action.requirements)) patch.requirements = action.requirements;
+        if (Number.isFinite(action.priority)) patch.priority = action.priority;
+        if (Number.isFinite(action.timeoutSec)) patch.timeoutSec = action.timeoutSec;
+        try {
+          this.updateTask(task, patch);
+        } catch (err) {
+          return { skippedReason: err && err.message ? err.message : String(err) };
+        }
+        return { taskId: task.id };
+      }
       case 'create_task': {
         const instruction = String(action.instruction || '').trim();
         if (instruction.length < 4) return { skippedReason: '缺少可执行的任务指令' };
@@ -2923,6 +2940,15 @@ class Hub {
         // 去重升级：去掉空白/标点/大小写后前 60 字相同即视为同一件事（旧版只比前 40 字原样前缀，标点一变就漏）。
         const duplicate = this._findDuplicateTask(instruction, goalId);
         if (duplicate) return { skippedReason: 'duplicate' };
+
+        // 队列健康（P2）：已有任务排队超过 queueStuckMs 时不再新建，先处理积压。
+        const stuck = this._oldestStuckQueuedTask();
+        if (stuck) {
+          const hours = Math.max(1, Math.round((Date.now() - Date.parse(stuck.createdAt)) / 3600000));
+          return {
+            skippedReason: `队列积压：${stuck.id} 已排队约 ${hours}h，本轮先处理排队任务（update_task 改需求 / retry_task / cancel），不要再新建`,
+          };
+        }
         // 大脑常把项目名/任务名当设备标签（如「反腐AI」「验证」）：有项目时学成项目别名保留，
         // 设备做过该项目后会自动匹配；没有项目时才丢弃无人声明的标签，避免任务永远卡在 queued。
         const rawRequirements = util.isPlainObject(action.requirements) ? action.requirements : null;
@@ -5336,6 +5362,31 @@ class Hub {
     return { requirements: next, droppedTags: dropped, learnedTags: learned };
   }
 
+  /**
+   * 派发前软化标签门槛：任务要求里的标签如果在所有设备上都不存在（模型自造的项目名/任务名），
+   * 不再把所有设备硬性排除，而是降级为 hint 提示；真实存在的标签仍然按标签匹配。
+   * @param {object} task
+   * @returns {object} 本次派发使用的 requirements
+   */
+  _softenRoutingRequirements(task) {
+    const requirements = task.requirements;
+    const tags = util.arr(requirements && requirements.tags).map((tag) => util.str(tag, 40)).filter(Boolean);
+    if (!tags.length) return requirements;
+    const known = this._knownDeviceTags();
+    const kept = tags.filter((tag) => known.has(tag));
+    if (kept.length === tags.length) return requirements;
+    const dropped = tags.filter((tag) => !known.has(tag));
+    const hint = [...new Set([...util.arr(requirements.hint), ...dropped])].slice(0, 8);
+    const next = { ...requirements, hint, tags: kept };
+    task.requirements = next;
+    task.updatedAt = protocol.nowIso();
+    this._pushTaskEvent(task, 'warning', `标签 ${dropped.join('、')} 没有设备支持，已降级为提示（不阻塞派发）`);
+    this.log('warn', `${task.id} 标签 ${dropped.join('、')} 无设备支持，已降级为提示`);
+    this.broadcast('task.updated', { task: this.taskToJson(task) });
+    this.schedulePersist();
+    return next;
+  }
+
   _maxConcurrent(device) {
     return Math.max(1, device.capabilities.limits.maxConcurrentTasks || 1);
   }
@@ -5424,7 +5475,28 @@ class Hub {
       this.broadcast('task.updated', { task: this.taskToJson(task) });
       this.schedulePersist();
     }
-    const requirements = task.requirements;
+    // 同目标串行（P4）：同一长期目标下自主大脑的顶层任务一次只跑一个。
+    const goalBlocker = this._goalActiveBlocker(task);
+    if (goalBlocker) {
+      const reason = `同目标串行：${goalBlocker.id} 正在执行（per-goal 并发 1），排队等待`;
+      const sameReason = Boolean(task.route) && task.route.reason === reason;
+      task.status = TASK_STATUS.QUEUED;
+      task.assignedDeviceId = null;
+      task.assignedDeviceName = null;
+      task.updatedAt = protocol.nowIso();
+      task.route = {
+        reason,
+        candidates: [],
+        excluded: [{ deviceId: goalBlocker.assignedDeviceId || null, reason: 'goal-busy' }],
+      };
+      if (!sameReason) {
+        this._pushTaskEvent(task, 'queued', reason);
+        this.broadcast('task.updated', { task: this.taskToJson(task) });
+        this.schedulePersist();
+      }
+      return task;
+    }
+    const requirements = this._softenRoutingRequirements(task);
     const candidates = [];
     const excluded = [];
     // 设备占用 = 已分配但还没结束的任务数（assigned/running/waiting）。
@@ -5606,9 +5678,14 @@ class Hub {
    * @returns {number} 实际派发出去的任务数
    */
   retryQueuedTasks(reason = '', budget = null) {
+    const now = Date.now();
     const queued = [...this.tasks.values()]
       .filter((task) => task.status === TASK_STATUS.QUEUED)
-      .sort((a, b) => b.priority - a.priority || String(a.createdAt).localeCompare(String(b.createdAt)));
+      .sort(
+        (a, b) =>
+          this._effectivePriority(b, now) - this._effectivePriority(a, now)
+          || String(a.createdAt).localeCompare(String(b.createdAt)),
+      );
     if (!queued.length) return 0;
     const limit =
       budget === null
@@ -5634,6 +5711,15 @@ class Hub {
   _isDispatchedTask(task) {
     if (!task || !task.assignedDeviceId) return false;
     return task.status !== TASK_STATUS.QUEUED && !TERMINAL_TASK_STATUSES.has(task.status);
+  }
+
+  /** 有效优先级：排队每小时 +1（最多 +3），避免低优先级任务长期挨饿（P4 优先级老化）。 */
+  _effectivePriority(task, now = Date.now()) {
+    const base = Number.isFinite(task && task.priority) ? task.priority : 0;
+    const createdAt = Date.parse(task && task.createdAt);
+    if (!Number.isFinite(createdAt)) return base;
+    const hours = Math.min(3, Math.floor(Math.max(0, now - createdAt) / 3600000));
+    return base + hours;
   }
 
   /** 在线且未禁用设备的剩余并发槽位总和。 */
@@ -5696,6 +5782,84 @@ class Hub {
       return task;
     }
     return null;
+  }
+
+  /**
+   * 同目标串行闸（P4）：只约束自主大脑创建的同目标顶层任务，一次只跑一个；
+   * 计划子任务由父计划自己调度，用户手工任务不拦。返回正在执行的那条任务。
+   */
+  _goalActiveBlocker(task) {
+    if (!task || !task.goalId || task.parentTaskId) return null;
+    if (!task.context || task.context.brain !== true) return null;
+    for (const other of this.tasks.values()) {
+      if (other.id === task.id) continue;
+      if (other.goalId !== task.goalId || other.parentTaskId) continue;
+      if (!ACTIVE_TASK_STATUSES.has(other.status)) continue;
+      return other;
+    }
+    return null;
+  }
+
+  /** 最早超过 queueStuckMs 仍在排队的任务（队列健康闸用）。 */
+  _oldestStuckQueuedTask(now = Date.now()) {
+    if (!this.queueStuckMs) return null;
+    let oldest = null;
+    for (const task of this.tasks.values()) {
+      if (task.status !== TASK_STATUS.QUEUED) continue;
+      const createdAt = Date.parse(task.createdAt);
+      if (!Number.isFinite(createdAt) || now - createdAt < this.queueStuckMs) continue;
+      if (!oldest || createdAt < Date.parse(oldest.createdAt)) oldest = task;
+    }
+    return oldest;
+  }
+
+  /**
+   * 修改未结束任务的执行需求（控制台「一键改需求」与自主大脑 update_task 共用）。
+   * 排队中的任务改完立即重新路由，避免缺能力/缺设备导致永久排队。
+   */
+  updateTask(taskOrId, patch = {}) {
+    const task = typeof taskOrId === 'string' ? this._requireTask(taskOrId) : taskOrId;
+    if (!task || !this.tasks.has(task.id)) throw notFound('任务不存在');
+    if (TERMINAL_TASK_STATUSES.has(task.status)) throw badRequest('只能修改未结束任务的需求');
+    const body = util.isPlainObject(patch) ? patch : {};
+    const changes = [];
+    if (Number.isFinite(body.priority)) {
+      const priority = util.clampInt(body.priority, task.priority, 0, 9);
+      if (priority !== task.priority) {
+        task.priority = priority;
+        changes.push(`优先级 ${priority}`);
+      }
+    }
+    if (Number.isFinite(body.timeoutSec)) {
+      const timeoutSec = util.clampInt(
+        body.timeoutSec,
+        task.timeoutSec,
+        protocol.LIMITS.MIN_TASK_TIMEOUT_SEC,
+        protocol.LIMITS.MAX_TASK_TIMEOUT_SEC,
+      );
+      if (timeoutSec !== task.timeoutSec) {
+        task.timeoutSec = timeoutSec;
+        changes.push(`超时 ${timeoutSec}s`);
+      }
+    }
+    if (util.isPlainObject(body.requirements)) {
+      task.requirements = protocol.normalizeRequirements({ ...task.requirements, ...body.requirements });
+      const req = task.requirements;
+      const parts = [];
+      if (req.deviceId) parts.push(`设备 ${req.deviceId}`);
+      if (req.skills.length) parts.push(`技能 ${req.skills.join('/')}`);
+      if (req.project) parts.push(`项目 ${req.project}`);
+      if (req.tags.length) parts.push(`标签 ${req.tags.join('/')}`);
+      changes.push(`需求 ${parts.join('，') || '已清空'}`);
+    }
+    if (!changes.length) return task;
+    task.updatedAt = protocol.nowIso();
+    this._pushTaskEvent(task, 'progress', `需求已修改：${changes.join('；')}`);
+    this.log('info', `${task.id} 需求已修改：${changes.join('；')}`);
+    this.broadcast('task.updated', { task: this.taskToJson(task) });
+    this.schedulePersist();
+    if (task.status === TASK_STATUS.QUEUED) this.routeTask(task);
+    return task;
   }
 
   _buildRunCommand(task, device) {
