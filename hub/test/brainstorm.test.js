@@ -29,12 +29,15 @@ const {
   buildBrainstormPrompt,
   createBrainstormThinker,
   createSession,
+  detectAutonomyGrant,
   findSession,
+  normalizeBrainstormActions,
   normalizeChatRequest,
   renderContext,
   restoreBrainstorm,
   selectBrainstormModel,
   sessionSummary,
+  splitBrainstormActionBlock,
   titleFromText,
 } = require('../lib/brainstorm.js');
 
@@ -177,6 +180,7 @@ test('sessionSummary：摘要字段与 preview 截断', () => {
     messageCount: 0,
     lastMessageAt: at(),
     preview: '',
+    autonomy: false,
   });
 
   appendMessage(session, { role: 'assistant', text: 'y'.repeat(200) }, at(1));
@@ -376,7 +380,9 @@ test('buildBrainstormPrompt：system/上下文/最近历史/本轮消息', () =>
 
   const noContext = buildBrainstormPrompt({ userMessage: '你好' });
   assert.equal(noContext.user.includes('## 管家上下文'), false);
-  assert.equal(noContext.user, '## 本轮消息\n你好');
+  // 提示词末尾固定带「执行授权」段（未授权也明确告知），本轮消息在最后。
+  assert.ok(noContext.user.startsWith('## 执行授权'));
+  assert.ok(noContext.user.endsWith('## 本轮消息\n你好'));
 
   // 单条历史正文超长时截断到 1200（含省略号）。
   const longPrompt = buildBrainstormPrompt({
@@ -521,4 +527,87 @@ test('createBrainstormThinker：未配置 key 拒绝；配置后按约定调用�
       { role: 'user', content: 'usr' },
     ]);
   });
+});
+
+// ------------------------------------------------- 直接执行（actions 块）
+
+test('detectAutonomyGrant：识别主人明确授权的说法', () => {
+  for (const text of [
+    '授权给你，以后这类任务你直接创建',
+    '你来创建任务吧，不用我过手',
+    '以后这种事你就自己办',
+    '这类的活由你来处理',
+    '不需要每次都我来过手，你来创建或者开任务',
+  ]) {
+    assert.equal(detectAutonomyGrant(text), true, text);
+  }
+  for (const text of ['帮我想想方向', '这个任务你觉得怎么拆？', '先别建任务，我们聊聊', '']) {
+    assert.equal(detectAutonomyGrant(text), false, text);
+  }
+});
+
+test('splitBrainstormActionBlock：剥离末尾 actions 块并解析 create_task', () => {
+  const raw = [
+    '## 结论',
+    '先做只读看板。',
+    '',
+    '```actions',
+    JSON.stringify([
+      { action: 'create_task', instruction: '在反腐目录新增只读看板并截图验收', goalId: 'goal_x', timeoutSec: 120 },
+      { action: 'unknown_action', instruction: '这条会被忽略，因为动作类型不支持' },
+      { action: 'create_task', instruction: '短' },
+    ]),
+    '```',
+  ].join('\n');
+  const parsed = splitBrainstormActionBlock(raw);
+  assert.equal(parsed.text, '## 结论\n先做只读看板。');
+  assert.equal(parsed.actions.length, 1);
+  assert.equal(parsed.actions[0].action, 'create_task');
+  assert.equal(parsed.actions[0].instruction, '在反腐目录新增只读看板并截图验收');
+  assert.equal(parsed.actions[0].goalId, 'goal_x');
+  assert.equal(parsed.actions[0].timeoutSec, 120);
+});
+
+test('splitBrainstormActionBlock：无块/坏 JSON 时安全降级', () => {
+  const plain = splitBrainstormActionBlock('## 结论\n没有动作。');
+  assert.equal(plain.text, '## 结论\n没有动作。');
+  assert.deepEqual(plain.actions, []);
+
+  const broken = splitBrainstormActionBlock('## 结论\n先做 A。\n\n```actions\nnot-json\n```');
+  assert.equal(broken.text, '## 结论\n先做 A。');
+  assert.deepEqual(broken.actions, []);
+});
+
+test('normalizeBrainstormActions：最多 2 条、超时钳制到安全区间', () => {
+  const actions = normalizeBrainstormActions([
+    { action: 'create_task', instruction: '第一条可执行指令' },
+    { action: 'create_task', instruction: '第二条可执行指令', timeoutSec: 5 },
+    { action: 'create_task', instruction: '第三条应被裁掉' },
+  ]);
+  assert.equal(actions.length, 2);
+  assert.equal(actions[1].timeoutSec, 60);
+});
+
+test('授权状态进入提示词：已授权/未授权两套说法', () => {
+  const granted = buildBrainstormPrompt({ userMessage: '继续', autonomy: true });
+  assert.ok(granted.user.includes('## 执行授权'));
+  assert.ok(granted.user.includes('已授权'));
+  const denied = buildBrainstormPrompt({ userMessage: '继续', autonomy: false });
+  assert.ok(denied.user.includes('未授权'));
+});
+
+test('会话与消息：autonomy 与 actions 字段可持久化', () => {
+  const session = createSession({ title: '任务' });
+  assert.equal(session.autonomy, false);
+  session.autonomy = true;
+  appendMessage(session, {
+    role: 'assistant',
+    text: '已建任务',
+    actions: [{ action: 'create_task', taskId: 'task_abc', instruction: '做点事' }],
+  });
+  const restored = restoreBrainstorm({ activeId: session.id, sessions: [session] });
+  assert.equal(restored.sessions[0].autonomy, true);
+  assert.equal(restored.sessions[0].messages[0].actions[0].taskId, 'task_abc');
+  assert.equal(brainstormToJson(restored).session.autonomy, true);
+  assert.equal(sessionSummary(restored.sessions[0]).autonomy, true);
 });

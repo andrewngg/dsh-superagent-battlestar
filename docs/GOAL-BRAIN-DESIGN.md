@@ -243,15 +243,16 @@
 ## 7. 头脑风暴（对话大脑）
 
 ### 7.1 目标与数据模型
-- 控制台新增「头脑风暴」页：与自主大脑多轮对话，用来梳理方向、拆解目标、评估取舍；任意一条大脑回复可一键转成任务（可同时关联到长期目标）。
-- 数据持久化在 `state.json` 的 `brainstorm` 字段：`{ activeId:null, sessions:[{id,title,createdAt,updatedAt,messages:[{id,role:'user'|'assistant',at,text,model?,error?,attachments?:[{name,path?,size,truncated?}]}]}] }`。
+- 控制台新增「头脑风暴」页：与自主大脑多轮对话，用来梳理方向、拆解目标、评估取舍；任意一条大脑回复可一键转成任务（可同时关联到长期目标）；主人明确授权后（如「你来创建」「授权给你」「不用我过手」），大脑可在回复末尾输出 `actions` 块，由 Hub 直接建任务并把结果写回对话。
+- 数据持久化在 `state.json` 的 `brainstorm` 字段：`{ activeId:null, sessions:[{id,title,createdAt,updatedAt,autonomy:false,messages:[{id,role:'user'|'assistant',at,text,model?,error?,attachments?:[{name,path?,size,truncated?}],actions?:[{action,taskId?,goalId?,instruction?,error?}]}]}] }`；`autonomy` 记录本会话是否已被主人授权直接建任务，`actions` 记录该条回复真实执行结果（最多 2 条）。
 - 上限：`sessions` 30、每会话 `messages` 200、单条 `text` 8000 字符；标题取首条用户消息截断 40 字；无模型配置时对话仍保存并返回错误提示，不抛给调用方。
 - 附件：用户消息可携带文件；正文只在生成本轮提示词时读取，`state.json` 仅保存名称/路径/大小等元数据，不保存文件内容。
 
 ### 7.2 模块 `hub/lib/brainstorm.js`（纯函数，无 I/O）
-- 导出：`DEFAULT_BRAINSTORM = {activeId:null, sessions:[]}`、`MAX_SESSIONS=30`、`MAX_MESSAGES=200`、`MAX_TEXT=8000`、`MAX_ATTACHMENTS=8`、`restoreBrainstorm(raw)`、`createSession({title?})`、`appendMessage(session, {role,text,error?,attachments?})`（越界裁剪、更新 `updatedAt`、首条用户消息定标题）、`sessionSummary(session)` → `{id,title,createdAt,updatedAt,messageCount,lastMessageAt,preview}`、`brainstormToJson(brainstorm,{messages=100,sessionId})` → `{activeId, sessions:[summary], session?}`、`normalizeChatRequest(body)` → `{ok,value|errors}`（`sessionId<=80`、`message` 非空 <=8000、`attachments` 最多 8 个 `{path}` / `{name,text}`）、`renderAttachments(attachments)`、`buildBrainstormPrompt({history,userMessage,context,attachments})` → `{system,user}`。
+- 导出：`DEFAULT_BRAINSTORM = {activeId:null, sessions:[]}`、`MAX_SESSIONS=30`、`MAX_MESSAGES=200`、`MAX_TEXT=8000`、`MAX_ATTACHMENTS=8`、`MAX_ACTIONS=2`、`MAX_ACTION_INSTRUCTION=4000`、`BRAINSTORM_ACTIONS=['create_task']`、`restoreBrainstorm(raw)`、`createSession({title?})`、`appendMessage(session, {role,text,error?,attachments?,actions?})`（越界裁剪、更新 `updatedAt`、首条用户消息定标题）、`sessionSummary(session)` → `{id,title,createdAt,updatedAt,messageCount,lastMessageAt,preview,autonomy}`、`brainstormToJson(brainstorm,{messages=100,sessionId})` → `{activeId, sessions:[summary], session?}`、`normalizeChatRequest(body)` → `{ok,value|errors}`（`sessionId<=80`、`message` 非空 <=8000、`attachments` 最多 8 个 `{path}` / `{name,text}`）、`renderAttachments(attachments)`、`buildBrainstormPrompt({history,userMessage,context,attachments,autonomy=false})` → `{system,user}`、`detectAutonomyGrant(text)`、`splitBrainstormActionBlock(text)` → `{text,actions}`、`normalizeBrainstormActions(list)`、`normalizeActionRecords(records)`。
 - 文件读取由 `hub/lib/file-reader.js` 负责：`readAttachments([{path}|{name,text}])`（单文件 512KB、单次 8 个、总注入 160K 字，超出截断）、`extractFilePaths(text,{requireExists})`（从消息正文识别引号/裸绝对路径与 UNC；`requireExists` 默认 `true` 时只接受存在的文本文件，传 `false` 时仅做路径归一化，用于判断本轮是否在谈文件）、`isSensitivePath()`（拒绝 `.env`、`id_rsa`、`*.pem`/`*.key` 等密钥/凭据文件）、`isProbablyText()`（拒绝二进制）；路径相对 `process.cwd()` 解析，读取失败只返回错误文本，不抛异常。
-- 提示词：中文、markdown 为主、区分事实/假设、给 2–3 个方案并推荐一个、指出风险与下一步；不要求 JSON。用户侧 prompt 包含管家上下文（长期目标、进行中/失败任务、最近心路总结）、`## 用户提供的文件`（文件名/路径/大小 + 代码围栏内容）、最近 12 条对话与「本轮消息」；历史中的用户消息附 `（附件：文件名）`。
+- 提示词：中文、markdown 为主、区分事实/假设、给 2–3 个方案并推荐一个、指出风险与下一步；默认不要输出 JSON，唯一例外是末尾 ```` ```actions ```` 任务块（见下）。用户侧 prompt 包含管家上下文（长期目标、进行中/失败任务、最近心路总结）、`## 用户提供的文件`（文件名/路径/大小 + 代码围栏内容）、`## 执行授权`（已授权/未授权两套说法）、最近 12 条对话与「本轮消息」；历史中的用户消息附 `（附件：文件名）`。
+- 直接执行协议：会话被授权（`autonomy=true`）时，大脑可在回复末尾追加 ```` ```actions ```` 块，内容为 JSON 数组，每项 `{action:"create_task", instruction, goalId?, deviceId?, project?, reason?, timeoutSec?}`；`normalizeBrainstormActions` 只接受 `create_task`、`instruction` 至少 8 字、最多 2 条、`timeoutSec` 钳制 60–3600。`splitBrainstormActionBlock` 取最后一个 actions 块并从正文剥离（解析失败降级为空动作，不吞正文）。授权识别 `detectAutonomyGrant` 覆盖「授权给你/授权你/你来创建…/不用我过手/以后这种事你就自己办」等说法；授权一次后本会话长期有效。提示词规则 9 要求与上下文已有任务去重、不凑数；规则 10 要求没有 actions 块时不得口头声称已建任务；规则 11 要求复述 Hub 回写的「本轮已直接执行」结果。
 - 模型配置复用 `brain.js` 的 `brainModelConfig()/createBrainThinker()`；`selectBrainstormModel({fileMode})` 按本轮是否涉及文件选择模型：普通对话用默认配置，`fileMode`（带附件、消息提到文件路径或读取失败）时改用文件模型 `brainstormFileModelConfig()`。文件模型默认 `DEEPSEEK_API_KEY` + `https://api.deepseek.com` + `deepseek-chat`，可用 `BRAINSTORM_FILE_API_KEY` / `BRAINSTORM_FILE_BASE_URL` / `BRAINSTORM_FILE_MODEL` 单独覆盖；没有 DeepSeek Key 时回退默认模型（文件内容仍会注入）。头脑风暴还可用 `BRAINSTORM_API_KEY` / `BRAINSTORM_BASE_URL` / `BRAINSTORM_MODEL` 整体覆盖，未设置时回退 `BRAIN_*` / `AGNES_*`。只配置 `DEEPSEEK_API_KEY`（且无显式 baseUrl/其他 Key）时整体切到 DeepSeek（`BRAIN_MODEL` 可换 `deepseek-reasoner`）。以上变量可写在仓库根目录或 `hub/.env`，由 `hub/lib/env-file.js` 在 `hub/server.js` 启动时加载（系统环境变量优先、日志只打印键名、`.env` 已 gitignore）。`chatBrainstorm` 返回 `model` 与 `fileMode` 便于前端/日志区分本轮使用的模型。
 - 模型提示：`buildBrainstormPrompt` 会声明文件内容已由 Hub 注入、要求模型直接回答而不要声称“无法访问本地文件系统”；失败项通过 `## 附件读取失败` 段给出路径与原因。
 
@@ -262,13 +263,15 @@
 - 方法：
   - `getBrainstorm({messages=100, sessionId}={})`：返回 `brainstormToJson`，`session` 缺省取 `activeId` 或最近更新的会话。
   - `listBrainstormSessions()`、`createBrainstormSession()`、`deleteBrainstormSession(id)`。
-  - `async chatBrainstorm({sessionId, message, attachments})`：无会话则新建；`_collectBrainstormFiles(message, attachments)` 先读取显式附件、再自动识别消息里的本机路径（去重），失败项写入提示词提示；追加 user 消息（带附件元数据）→ 组上下文（目标、活跃任务、最近 3 天心路总结）→ `buildBrainstormPrompt`（含附件内容）→ 大脑模型 → 追加 assistant 消息（模型失败时 assistant 消息带 `error`，不抛）→ `broadcast('brainstorm.updated',{session},{record:false})` → log/persist → 返回 `{session, reply, error, attachments, attachmentErrors}`。
-  - `brainstormMessageToTask({sessionId, messageId, goalId})`：取 assistant 消息，用正文作为任务指令（标题取首行 80 字），`createTask({instruction, priority:6, context:{brainstorm:true, sessionId, messageId}, goalId})`；`goalId` 存在时自动登记关联（走 `_registerGoalTask`）。
+  - `async chatBrainstorm({sessionId, message, attachments})`：无会话则新建；`detectAutonomyGrant(message)` 命中时把会话标记 `autonomy=true`（记日志「主人授权直接建任务」，本会话后续消息沿用）；`_collectBrainstormFiles(message, attachments)` 先读取显式附件、再自动识别消息里的本机路径（去重），失败项写入提示词提示；追加 user 消息（带附件元数据）→ 组上下文（目标、活跃任务、最近 3 天心路总结）→ `buildBrainstormPrompt`（含附件内容与执行授权段）→ 大脑模型 → `splitBrainstormActionBlock` 剥离 `actions` 块，仅当会话已授权时 `_runBrainstormActions` 真正建任务 → 正文末尾追加 `_brainstormActionNotice` 执行回执（「本轮已直接执行」/失败/重复）→ 追加 assistant 消息（带 `actions` 记录；模型失败时 assistant 消息带 `error`，不抛）→ `broadcast('brainstorm.updated',{session},{record:false})` → log/persist → 返回 `{session, reply, error, actions, attachments, attachmentErrors}`。
+  - `_runBrainstormActions(session, actions)`：逐条 `createTask`（`priority:6`、`timeoutSec` 默认 600、`context:{brainstorm:true, sessionId, action:'create_task', reason}`）；未给 `deviceId` 时兜底 `settings.mainDeviceId`（须在已注册设备中）避免任务永远排队；`_sanitizeBrainRequirements` 清洗标签/项目；`goalId` 必须存在；与进行中任务指令前 40 字相同视为重复，不重复建；成功/失败都写入消息 `actions` 记录并记日志。
+  - `_brainstormActionNotice(records)`：把执行结果渲染成中文回执，随回复正文一起返回并落盘。
+  - `brainstormMessageToTask({sessionId, messageId, goalId})`：取 assistant 消息，用正文作为任务指令（标题取首行 80 字），`createTask({instruction, priority:6, context:{brainstorm:true, sessionId, messageId}, goalId})`；`goalId` 存在时自动登记关联（走 `_registerGoalTask`）。未授权场景仍走这条手工一键转任务路径。
 - 事件：仅 SSE `brainstorm.updated`（`record:false`），不写常规 events。
 
 ### 7.4 HTTP（`hub/lib/http.js`）
 - `GET /api/brainstorm?messages=1..200&session=<id>` → `{brainstorm:{activeId,sessions:[summary...]}, session, hubTime}`。
-- `POST /api/brainstorm/chat` body `{sessionId?, message, attachments?}` → `{session, reply, error?, attachments?, attachmentErrors?, hubTime}`；`attachments` 支持 `[{path}]`（Hub 本机路径）或 `[{name,text}]`（上传文本），最多 8 个；参数非法 400；模型未配置/失败仍 200，`error` 说明原因且 assistant 消息已带 error。
+- `POST /api/brainstorm/chat` body `{sessionId?, message, attachments?}` → `{session, reply, error?, actions?, attachments?, attachmentErrors?, hubTime}`；`attachments` 支持 `[{path}]`（Hub 本机路径）或 `[{name,text}]`（上传文本），最多 8 个；`actions` 为本轮真实执行记录（`[{action,taskId,goalId?,instruction,error?}]`，仅授权会话可能有值）；参数非法 400；模型未配置/失败仍 200，`error` 说明原因且 assistant 消息已带 error。
 - `POST /api/brainstorm/sessions` → `{session, brainstorm:{activeId,sessions}, hubTime}`。
 - `DELETE /api/brainstorm/sessions/:id` → `{ok:true, brainstorm, hubTime}`；不存在 404。
 - `POST /api/brainstorm/to-task` body `{sessionId, messageId, goalId?}` → `{task, session, hubTime}`；消息不存在 400/404。
@@ -282,9 +285,9 @@
 - 「关联目标」从 `state.goals` 里选（目标 drawer 里已有 goalById，可复用）；转任务成功 toast 提示并可直接打开任务抽屉。
 
 ### 7.6 测试与文档
-- `hub/test/brainstorm.test.js`：默认值/restore/上限裁剪/标题/appendMessage/sessionSummary/brainstormToJson/normalizeChatRequest（含 attachments）/buildBrainstormPrompt（含上下文、历史与附件段）。
+- `hub/test/brainstorm.test.js`：默认值/restore/上限裁剪/标题/appendMessage/sessionSummary/brainstormToJson/normalizeChatRequest（含 attachments）/buildBrainstormPrompt（含上下文、历史与附件段、执行授权段）、`detectAutonomyGrant`、`splitBrainstormActionBlock`（正常/坏 JSON 降级）、`normalizeBrainstormActions`（动作类型白名单、最多 2 条、超时钳制）、`autonomy`/`actions` 持久化。
 - `hub/test/brainstorm-files.test.js`：`file-reader`（文本/二进制/敏感/上传/体积上限、路径提取）、`normalizeChatRequest` 附件校验、提示词附件段、`hub.chatBrainstorm`（显式附件 + 消息路径 + 失败提示 + 元数据落盘）、HTTP `POST /api/brainstorm/chat` 附件端到端与 400。
-- `hub/test/brainstorm-hub.test.js`：注入 `brainstormThink` 的对话落盘、会话自动创建、模型抛错不抛、to-task 生成任务与目标关联、持久化恢复、HTTP GET/POST/DELETE/to-task、SSE 不写常规 events。
+- `hub/test/brainstorm-hub.test.js`：注入 `brainstormThink` 的对话落盘、会话自动创建、模型抛错不抛、to-task 生成任务与目标关联、持久化恢复、HTTP GET/POST/DELETE/to-task、SSE 不写常规 events；授权后 `actions` 真正建任务（主设备兜底路由、正文剥离 JSON、消息 `actions` 记录 taskId、第二轮沿用授权）、未授权时 `actions` 被丢弃且不建任务、授权与 `actions` 随存档恢复。
 - 文档：`docs/ARCHITECTURE.md` 增加 §3.10 头脑风暴与 §4.8 数据模型；`README.md` 增加功能 bullet、API 示例、测试计数；本节即契约。
 - 文件所有权：Lead 负责 `hub/lib/*`；web-ui 负责 `hub/web/*`（含 `i18n.js`）；verifier 负责 `hub/test/brainstorm*.test.js`、`docs/ARCHITECTURE.md`、`README.md`。
 

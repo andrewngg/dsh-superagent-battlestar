@@ -88,11 +88,13 @@ const {
   buildBrainstormPrompt,
   createSession: newBrainstormSession,
   createBrainstormThinker,
+  detectAutonomyGrant,
   findSession: findBrainstormSession,
   normalizeChatRequest: normalizeBrainstormChatRequest,
   restoreBrainstorm,
   selectBrainstormModel,
   sessionSummary: brainstormSessionSummary,
+  splitBrainstormActionBlock,
 } = require('./brainstorm');
 const {
   attachmentMeta: brainstormAttachmentMeta,
@@ -3422,6 +3424,7 @@ class Hub {
         title: session.title,
         createdAt: session.createdAt,
         updatedAt: session.updatedAt,
+        autonomy: session.autonomy === true,
         messages: session.messages.slice(-BRAINSTORM_MAX_MESSAGES).map((message) => ({ ...message })),
       }));
     const activeId = sessions.some((session) => session.id === this.brainstorm.activeId)
@@ -3589,6 +3592,17 @@ class Hub {
     const modelConfig = selectBrainstormModel({ fileMode });
     let session = this._findBrainstormSession(input.sessionId);
     if (!session) session = this.createBrainstormSession();
+    // 主人在消息里明确授权「你直接建/开任务」→ 本会话开启直接执行（之后的回复可以建任务）。
+    // 兼容历史会话：之前说过授权但当时还没这个能力，回溯扫一遍已保存的用户消息。
+    if (!session.autonomy) {
+      const grantedBefore = session.messages.some(
+        (item) => item.role === 'user' && detectAutonomyGrant(item.text),
+      );
+      if (detectAutonomyGrant(input.message) || grantedBefore) {
+        session.autonomy = true;
+        this.log('info', `头脑风暴：${session.id} 主人授权直接建任务`);
+      }
+    }
     appendBrainstormMessage(session, {
       role: 'user',
       text: input.message,
@@ -3602,17 +3616,27 @@ class Hub {
       context: this._brainstormContext(),
       attachments: files.attachments,
       attachmentErrors: files.errors,
+      autonomy: session.autonomy === true,
     });
     const modelLabel = this._brainstormModelLabel(modelConfig);
     let reply = null;
     let error = null;
+    let actions = [];
     try {
       const thinker = this._getBrainstormThinker(modelConfig);
       const answer = await thinker({ system, user });
-      const text = util.str(answer, BRAINSTORM_MAX_TEXT);
-      if (!text) throw new Error('大脑返回了空回复');
-      reply = text;
-      appendBrainstormMessage(session, { role: 'assistant', text, model: modelLabel });
+      const raw = util.str(answer, BRAINSTORM_MAX_TEXT);
+      if (!raw) throw new Error('大脑返回了空回复');
+      // 剥离末尾 ```actions 代码块：已授权时真正建任务，未授权时只丢弃（不给主人看 JSON）。
+      const parsed = splitBrainstormActionBlock(raw);
+      const visible = parsed.text || raw;
+      if (session.autonomy && parsed.actions.length) {
+        actions = this._runBrainstormActions(session, parsed.actions);
+      }
+      const notice = this._brainstormActionNotice(actions);
+      const finalText = notice ? `${visible}\n\n---\n${notice}` : visible;
+      reply = finalText;
+      appendBrainstormMessage(session, { role: 'assistant', text: finalText, model: modelLabel, actions });
     } catch (err) {
       error = err && err.message ? err.message : String(err);
       appendBrainstormMessage(session, {
@@ -3637,9 +3661,75 @@ class Hub {
       error,
       model: modelLabel,
       fileMode,
+      actions,
       attachments: files.attachments.map(brainstormAttachmentMeta),
       attachmentErrors: files.errors,
     };
+  }
+
+  /**
+   * 执行头脑风暴回复里的 actions 块：目前只支持 create_task。
+   * 只有主人授权过（session.autonomy）才会被调用；单条失败只记录不抛，避免影响对话。
+   * @returns {Array<{action:string, taskId?:string, goalId?:string, instruction?:string, duplicate?:boolean, error?:string}>}
+   */
+  _runBrainstormActions(session, actions) {
+    const records = [];
+    const mainDeviceId = util.str(this.settings.mainDeviceId, 80);
+    for (const action of Array.isArray(actions) ? actions : []) {
+      const instruction = util.str(action.instruction, 8000).trim();
+      const preview = util.truncate(instruction, 120);
+      try {
+        if (!instruction) throw new Error('缺少任务指令');
+        // 与自主大脑同一去重策略：排队中/执行中任务的前 40 字相同就不重复建。
+        const prefix = instruction.slice(0, 40);
+        const duplicate = [...this.tasks.values()].find(
+          (task) =>
+            !TERMINAL_TASK_STATUSES.has(task.status) && util.str(task.instruction, 40).startsWith(prefix),
+        );
+        if (duplicate) {
+          records.push({ action: 'create_task', taskId: duplicate.id, instruction: preview, duplicate: true });
+          continue;
+        }
+        // 路由兜底：模型没指定设备时用主设备，避免任务永远卡在 queued。
+        const requirements = {};
+        if (action.deviceId) requirements.deviceId = action.deviceId;
+        else if (mainDeviceId && this.devices.has(mainDeviceId)) requirements.deviceId = mainDeviceId;
+        if (action.project) requirements.project = action.project;
+        const sanitized = Object.keys(requirements).length
+          ? this._sanitizeBrainRequirements(requirements).requirements
+          : null;
+        const goalId = action.goalId && this.goals.has(action.goalId) ? action.goalId : null;
+        const task = this.createTask({
+          instruction,
+          goalId,
+          priority: 6,
+          timeoutSec: Number.isFinite(action.timeoutSec) ? action.timeoutSec : 600,
+          ...(sanitized ? { requirements: sanitized } : {}),
+          context: { brainstorm: true, sessionId: session.id, action: 'create_task', reason: action.reason || '' },
+        });
+        records.push({ action: 'create_task', taskId: task.id, goalId: task.goalId || undefined, instruction: preview });
+        this.log('info', `头脑风暴直接建任务：${task.id}（会话 ${session.id}）`);
+      } catch (err) {
+        const message = err && err.message ? err.message : String(err);
+        records.push({ action: 'create_task', instruction: preview, error: util.truncate(message, 300) });
+        this.log('warn', `头脑风暴直接建任务失败：${message}`);
+      }
+    }
+    return records;
+  }
+
+  /** 把本轮直接执行结果渲染成回复末尾的说明（让主人看到到底建了什么）。 */
+  _brainstormActionNotice(records) {
+    const list = Array.isArray(records) ? records : [];
+    if (!list.length) return '';
+    const lines = list.map((record) => {
+      const label = util.truncate(record.instruction || '', 60);
+      if (record.error) return `建任务失败（${util.truncate(record.error, 80)}）：${label}`;
+      if (record.duplicate) return `已存在同类任务 ${record.taskId}，未重复创建：${label}`;
+      const goal = record.goalId ? `（目标 ${record.goalId}）` : '';
+      return `已创建任务 ${record.taskId}${goal}：${label}`;
+    });
+    return `本轮已直接执行：\n${lines.map((line) => `- ${line}`).join('\n')}`;
   }
 
   /** 把大脑的一条回复转成任务；带 goalId 时自动登记到长期目标。 */
@@ -3653,10 +3743,15 @@ class Hub {
     const goal = goalId ? this._requireGoal(util.str(goalId, 80)) : null;
     const instruction = util.str(message.text, BRAINSTORM_MAX_TEXT);
     if (!instruction) throw badRequest('消息内容为空');
+    // 路由兜底：没指定设备时固定到主设备，避免手工转出来的任务永远卡在 queued。
+    const mainDeviceId = util.str(this.settings.mainDeviceId, 80);
+    const requirements =
+      mainDeviceId && this.devices.has(mainDeviceId) ? { deviceId: mainDeviceId } : undefined;
     const task = this.createTask({
       instruction,
       priority: 6,
       goalId: goal ? goal.id : null,
+      ...(requirements ? { requirements } : {}),
       context: { brainstorm: true, sessionId: session.id, messageId: message.id },
     });
     this.log(

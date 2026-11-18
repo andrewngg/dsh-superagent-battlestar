@@ -20,6 +20,11 @@ const MAX_TITLE = 80;
 const MAX_TITLE_TEXT = 40;
 const MAX_PREVIEW = 120;
 const MAX_SESSION_ID = 80;
+// 直接执行：主人授权后，模型可以在回复末尾附 ```actions 代码块，由 Hub 真正建任务。
+const MAX_ACTIONS = 2;
+const MAX_ACTION_INSTRUCTION = 4000;
+const ACTION_FENCE = 'actions';
+const BRAINSTORM_ACTIONS = ['create_task'];
 const HISTORY_LIMIT = 12;
 const MAX_CONTEXT = 6000;
 const MAX_CONTEXT_GOALS = 10;
@@ -100,7 +105,126 @@ function makeMessage(raw = {}, at = nowIso()) {
     .filter(Boolean)
     .slice(0, MAX_ATTACHMENTS);
   if (attachmentMeta.length) message.attachments = attachmentMeta;
+  // 直接执行结果（本轮真正建了哪些任务 / 为何失败），供 UI 展示与重启后保留。
+  const actionRecords = normalizeActionRecords(raw.actions);
+  if (actionRecords.length) message.actions = actionRecords;
   return message;
+}
+
+/** 消息上记录的执行结果：只保留 taskId/goalId/error/instruction，避免存档膨胀。 */
+function normalizeActionRecords(raw) {
+  const out = [];
+  for (const item of Array.isArray(raw) ? raw : []) {
+    if (!util.isPlainObject(item)) continue;
+    const record = { action: util.str(item.action, 40) || 'create_task' };
+    const taskId = util.str(item.taskId, 80);
+    if (taskId) record.taskId = taskId;
+    const goalId = util.str(item.goalId, 80);
+    if (goalId) record.goalId = goalId;
+    const instruction = util.str(item.instruction, 300);
+    if (instruction) record.instruction = instruction;
+    const error = util.str(item.error, 300);
+    if (error) record.error = error;
+    out.push(record);
+  }
+  return out.slice(0, MAX_ACTIONS);
+}
+
+/**
+ * 主人是否在明确授权「你直接建任务 / 开任务」。
+ * 只影响当前头脑风暴会话：授权后模型才能输出 actions 块，Hub 才会真的建任务。
+ */
+const AUTONOMY_PATTERNS = [
+  /授权给你/,
+  /授权你/,
+  /你(来|直接|自己)(创建|建|开|起|做|执行|派发|处理)/,
+  /不用(我|主人)(过手|手动|插手|管|来)/,
+  /不(需要|用)每次(都)?(我|主人)?(来)?(过手|手动|操心|管)/,
+  /不需要?(我|主人)(来)?(过手|手动|操心|管)/,
+  /(以后|往后|这类|这些|这种|此类|类似)(的)?(事|任务|操作|活)?(就|都)?(由)?你(就|都|要|会)?(来|直接|自己)/,
+  /(这|那)(种|类|些|样)(的)?(事|任务|操作|活)?(就|都)?(由)?你(就|都|要|会)?(来|直接|自己)/,
+];
+
+function detectAutonomyGrant(text) {
+  const value = util.str(text, MAX_TEXT);
+  if (!value) return false;
+  return AUTONOMY_PATTERNS.some((re) => re.test(value));
+}
+
+/** 把模型给的 JSON（数组 / {actions:[...]} / 单个动作对象）统一成动作列表。 */
+function extractActionList(parsed) {
+  if (Array.isArray(parsed)) return parsed;
+  if (util.isPlainObject(parsed)) {
+    if (Array.isArray(parsed.actions)) return parsed.actions;
+    if (parsed.action || parsed.type || parsed.name) return [parsed];
+  }
+  return [];
+}
+
+function parseActionJson(body) {
+  const raw = String(body || '').trim();
+  if (!raw) return [];
+  try {
+    return extractActionList(JSON.parse(raw));
+  } catch {
+    // 模型偶尔在代码块里加说明文字：截取第一个 [ / { 到最后一个 ] / } 再试一次。
+  }
+  const start = raw.search(/[[{]/);
+  const end = Math.max(raw.lastIndexOf(']'), raw.lastIndexOf('}'));
+  if (start >= 0 && end > start) {
+    try {
+      return extractActionList(JSON.parse(raw.slice(start, end + 1)));
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+/** 校验并规范化动作：只接受 create_task，指令太短/缺失的丢弃。 */
+function normalizeBrainstormActions(raw) {
+  const list = Array.isArray(raw) ? raw : [];
+  const out = [];
+  for (const item of list) {
+    if (!util.isPlainObject(item)) continue;
+    const name = util.str(item.action || item.type || item.name, 40).toLowerCase().replace(/[\s-]+/g, '_');
+    if (!BRAINSTORM_ACTIONS.includes(name)) continue;
+    const instruction = util.str(item.instruction || item.task, MAX_ACTION_INSTRUCTION).trim();
+    if (instruction.length < 8) continue;
+    const action = { action: 'create_task', instruction };
+    const goalId = util.str(item.goalId, 80);
+    if (goalId) action.goalId = goalId;
+    const deviceId = util.str(item.deviceId, 80);
+    if (deviceId) action.deviceId = deviceId;
+    const project = util.str(item.project, 120);
+    if (project) action.project = project;
+    const reason = util.str(item.reason, 200);
+    if (reason) action.reason = reason;
+    const timeoutSec = Number(item.timeoutSec);
+    if (Number.isFinite(timeoutSec)) action.timeoutSec = util.clampInt(timeoutSec, 600, 60, 3600);
+    out.push(action);
+    if (out.length >= MAX_ACTIONS) break;
+  }
+  return out;
+}
+
+/**
+ * 拆出回复末尾的 ```actions 代码块：返回 { text, actions }。
+ * 代码块永远从可见正文里剥离（避免把 JSON 漏给主人），解析失败时 actions 为空。
+ */
+function splitBrainstormActionBlock(raw) {
+  const text = util.str(raw, MAX_TEXT);
+  const re = new RegExp('```(?:' + ACTION_FENCE + ')[ \\t]*\\r?\\n([\\s\\S]*?)```', 'gi');
+  let match;
+  let last = null;
+  while ((match = re.exec(text)) !== null) last = match;
+  if (!last) return { text, actions: [] };
+  const actions = normalizeBrainstormActions(parseActionJson(last[1]));
+  const cleaned = `${text.slice(0, last.index)}${text.slice(last.index + last[0].length)}`
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  return { text: cleaned, actions };
 }
 
 function createSession({ title, at } = {}) {
@@ -110,6 +234,8 @@ function createSession({ title, at } = {}) {
     title: util.str(title, MAX_TITLE) || DEFAULT_TITLE,
     createdAt: ts,
     updatedAt: ts,
+    // 主人是否已授权本会话直接建任务（授权后模型可输出 actions 块）。
+    autonomy: false,
     messages: [],
   };
 }
@@ -122,6 +248,7 @@ function normalizeSession(raw, at) {
     title: util.str(raw.title, MAX_TITLE) || DEFAULT_TITLE,
     createdAt: ts,
     updatedAt: util.str(raw.updatedAt, 40) || ts,
+    autonomy: raw.autonomy === true,
     messages: [],
   };
   const messages = Array.isArray(raw.messages) ? raw.messages : [];
@@ -184,6 +311,7 @@ function sessionSummary(session) {
     title: session.title,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
+    autonomy: session.autonomy === true,
     messageCount: messages.length,
     lastMessageAt: last ? last.at : session.updatedAt,
     preview: last ? util.truncate(last.text, MAX_PREVIEW) : '',
@@ -209,6 +337,7 @@ function brainstormToJson(brainstorm, { messages = 100, sessionId } = {}) {
           title: session.title,
           createdAt: session.createdAt,
           updatedAt: session.updatedAt,
+          autonomy: session.autonomy === true,
           messages: session.messages.slice(-limit),
         }
       : null,
@@ -281,13 +410,17 @@ function renderContext(context) {
 const BRAINSTORM_SYSTEM_PROMPT = [
   '你是 BattleStar 管家的大脑，正在和主人进行头脑风暴。',
   '规则：',
-  '1. 全程使用中文，回答以结构化 Markdown 呈现（小标题、列表、必要时表格），不要输出 JSON。',
+  '1. 全程使用中文，回答以结构化 Markdown 呈现（小标题、列表、必要时表格），不要输出 JSON（唯一例外是末尾的 actions 任务块，见规则 8）。',
   '2. 先给结论，再展开论证；区分「事实」（来自上下文）与「假设/推测」。',
   '3. 涉及决策时给出 2–3 个方案，明确推荐一个，并说明取舍与风险。',
   '4. 不编造上下文里没有的任务 ID、目标 ID、数据或进度。',
   '5. 信息不足时，先用 1–2 个关键问题澄清，不要凭空假设。',
   '6. 结尾给出「下一步」：可执行、可验收的行动建议。',
   '7. BattleStar Hub 会把主人指定的文件内容注入本轮提示词（见「用户提供的文件」）。你本身没有文件系统访问权，但注入内容就是文件全文；不要声称「无法访问本地文件系统」。若「附件读取失败」列出了文件，请直接说明失败路径与原因，并建议改用附件上传或放到 Hub 主机后再试。',
+  '8. 「执行授权」为「已授权」时，你可以直接创建任务：把工作写成自包含指令（做什么、在哪台机器/哪个路径、步骤、验收标准、时间预算），然后在正文之后追加一个 ```actions 代码块，内容为 JSON 数组，最多 2 条，例如：\n```actions\n[{"action":"create_task","instruction":"……","goalId":"可选的目标 ID","deviceId":"可选的设备 ID","reason":"为什么建","timeoutSec":600}]\n```\n正文里不要出现这段 JSON；「执行授权」为「未授权」时不要输出 actions 块。',
+  '9. 建任务前先看「管家上下文」里的相关任务：与排队中/执行中的任务重复的不要重复创建；只把真正可执行的下一步写成任务，不要为凑数把讨论性内容写成任务。',
+  '10. 口头承诺不算执行：只有写了 actions 块，Hub 才会真的建任务；没写就在正文里说明「可以点『转成任务』」。',
+  '11. 上下文里出现「本轮已直接执行」时，用一句话向主人说明已建了哪些任务，不要重复建。',
 ].join('\n');
 
 const LANGUAGE_BY_EXT = {
@@ -361,11 +494,24 @@ function renderAttachmentErrors(errors) {
   ].join('\n');
 }
 
-/** 组装模型调用参数：system + user（上下文 + 附件 + 最近历史 + 本轮消息）。 */
-function buildBrainstormPrompt({ history = [], userMessage, context, attachments = [], attachmentErrors = [] } = {}) {
+/** 组装模型调用参数：system + user（上下文 + 执行授权 + 附件 + 最近历史 + 本轮消息）。 */
+function buildBrainstormPrompt({
+  history = [],
+  userMessage,
+  context,
+  attachments = [],
+  attachmentErrors = [],
+  autonomy = false,
+} = {}) {
   const parts = [];
   const contextText = renderContext(context);
   if (contextText) parts.push(`## 管家上下文\n${contextText}`);
+  parts.push([
+    '## 执行授权',
+    autonomy
+      ? '已授权：主人明确说过这类任务由你直接创建，本轮可以按规则 8 输出 actions 块，Hub 会真的建任务并按主设备派发。'
+      : '未授权：本轮不要输出 actions 块，只给建议；主人点「转成任务」才会建任务。',
+  ].join('\n'));
   const attachmentText = renderAttachments(attachments);
   if (attachmentText) parts.push(attachmentText);
   const errorText = renderAttachmentErrors(attachmentErrors);
@@ -476,6 +622,9 @@ module.exports = {
   MAX_PREVIEW,
   MAX_SESSION_ID,
   MAX_ATTACHMENTS,
+  MAX_ACTIONS,
+  MAX_ACTION_INSTRUCTION,
+  BRAINSTORM_ACTIONS,
   HISTORY_LIMIT,
   DEFAULT_TITLE,
   ROLES,
@@ -487,9 +636,12 @@ module.exports = {
   buildBrainstormPrompt,
   createBrainstormThinker,
   createSession,
+  detectAutonomyGrant,
   findSession,
+  normalizeActionRecords,
   normalizeAttachmentInputs,
   normalizeAttachmentMeta,
+  normalizeBrainstormActions,
   normalizeChatRequest,
   normalizeSession,
   renderAttachments,
@@ -497,5 +649,6 @@ module.exports = {
   restoreBrainstorm,
   selectBrainstormModel,
   sessionSummary,
+  splitBrainstormActionBlock,
   titleFromText,
 };

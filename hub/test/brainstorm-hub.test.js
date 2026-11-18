@@ -13,7 +13,8 @@ const os = require('node:os');
 const path = require('node:path');
 
 const { createHub } = require('../lib/hub.js');
-const { startTestHub, request, adminHeaders } = require('./_helpers.js');
+const { restoreBrainstorm } = require('../lib/brainstorm.js');
+const { startTestHub, request, adminHeaders, makeManifest } = require('./_helpers.js');
 
 const MODEL_ENV_KEYS = [
   'BRAIN_API_KEY',
@@ -270,6 +271,28 @@ test('to-task：从大脑回复生成任务（priority 6、context.brainstorm、
   assert.equal(plain.task.priority, 6);
 });
 
+test('to-task：主设备兜底路由（避免转出来的任务永远排队）', async (t) => {
+  const thinker = makeThinker('## 结论\n先做 A。');
+  const { hub } = await newHub(t, { brainstormThink: thinker.think });
+  const device = hub.registerDevice(makeManifest({ name: '母机' }));
+  hub.updateSettings({ mainDeviceId: device.id });
+  const first = await hub.chatBrainstorm({ message: '帮我想想' });
+  const assistant = first.session.messages[1];
+
+  const result = hub.brainstormMessageToTask({ sessionId: first.session.id, messageId: assistant.id });
+  assert.equal(result.task.requirements.deviceId, device.id);
+});
+
+test('to-task：主设备为空时保持原样路由', async (t) => {
+  const thinker = makeThinker('## 结论\n先做 A。');
+  const { hub } = await newHub(t, { brainstormThink: thinker.think });
+  const first = await hub.chatBrainstorm({ message: '帮我想想' });
+  const assistant = first.session.messages[1];
+
+  const result = hub.brainstormMessageToTask({ sessionId: first.session.id, messageId: assistant.id });
+  assert.ok(!result.task.requirements || !result.task.requirements.deviceId);
+});
+
 test('to-task：会话/消息/角色校验', async (t) => {
   const thinker = makeThinker();
   const { hub } = await newHub(t, { brainstormThink: thinker.think });
@@ -283,6 +306,123 @@ test('to-task：会话/消息/角色校验', async (t) => {
     () => hub.brainstormMessageToTask({ sessionId, messageId: first.session.messages[0].id }),
     /只能把大脑的回复转成任务/,
   );
+});
+
+test('授权后：回复里的 actions 块真正建任务（主设备路由、剥离 JSON、消息记录 taskId）', async (t) => {
+  const reply = [
+    '## 结论',
+    '先把反腐只读看板做出来。',
+    '',
+    '```actions',
+    JSON.stringify([
+      {
+        action: 'create_task',
+        instruction: '在反腐项目目录新增只读看板页面，跑通后截图验收',
+        reason: '下一步',
+      },
+    ]),
+    '```',
+  ].join('\n');
+  const thinker = makeThinker(reply);
+  const { hub } = await newHub(t, { brainstormThink: thinker.think });
+  const device = hub.registerDevice(makeManifest({ name: '母机' }));
+  hub.updateSettings({ mainDeviceId: device.id });
+
+  const first = await hub.chatBrainstorm({
+    message: '你来创建任务，不用我过手：把反腐看板拆成可执行任务',
+  });
+  assert.equal(first.error, null);
+  assert.equal(first.session.autonomy, true, '主人授权后会话应记住直接执行授权');
+  // 提示词带授权状态，模型知道可以输出 actions 块。
+  assert.ok(thinker.captured[0].user.includes('## 执行授权'));
+  assert.ok(thinker.captured[0].user.includes('已授权'));
+  // 动作块从正文剥离，但把执行结果写回消息。
+  assert.ok(!first.reply.includes('```actions'), '正文不应残留 actions 代码块');
+  assert.ok(first.reply.includes('本轮已直接执行'));
+  assert.equal(first.actions.length, 1);
+  const taskId = first.actions[0].taskId;
+  assert.match(taskId, /^task_/);
+  const task = hub.getTask(taskId);
+  assert.equal(task.priority, 6);
+  assert.equal(task.instruction, '在反腐项目目录新增只读看板页面，跑通后截图验收');
+  assert.equal(task.requirements.deviceId, device.id, '未指定设备时默认落到主设备，避免永远排队');
+  assert.equal(task.context.brainstorm, true);
+  assert.equal(task.context.sessionId, first.session.id);
+  // 消息上的执行记录随会话返回（UI 可展示真实 task id）。
+  const assistant = first.session.messages[1];
+  assert.deepEqual(assistant.actions.map((item) => item.taskId), [taskId]);
+
+  // 第二轮沿用同一会话的授权，无需再授权一次。
+  thinker.reply = '## 结论\n继续。\n\n```actions\n[{"action":"create_task","instruction":"补一版看板交互说明文档并提交"}]\n```';
+  const second = await hub.chatBrainstorm({ sessionId: first.session.id, message: '继续推进' });
+  assert.equal(second.actions.length, 1);
+  assert.notEqual(second.actions[0].taskId, taskId);
+});
+
+test('未授权：actions 块被丢弃，不建任务，正文不出现 JSON', async (t) => {
+  const reply = [
+    '## 结论',
+    '先聊方向。',
+    '',
+    '```actions',
+    '[{"action":"create_task","instruction":"这条任务在没有授权时不应被创建"}]',
+    '```',
+  ].join('\n');
+  const thinker = makeThinker(reply);
+  const { hub } = await newHub(t, { brainstormThink: thinker.think });
+
+  const first = await hub.chatBrainstorm({ message: '先聊聊方向' });
+  assert.equal(first.session.autonomy, false);
+  assert.equal(first.actions.length, 0);
+  assert.equal(first.session.messages[1].text, '## 结论\n先聊方向。');
+  assert.equal([...hub.tasks.values()].length, 0);
+  assert.ok(thinker.captured[0].user.includes('未授权'));
+});
+
+test('授权与消息动作随存档恢复（autonomy / actions 不被字段白名单丢弃）', async (t) => {
+  const reply = '## 结论\n开干。\n\n```actions\n[{"action":"create_task","instruction":"跑一遍反腐看板的冒烟测试并记录结果"}]\n```';
+  const thinker = makeThinker(reply);
+  const { hub } = await newHub(t, { brainstormThink: thinker.think });
+  const first = await hub.chatBrainstorm({ message: '授权给你，以后这类任务你直接创建' });
+  const taskId = first.actions[0].taskId;
+
+  const restored = restoreBrainstorm(hub._brainstormStateForPersist());
+  const session = restored.sessions.find((item) => item.id === first.session.id);
+  assert.ok(session, '会话应被恢复');
+  assert.equal(session.autonomy, true);
+  assert.deepEqual(session.messages[1].actions.map((item) => item.taskId), [taskId]);
+});
+
+test('历史会话里说过授权：重启恢复后不用再授权就按已授权执行', async (t) => {
+  const now = new Date().toISOString();
+  const sessionId = 'bs_history_authorized';
+  const reply = '## 结论\n继续推进。\n\n```actions\n[{"action":"create_task","instruction":"继续推进反腐看板的下一步并提交结果"}]\n```';
+  const thinker = makeThinker(reply);
+  const { hub } = await newHub(t, {
+    brainstormThink: thinker.think,
+    brainstorm: {
+      activeId: sessionId,
+      sessions: [
+        {
+          id: sessionId,
+          title: '旧会话',
+          createdAt: now,
+          updatedAt: now,
+          messages: [
+            { id: 'msg_old_1', role: 'user', at: now, text: '以后这种事你就自己办' },
+            { id: 'msg_old_2', role: 'assistant', at: now, text: '好的。' },
+          ],
+        },
+      ],
+    },
+  });
+  const device = hub.registerDevice(makeManifest({ name: '母机' }));
+  hub.updateSettings({ mainDeviceId: device.id });
+
+  const result = await hub.chatBrainstorm({ sessionId, message: '继续' });
+  assert.equal(result.session.autonomy, true, '历史消息里的授权应被回溯识别');
+  assert.equal(result.actions.length, 1);
+  assert.ok(result.reply.includes('本轮已直接执行'));
 });
 
 test('chat 参数校验：空消息与非法 sessionId；未知会话自动新建', async (t) => {
