@@ -107,6 +107,7 @@
     retried: '重新提交',
     requeued: '重新排队',
     blocked: '卡点',
+    warning: '提示',
     device: '设备',
   };
   /** Agnes 执行计划里的策略/并行组文案。 */

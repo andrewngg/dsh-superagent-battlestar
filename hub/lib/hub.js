@@ -5337,10 +5337,17 @@ class Hub {
         blocked: true,
       };
     }
+    if (pending.length) return { reason: `等待前置子任务：${pending.map(describe).join('、')}`, blocked: false };
     if (missing.length) {
-      return { reason: `卡点：前置子任务已不存在（${missing.length} 个），等待确认`, blocked: true };
+      // 依赖的子任务已被清理/删除：继续等待只会永久卡住（用户看不到可操作对象）。
+      // 记录一次提示后视为依赖满足，任务照常路由，由执行结果决定下一步。
+      return {
+        reason: `前置子任务已不存在（${missing.length} 个），已忽略缺失依赖并继续`,
+        blocked: false,
+        missingOnly: true,
+      };
     }
-    return { reason: `等待前置子任务：${pending.map(describe).join('、')}`, blocked: false };
+    return null;
   }
 
   /** 为 queued 任务计算候选并派发；无匹配保持 queued 并记录原因。 */
@@ -5356,7 +5363,7 @@ class Hub {
     }
     // 拆分计划：依赖未满足的子任务先排队，不能提前派发。
     const dependencyGate = this._planDependencyGate(task);
-    if (dependencyGate) {
+    if (dependencyGate && !dependencyGate.missingOnly) {
       const sameReason = Boolean(task.route) && task.route.reason === dependencyGate.reason;
       task.status = TASK_STATUS.QUEUED;
       task.assignedDeviceId = null;
@@ -5369,6 +5376,15 @@ class Hub {
         this.schedulePersist();
       }
       return task;
+    }
+    if (dependencyGate && dependencyGate.missingOnly && !task._planMissingDepsNoted) {
+      // 前置子任务已被清理：只提示一次并继续派发，避免任务永久卡在排队。
+      task._planMissingDepsNoted = true;
+      task.updatedAt = protocol.nowIso();
+      this._pushTaskEvent(task, 'warning', dependencyGate.reason);
+      this.log('warn', `${task.id} ${dependencyGate.reason}`);
+      this.broadcast('task.updated', { task: this.taskToJson(task) });
+      this.schedulePersist();
     }
     const requirements = task.requirements;
     const candidates = [];

@@ -211,6 +211,28 @@ test('计划执行：取消排队子任务时级联取消依赖它的后续子�
   assert.equal(env.hub.getTask(parent.id).status, 'failed');
 });
 
+test('计划依赖缺失：依赖子任务被清理后不再永久卡住，自动继续派发', async (t) => {
+  const env = await startTestHub(t);
+  await registerDevice(env, makeManifest({ limits: { maxConcurrentTasks: 2 } }));
+  const task = await env.hub.createTask({ instruction: '依赖已被删除的后续步骤', timeoutSec: 300 });
+  // 模拟历史遗留状态：任务排在两个已经不存在的子任务之后（被回收站清理）。
+  task.status = 'queued';
+  task.assignedDeviceId = null;
+  task.assignedDeviceName = null;
+  task.planStep = 3;
+  task.planDependsOnTaskIds = ['task_missing_a', 'task_missing_b'];
+  task.route = { reason: '卡点：前置子任务已不存在（2 个），等待确认', candidates: [], excluded: [] };
+  env.hub.routeTask(task);
+
+  const routed = env.hub.getTask(task.id);
+  assert.equal(routed.status, 'assigned', '缺失依赖不应再阻塞派发');
+  assert.ok(routed.assignedDeviceId, '应派发到可用设备');
+  assert.ok(
+    routed.events.some((event) => event.type === 'warning' && /前置子任务已不存在/.test(event.message)),
+    '应记录一次提示事件',
+  );
+});
+
 test('计划元数据持久化：重启后保留执行方式、步骤与依赖', async (t) => {
   const dataDir = await makeTempDir('butler-plan-exec-restore-');
   t.after(() => fsp.rm(dataDir, { recursive: true, force: true }));
