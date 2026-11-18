@@ -25,6 +25,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const { requestJson, joinUrl, normalizeBaseUrl } = require('./http');
+const mikaRecovery = require('./mika-recovery');
 
 const PROGRESS_MIN_INTERVAL_MS = 800;
 /** 与 device-agent/cli-worker.js 的 PROGRESS_PREFIX 保持一致。 */
@@ -1378,6 +1379,20 @@ function mikaErrorText(payload) {
   return '';
 }
 
+/**
+ * 判断错误是不是「手机控制失效」这一类（可以靠 USB ADB 自愈后再试一次）：
+ *  - connection / connection_info / stale_connection：CLI 连不上或连接信息过期；
+ *  - phone_unavailable / NO_PHONE_HELPER / NO_ACCESSIBILITY：手机侧助手或无障碍不在；
+ *  - 手机中的任务报「手机助手已停止」「无障碍」相关提示。
+ */
+function looksLikeMikaPhoneFailure(text) {
+  const value = String(text || '');
+  if (!value) return false;
+  return /phone_unavailable|NO_ACCESSIBILITY|NO_PHONE_HELPER|UsbHelperStopped|helper_available|stale_connection|connection_info|adb_unavailable|device_offline|手机助手|无障碍|accessibility/i.test(
+    value,
+  );
+}
+
 function extractMikaAnswer(task) {
   for (const key of ['answer', 'result', 'reply', 'output', 'summary', 'text', 'message']) {
     const value = task[key];
@@ -1431,6 +1446,24 @@ function createMikaExecutor(options = {}) {
   const envBase = options.env || process.env;
   const label = 'Mika';
 
+  // 手机自愈（USB ADB）：设备代理派发任务前先自检，手机控制坏了就先修好再派发；
+  // 任务中途报手机控制类错误时，自愈后自动重试。没有 adb 就没法修（Wi-Fi 模式下关闭）。
+  const recoveryCfg = isPlainObject(cfg.recovery) ? cfg.recovery : {};
+  const recoveryAdb = nonEmptyString(recoveryCfg.adb) ? recoveryCfg.adb : adb;
+  const recoveryEnabled = recoveryCfg.enabled !== false && Boolean(recoveryAdb);
+  const recovery = recoveryEnabled
+    ? mikaRecovery.createMikaRecovery({
+        adb: recoveryAdb,
+        serial: nonEmptyString(recoveryCfg.serial) ? recoveryCfg.serial : device,
+        packageName: nonEmptyString(recoveryCfg.packageName) ? recoveryCfg.packageName : mikaRecovery.DEFAULT_PACKAGE,
+        appLabel: nonEmptyString(recoveryCfg.appLabel) ? recoveryCfg.appLabel : mikaRecovery.DEFAULT_APP_LABEL,
+        timeoutMs: clampInt(recoveryCfg.timeoutMs, 2000, 120000, 20000),
+        rebindGapMs: clampInt(recoveryCfg.rebindGapMs, 0, 10000, 700),
+      })
+    : null;
+  const recoveryPreflight = recoveryCfg.preflight !== false;
+  const recoveryRetries = recovery ? clampInt(recoveryCfg.retries, 0, 3, 1) : 0;
+
   function executable() {
     if (interpreter) return { exe: interpreter, args: [command, ...commandArgs] };
     return { exe: command, args: commandArgs };
@@ -1478,12 +1511,13 @@ function createMikaExecutor(options = {}) {
     return args;
   }
 
-  return {
-    async run(ctx = {}) {
-      const signal = ctx.signal || null;
-      const progress = typeof ctx.progress === 'function' ? ctx.progress : async () => {};
-      const requestAnswer = typeof ctx.requestAnswer === 'function' ? ctx.requestAnswer : null;
-      const task = ctx.task || {};
+  /** 跑一次 Mika 任务（提交 + 轮询等待）；手机控制类失败由外层 run() 自愈后重试。 */
+  async function runOnce(ctx = {}) {
+    const signal = ctx.signal || null;
+    const progress = typeof ctx.progress === 'function' ? ctx.progress : async () => {};
+    const requestAnswer = typeof ctx.requestAnswer === 'function' ? ctx.requestAnswer : null;
+    const task = ctx.task || {};
+    {
       const instruction = String(task.instruction || '').trim();
       if (!instruction) return { output: { text: '' }, error: '任务指令为空' };
       throwIfAborted(signal);
@@ -1677,6 +1711,89 @@ function createMikaExecutor(options = {}) {
       } finally {
         await removeDirSafe(dir);
       }
+    }
+  }
+
+  return {
+    async run(ctx = {}) {
+      const signal = ctx.signal || null;
+      const progress = typeof ctx.progress === 'function' ? ctx.progress : async () => {};
+      // idle → 没修过；ok → 本次派发里已经修好过（再失败可以直接重试，不必重复修）；failed → 修不动。
+      let healState = 'idle';
+
+      /** 走 USB ADB 自愈手机控制（无障碍 + 手机助手），成功后刷新 CLI 连接信息。 */
+      const heal = async (reason) => {
+        if (!recovery || healState === 'failed') return false;
+        if (healState === 'ok') return true;
+        healState = 'failed';
+        try {
+          await progress(`Mika 手机控制不可用（${reason}），正在通过 USB ADB 自愈…`, 10);
+          const repaired = await recovery.ensure({
+            signal,
+            onStep: (step) => {
+              const name = step && step.name ? step.name : '步骤';
+              const detail = step && step.detail ? `：${step.detail}` : '';
+              Promise.resolve(progress(`手机自愈 ${name}${detail}`, 12)).catch(() => {});
+            },
+          });
+          const problems = repaired.report && Array.isArray(repaired.report.problems) ? repaired.report.problems.join(', ') : '';
+          if (!repaired.ok) {
+            await progress(`手机自愈未完成${problems ? `（${problems}）` : ''}`, 13);
+            return false;
+          }
+          await progress('手机控制已恢复，正在刷新 Mika 连接信息…', 14);
+          try {
+            const connectRun = await runCli([...connectionArgs(), '--json', 'connect'], { timeout: 120000, signal });
+            const connectError = mikaErrorText(connectRun.payload);
+            if (connectError) await progress(`刷新连接信息失败（${connectError}），直接重试任务`, 15);
+          } catch (err) {
+            if (err && err.name === 'AbortError') throw err;
+            await progress(`刷新连接信息失败（${err.message}），直接重试任务`, 15);
+          }
+          healState = 'ok';
+          return true;
+        } catch (err) {
+          if (err && err.name === 'AbortError') throw err;
+          await progress(`手机自愈异常：${err.message}`, 13);
+          return false;
+        }
+      };
+
+      throwIfAborted(signal);
+      if (recovery && recoveryPreflight) {
+        try {
+          const pre = await recovery.diagnose({ signal });
+          // 只有无障碍坏了才值得在派发前先修：无障碍是所有 App 操作的前提。
+          // 手机助手不在时不少任务仍能跑完（Mika 会退化到纯无障碍操作），提前拉起要多花十几秒，
+          // 所以留到任务真报 NO_PHONE_HELPER 时再修（下面失败重试那段）。
+          const a11yBroken = pre.a11yOk === undefined ? !pre.ok : pre.a11yOk === false;
+          if (!pre.ok && a11yBroken) {
+            await progress(`Mika 手机控制自检未通过（${pre.problems.join(', ')}），先自愈再派发…`, 9);
+            await heal(pre.problems.join(', '));
+          }
+        } catch (err) {
+          if (err && err.name === 'AbortError') throw err;
+          // 自检失败不影响派发：任务出错后还会再触发一次自愈。
+        }
+      }
+
+      let result = await runOnce(ctx);
+      let attempts = 0;
+      while (result && result.error && attempts < recoveryRetries && looksLikeMikaPhoneFailure(result.error)) {
+        attempts += 1;
+        const healedOk = await heal(result.error);
+        if (!healedOk) break;
+        throwIfAborted(signal);
+        await progress('手机控制已修复，正在重试 Mika 任务…', 16);
+        result = await runOnce(ctx);
+      }
+      if (result && result.error && attempts > 0 && looksLikeMikaPhoneFailure(result.error)) {
+        return {
+          ...result,
+          error: `${result.error}（已通过 USB ADB 自愈并重试 ${attempts} 次仍失败；可运行 node scripts/mika-phone-recovery.js --check 查看手机状态）`,
+        };
+      }
+      return result;
     },
   };
 }

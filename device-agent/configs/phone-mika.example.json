@@ -47,7 +47,14 @@
       "tokenFile": "",
       "adb": "adb",
       "timeoutMs": 900000,
-      "waitSeconds": 45
+      "waitSeconds": 45,
+      "recovery": {
+        "enabled": true,
+        "preflight": true,
+        "timeoutMs": 20000,
+        "rebindGapMs": 700,
+        "retries": 1
+      }
     }
   },
   "discovery": { "dsh": false, "ollama": false, "gateway": false, "skills": false }

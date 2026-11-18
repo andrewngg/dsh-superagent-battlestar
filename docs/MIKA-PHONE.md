@@ -74,11 +74,21 @@ mika --url http://192.168.1.30:8765 --token-file C:\path\to\mika-token.txt docto
       "tokenFile": "",                // Wi-Fi 模式必填
       "adb": "adb",
       "timeoutMs": 900000,
-      "waitSeconds": 45
+      "waitSeconds": 45,
+      // 手机控制失效（无障碍被关/手机助手没跑）时用 USB ADB 自动自愈再重试；
+      // 没配 adb 时自动关闭（Wi-Fi 模式没有 USB 可修）
+      "recovery": {
+        "enabled": true,
+        "preflight": true,   // 派发前先自检，不健康就先修
+        "retries": 1         // 任务报手机类错误 → 自愈 → 重试次数
+      }
     }
   }
 }
 ```
+
+> 自愈的检查项、修复动作（含 ColorOS 上写设置被拒改走设置界面自动化、`usb-start.sh` 拉起手机助手）
+> 与手工运维命令见 [PHONE-RECOVERY.md](PHONE-RECOVERY.md)。
 
 在「Mika 桥」电脑上启动代理：
 
@@ -103,12 +113,21 @@ curl.exe -X POST http://127.0.0.1:7317/api/tasks `
 
 执行器会：
 
-1. 把指令写入 UTF-8 goal 文件；
-2. 调用 `mika task run --goal-file ... --json`，获得 `task_id`；
-3. 循环 `mika task wait <id> --timeout 45 --json`，通过 `progress` 消息回报；
-4. 完成时返回 Mika 的结果文本、`task_id`、`verified`（若手机提供）和附件；
-5. 若 Mika 进入 `waiting_for_answer` 或 `waiting_on_phone`，任务会失败并说明需要在手机上处理
+1. **派发前自检手机控制通道**：无障碍（总开关/列表/崩溃/绑定）不健康就先自愈再派发，
+   进度消息里会看到「先自愈再派发」与每一步修复；只有手机助手 `:helper` 没跑时**不提前修**
+   （不少任务在无助手时仍可跑完，留到真失败再修）；
+2. 把指令写入 UTF-8 goal 文件；
+3. 调用 `mika task run --goal-file ... --json`，获得 `task_id`；
+4. 循环 `mika task wait <id> --timeout 45 --json`，通过 `progress` 消息回报；
+5. 完成时返回 Mika 的结果文本、`task_id`、`verified`（若手机提供）和附件；
+6. 若 Mika 进入 `waiting_for_answer` 或 `waiting_on_phone`，任务会失败并说明需要在手机上处理
    （支付、登录验证码、手机接管等不会被远程自动批准）。
+
+**手机控制失效的自我修复**：任务报 `phone_unavailable` / `NO_ACCESSIBILITY` / `NO_PHONE_HELPER` /
+`stale_connection` 这类错误时，执行器会用 USB ADB 自愈（唤醒 → 权限 → 无障碍 → 拉起 Mika →
+`usb-start.sh` 起手机助手）→ `mika connect` 刷新连接信息 → **自动重试一次原任务**并继续。
+自愈后仍失败会在错误末尾提示手工排查（`node scripts/mika-phone-recovery.js --check`）。
+细节见 [PHONE-RECOVERY.md](PHONE-RECOVERY.md)。
 
 Mika 的 JSON 状态：`starting / queued / running / paused / waiting_for_answer / waiting_on_phone / done / failed / cancelled`。
 任务超时后手机上的任务仍继续运行，可用 `mika task status <id> --json` 继续查询。
@@ -128,8 +147,11 @@ Mika 的 JSON 状态：`starting / queued / running / paused / waiting_for_answe
 | --- | --- |
 | `adb_unavailable` / `adb` | 安装 platform-tools，`adb devices` 能看到手机 |
 | `unauthorized` | 手机上允许 USB 调试 |
-| `stale_connection` | 手机重启过：重新 `mika connect` |
+| `stale_connection` | 手机重启过：重新 `mika connect`（代理自愈时会自动做） |
 | `connection_info` | 解锁手机、打开一次 Mika，再 `connect` |
 | `incompatible_api` | 更新 Mika APK（需要 task API v1） |
+| `phone_unavailable` / `NO_ACCESSIBILITY` | Mika 的无障碍服务不可用（总开关被关/服务崩溃未绑定）→ 跑 `node scripts/mika-phone-recovery.js --repair`，见 [PHONE-RECOVERY.md](PHONE-RECOVERY.md) |
+| `phone_unavailable` / `NO_PHONE_HELPER`、`UsbHelperStopped` | 手机助手没跑（手机久置被系统清理最常见）→ 同上，`--repair` 会用 `usb-start.sh` 拉起 |
+| Mika 界面「设置 › 手机操作 › 无线调试已关」 | 只影响无线配对模式，USB 直连不受影响；要配对时再开 |
 | 任务 409 / 需要回答 | 在手机上回答；或让管家重新发任务并带上完整约束 |
 | 设备离线 | 检查桥电脑上的代理、Hub IP、加入码与防火墙 |
