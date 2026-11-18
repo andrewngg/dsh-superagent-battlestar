@@ -426,6 +426,21 @@ function composePrompt(prefix, instruction) {
   return head ? `${head}\n\n用户任务：\n${body}` : body;
 }
 
+/** 运行约束标记：存在即不重复追加。 */
+const RUNTIME_GUARD_MARK = '【运行约束】';
+const RUNTIME_GUARD_TEXT = '这是无人值守的一次性任务：不要启动常驻服务或后台服务器（如 python xxx.py、flask run、npm run dev）；验证网页用静态文件检查或一次性命令。确需后台进程时必须真正分离（例如 Start-Process 且立即返回），保证当前命令几秒内结束并交出输出，否则整条命令会一直挂着直到任务超时。';
+
+/**
+ * 本机 CLI 任务的运行约束：任务是一锤子买卖，后台常驻进程会把命令管道占住。
+ * 事故 task_f0dq7lou：OpenCode 用 Start-Process 起了 python 原型服务器，bash 工具
+ * 不再返回，13 分钟没有任何新输出，最后撞 900s 硬上限。
+ */
+function withRuntimeGuard(instruction) {
+  const body = String(instruction || '');
+  if (!body || body.includes(RUNTIME_GUARD_MARK)) return body;
+  return `${body}\n\n${RUNTIME_GUARD_MARK}${RUNTIME_GUARD_TEXT}`;
+}
+
 /**
  * Hermes 会话键：普通任务/继续任务按 threadId 复用会话；
  * 计划子任务不共享父任务会话（否则兄弟子任务的对话会互相污染、越跑越偏），
@@ -995,13 +1010,17 @@ async function runOpencode(ctx) {
   let remainder = '';
   let lastEmitAt = 0;
   const seen = new Set();
-  const emit = (message, percent) => {
+  const emit = (message, percent, opts) => {
     if (!onProgress || !message) return;
     const now = Date.now();
     if (now - lastEmitAt < 900) return;
     lastEmitAt = now;
     try {
-      onProgress({ message: String(message).slice(0, 200), percent });
+      const payload = { message: String(message).slice(0, 200), percent };
+      // silent：仅用于「还活着」心跳，不算真实进度。executors 的卡死 watchdog 靠它
+      // 区分「OpenCode 在稳步干活」和「进程还在、但其实 10 分钟没任何输出」。
+      if (opts && opts.silent === true) payload.silent = true;
+      onProgress(payload);
     } catch {
       /* 进度失败不影响任务 */
     }
@@ -1033,7 +1052,7 @@ async function runOpencode(ctx) {
       }
     }
     if (Date.now() - lastEmitAt >= 15000) {
-      emit(`OpenCode 执行中（已 ${Math.round(elapsedMs / 1000)}s）…`, 20);
+      emit(`OpenCode 执行中（已 ${Math.round(elapsedMs / 1000)}s）…`, 20, { silent: true });
     }
   };
   const res = await runProcess({
@@ -1157,6 +1176,8 @@ async function runTask(options) {
   if (backend === 'shell') {
     return { ...(await runShell(ctx)), profile: ctx.profile, fallbackFrom: null, project: ctx.project };
   }
+  // AI 后端（Hermes/OpenCode）追加运行约束，避免启动常驻服务把命令挂死。
+  ctx.instruction = withRuntimeGuard(ctx.instruction);
   if (backend === 'opencode') {
     try {
       return { ...(await runOpencode(ctx)), profile: ctx.profile, fallbackFrom: null, project: ctx.project };
@@ -1167,6 +1188,36 @@ async function runTask(options) {
     }
   }
   return { ...(await runHermes(ctx)), profile: ctx.profile, fallbackFrom: null, project: ctx.project };
+}
+
+/**
+ * 生成进度写入函数：把 payload 写成一行 `@@BUTLER_PROGRESS@@ {json}`。
+ * silent=true 会一起写进去——executors 侧据此判断「这只是心跳，不算真实进度」。
+ * 没有 progressFile 时退回 stderr，便于本地手工跑。
+ * @param {string} progressFile
+ * @param {(text:string)=>void} [stderrWriter]
+ */
+function createProgressEmitter(progressFile, stderrWriter) {
+  const write = typeof stderrWriter === 'function' ? stderrWriter : (text) => process.stderr.write(text);
+  return (payload) => {
+    if (!payload || !payload.message) return;
+    try {
+      const line = {
+        message: String(payload.message),
+        percent: Number.isFinite(payload.percent) ? payload.percent : undefined,
+        at: new Date().toISOString(),
+      };
+      if (payload.silent === true) line.silent = true;
+      const text = `${PROGRESS_PREFIX}${JSON.stringify(line)}\n`;
+      if (nonEmptyString(progressFile)) {
+        fs.appendFileSync(progressFile, text);
+      } else {
+        write(text);
+      }
+    } catch {
+      /* ignore */
+    }
+  };
 }
 
 async function main(argv) {
@@ -1202,24 +1253,7 @@ async function main(argv) {
   if (process.env.BUTLER_CLI_STREAM_PROGRESS === '0') options.streamProgress = false;
 
   // 实时执行步骤写进度文件（魔法前缀行），由 executors.js 轮询解析后转成 Hub 进度。
-  const emitProgress = (payload) => {
-    if (!payload || !payload.message) return;
-    try {
-      const line = {
-        message: String(payload.message),
-        percent: Number.isFinite(payload.percent) ? payload.percent : undefined,
-        at: new Date().toISOString(),
-      };
-      const text = `${PROGRESS_PREFIX}${JSON.stringify(line)}\n`;
-      if (nonEmptyString(options.progressFile)) {
-        fs.appendFileSync(options.progressFile, text);
-      } else {
-        process.stderr.write(text);
-      }
-    } catch {
-      /* ignore */
-    }
-  };
+  const emitProgress = createProgressEmitter(options.progressFile);
 
   try {
     const result = await runTask({ ...options, onProgress: emitProgress });
@@ -1264,12 +1298,14 @@ module.exports = {
   CODE_RE,
   SHELL_PREFIX_RE,
   PROGRESS_PREFIX,
+  createProgressEmitter,
   parseCliArgs,
   chooseBackend,
   buildHermesArgs,
   buildHermesStreamArgs,
   providerForModel,
   composePrompt,
+  withRuntimeGuard,
   sessionKeyFor,
   buildOpencodeArgs,
   extractOpencodeText,

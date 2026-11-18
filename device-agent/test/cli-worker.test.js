@@ -335,3 +335,37 @@ test('normalizeProgressPayload：消息截断、百分比钳制且不回退', ()
   assert.equal(worker.normalizeProgressPayload({ message: 'high', percent: 500 }, state).percent, 99);
   assert.equal(worker.normalizeProgressPayload({ message: '' }, state), null);
 });
+
+test('createProgressEmitter：silent 心跳标记写入进度行，供 executors 区分真实进度', () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'butler-emitter-'));
+  const file = path.join(dir, 'progress.log');
+  try {
+    const emit = worker.createProgressEmitter(file);
+    emit({ message: 'OpenCode 执行中（已 15s）…', percent: 20, silent: true });
+    emit({ message: 'OpenCode：工具 bash（completed）', percent: 30 });
+    emit({ message: '' });
+    const lines = fs
+      .readFileSync(file, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line.slice(worker.PROGRESS_PREFIX.length)));
+    assert.equal(lines.length, 2);
+    assert.equal(lines[0].silent, true);
+    assert.equal(lines[0].message, 'OpenCode 执行中（已 15s）…');
+    assert.equal(lines[1].silent, undefined);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('withRuntimeGuard：追加「不要起常驻服务」约束，且不重复追加', () => {
+  const guarded = worker.withRuntimeGuard('## 任务：做个原型页面');
+  assert.match(guarded, /^## 任务：做个原型页面/);
+  assert.match(guarded, /【运行约束】/);
+  assert.match(guarded, /常驻服务/);
+  assert.equal(worker.withRuntimeGuard(guarded), guarded, '已有约束时不重复追加');
+  assert.equal(worker.withRuntimeGuard(''), '');
+});

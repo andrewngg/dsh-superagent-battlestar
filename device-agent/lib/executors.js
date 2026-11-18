@@ -96,6 +96,9 @@ function parseWorkerProgressLine(line) {
     return {
       message: truncate(data.message.trim(), 200),
       percent: Number.isFinite(data.percent) ? Math.max(0, Math.min(100, Math.round(data.percent))) : undefined,
+      // silent：worker 的「执行中（已 Xs）」心跳。它只证明进程还活着，不算真实进度，
+      // 否则 watchdog 会被心跳永久续命，卡死只能等满 CLI 硬上限（复现：task_f0dq7lou）。
+      silent: data.silent === true,
     };
   } catch {
     return null;
@@ -105,7 +108,7 @@ function parseWorkerProgressLine(line) {
 /**
  * 轮询 cli-worker 写入的进度文件，按行回调。
  * @param {string} file
- * @param {(message:string, percent?:number)=>any} onProgress
+ * @param {(message:string, percent?:number, opts?:{silent?:boolean})=>any} onProgress
  * @returns {{file:string, start:()=>void, stop:()=>Promise<void>}}
  */
 function createProgressFileTailer(file, onProgress, intervalMs = CLI_PROGRESS_POLL_MS) {
@@ -131,7 +134,7 @@ function createProgressFileTailer(file, onProgress, intervalMs = CLI_PROGRESS_PO
         const payload = parseWorkerProgressLine(line);
         if (!payload) continue;
         try {
-          await onProgress(payload.message, payload.percent);
+          await onProgress(payload.message, payload.percent, { silent: payload.silent });
         } catch {
           /* 进度上报失败不影响任务 */
         }
@@ -159,7 +162,7 @@ function createProgressFileTailer(file, onProgress, intervalMs = CLI_PROGRESS_PO
         const payload = parseWorkerProgressLine(remainder);
         if (payload) {
           try {
-            await onProgress(payload.message, payload.percent);
+            await onProgress(payload.message, payload.percent, { silent: payload.silent });
           } catch {
             /* ignore */
           }
@@ -849,7 +852,7 @@ function createCliExecutor(options = {}) {
       }
 
       const tailer = streamProgress
-        ? createProgressFileTailer(progressFile, (message, percent) => progress(message, percent))
+        ? createProgressFileTailer(progressFile, (message, percent, opts) => progress(message, percent, opts))
         : null;
       if (tailer) tailer.start();
 

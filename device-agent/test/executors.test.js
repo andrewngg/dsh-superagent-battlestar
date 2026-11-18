@@ -358,7 +358,7 @@ test('未知执行器类型给出明确错误', () => {
 test('parseWorkerProgressLine：只认魔法前缀，钳制百分比', () => {
   assert.deepEqual(
     parseWorkerProgressLine('@@BUTLER_PROGRESS@@ {"message":"子任务：调研竞品","percent":20}'),
-    { message: '子任务：调研竞品', percent: 20 },
+    { message: '子任务：调研竞品', percent: 20, silent: false },
   );
   assert.equal(
     parseWorkerProgressLine('@@BUTLER_PROGRESS@@ {"message":"执行步骤","percent":120}').percent,
@@ -367,21 +367,35 @@ test('parseWorkerProgressLine：只认魔法前缀，钳制百分比', () => {
   assert.equal(parseWorkerProgressLine('@@BUTLER_PROGRESS@@ {"message":""}'), null);
   assert.equal(parseWorkerProgressLine('@@BUTLER_PROGRESS@@ not-json'), null);
   assert.equal(parseWorkerProgressLine('普通日志'), null);
+  // 心跳标记必须透传：silent 行不能刷新卡死 watchdog 的「真实进度」时间。
+  assert.equal(
+    parseWorkerProgressLine('@@BUTLER_PROGRESS@@ {"message":"OpenCode 执行中（已 30s）…","percent":20,"silent":true}')
+      .silent,
+    true,
+  );
+  assert.equal(
+    parseWorkerProgressLine('@@BUTLER_PROGRESS@@ {"message":"OpenCode：工具 read（completed）","percent":30}').silent,
+    false,
+  );
 });
 
 test('createProgressFileTailer：追加行实时回调，stop 时补最后一行', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'butler-progress-'));
   const file = path.join(dir, 'progress.log');
   const seen = [];
-  const tailer = createProgressFileTailer(file, (message, percent) => seen.push([message, percent]), 20);
+  const tailer = createProgressFileTailer(file, (message, percent, opts) => seen.push([message, percent, opts && opts.silent]), 20);
   try {
     fs.appendFileSync(file, '@@BUTLER_PROGRESS@@ {"message":"开始","percent":10}\n@@BUTLER_PROGRESS@@ {"message":"进行中","percent":30}\n');
     tailer.start();
     await new Promise((resolve) => setTimeout(resolve, 80));
     // 最后一行没有换行：stop 时也要处理
-    fs.appendFileSync(file, '@@BUTLER_PROGRESS@@ {"message":"收尾","percent":50}');
+    fs.appendFileSync(file, '@@BUTLER_PROGRESS@@ {"message":"收尾","percent":50,"silent":true}');
     await tailer.stop();
-    assert.deepEqual(seen, [['开始', 10], ['进行中', 30], ['收尾', 50]]);
+    assert.deepEqual(seen, [
+      ['开始', 10, false],
+      ['进行中', 30, false],
+      ['收尾', 50, true],
+    ]);
   } finally {
     await tailer.stop();
     fs.rmSync(dir, { recursive: true, force: true });
@@ -497,6 +511,50 @@ test('cli 执行器：无进度 watchdog 会终止卡住的 worker 并返回 sta
     assert.match(outcome.error, /stalled|无进度/);
     assert.equal(outcome.output.data.stalled, true);
     assert.ok(calls.some(([message]) => message.includes('正在执行本机 CLI')));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('cli 执行器：worker 的 silent 心跳不算真实进度，无真实输出仍会触发卡死终止', { timeout: 20000 }, async () => {
+  // 复现 task_f0dq7lou：OpenCode 只每 15s 打印「执行中（已 Xs）…」，被当成真实进度，
+  // watchdog 被永久续命，任务只能等到 900s 硬上限。修复后心跳行带 silent=true，不续命。
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'butler-cli-heartbeat-'));
+  const workerFile = path.join(dir, 'heartbeat-worker.js');
+  fs.writeFileSync(
+    workerFile,
+    [
+      "'use strict';",
+      "const fs = require('node:fs');",
+      'const file = process.env.BUTLER_CLI_PROGRESS_FILE;',
+      'let n = 0;',
+      'setInterval(() => {',
+      '  n += 1;',
+      "  fs.appendFileSync(file, '@@BUTLER_PROGRESS@@ ' + JSON.stringify({ message: `OpenCode 执行中（已 ${n}s）…`, percent: 20, silent: true }) + '\\n');",
+      '}, 250);',
+      'setTimeout(() => {}, 60000);',
+    ].join('\n'),
+  );
+  const executor = createCliExecutor({
+    executorCfg: {
+      worker: workerFile,
+      mode: 'auto',
+      workdir: dir,
+      timeoutMs: 8000,
+      stallTimeoutMs: 1200,
+      heartbeatMs: 5000,
+    },
+    cwd: dir,
+    stateDir: dir,
+  });
+  try {
+    const outcome = await executor.run({
+      task: { id: 'task_heartbeat', instruction: '只有心跳、没有真实输出', timeoutSec: 600 },
+      progress: async () => {},
+    });
+    assert.ok(outcome.error, '只有心跳也应判定卡死');
+    assert.match(outcome.error, /stalled|无进度/);
+    assert.equal(outcome.output.data.stalled, true);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
