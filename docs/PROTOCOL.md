@@ -127,9 +127,9 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
 
 ### 5.4 手机/控制台（管理员令牌）
 
-- `GET /api/snapshot?limit=50` → `{ server:{version,uptimeSec,hubTime}, settings:{language,mainDeviceId}, stats:{...}, devices:[Device], tasks:[Task], goals:[Goal], reminders:[Reminder], events:[Event] }`
-- `GET /api/settings` → `{ settings:{ language, mainDeviceId }, supportedLanguages:['zh-CN','en'], hubTime }`
-- `PATCH|PUT /api/settings` body `{ language?:'zh-CN'|'en', mainDeviceId?:string }` → `{ settings, hubTime }`；`mainDeviceId` 为空字符串表示「本机自动识别」，非空必须是已注册设备 id（否则 400「主设备不存在：…」），最长 120 字符；持久化到 `<dataDir>/settings.json`，并广播 SSE `settings.updated`。
+- `GET /api/snapshot?limit=50` → `{ server:{version,uptimeSec,hubTime}, settings:{language,mainDeviceId,taskSoundEnabled}, stats:{...}, devices:[Device], tasks:[Task], goals:[Goal], reminders:[Reminder], events:[Event] }`
+- `GET /api/settings` → `{ settings:{ language, mainDeviceId, taskSoundEnabled }, supportedLanguages:['zh-CN','en'], hubTime }`
+- `PATCH|PUT /api/settings` body `{ language?:'zh-CN'|'en', mainDeviceId?:string, taskSoundEnabled?:boolean }` → `{ settings, hubTime }`；`mainDeviceId` 为空字符串表示「本机自动识别」，非空必须是已注册设备 id（否则 400「主设备不存在：…」），最长 120 字符；`taskSoundEnabled` 必须为布尔值（否则 400），false 表示 APK 任务提示音静音（系统免打扰模式仍会自动静音）；持久化到 `<dataDir>/settings.json`，并广播 SSE `settings.updated`。
 - `GET /api/goals?status=` → `{ goals:[Goal], hubTime }`
 - `POST /api/goals` body `{ title, nickname?, description?, schedule?, requirements? }` → `{ goal, hubTime }`
   - `nickname`: 目标昵称（≤40 字，可选）；控制台卡片、提醒与每日总结优先用昵称称呼目标，留空则显示 `title`。

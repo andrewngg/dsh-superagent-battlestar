@@ -6,7 +6,7 @@
 
 .DESCRIPTION
   输入：android/AndroidManifest.xml、android/res/**、android/assets/**、android/src/**/*.java
-  输出：dist/BattleStar-0.1.5.apk（已用 android/keystore/superbutler.keystore 签名）
+  输出：dist/BattleStar-0.1.7.apk（已用 android/keystore/superbutler.keystore 签名）
 
   工具链默认位于 <repo>/toolchain，可用环境变量 BUTLER_TOOLCHAIN 指向别处：
     toolchain/jdk/bin/{java,javac,jar,keytool}.exe
@@ -44,7 +44,7 @@ $ResZip = Join-Path $BuildDir 'res.zip'
 $UnsignedApk = Join-Path $BuildDir 'app-unsigned.apk'
 $AlignedApk = Join-Path $BuildDir 'app-aligned.apk'
 $DistDir = Join-Path $RepoRoot 'dist'
-$ApkName = 'BattleStar-0.1.5.apk'
+$ApkName = 'BattleStar-0.1.7.apk'
 $ApkOut = Join-Path $DistDir $ApkName
 $KeystoreDir = Join-Path $AndroidDir 'keystore'
 $Keystore = Join-Path $KeystoreDir 'superbutler.keystore'
@@ -372,6 +372,6 @@ if ($ApkItem.Length -ge $MaxApkBytes) {
 }
 
 Write-Host ''
-Write-Host '✅ 构建成功：dist/BattleStar-0.1.5.apk 已生成并通过静态校验' -ForegroundColor Green
-Write-Host '安装：adb install -r "dist\BattleStar-0.1.5.apk"' -ForegroundColor Green
+Write-Host '✅ 构建成功：dist/BattleStar-0.1.7.apk 已生成并通过静态校验' -ForegroundColor Green
+Write-Host '安装：adb install -r "dist\BattleStar-0.1.7.apk"' -ForegroundColor Green
 exit 0

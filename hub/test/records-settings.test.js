@@ -71,6 +71,54 @@ test('系统设置：默认中文，可切换英语并持久化，snapshot 同�
   }
 });
 
+test('任务提示音设置：默认开启，可关闭并持久化，非法值 400，snapshot 同步下发', async (t) => {
+  const dataDir = await makeTempDir('butler-sound-');
+  t.after(() => fs.promises.rm(dataDir, { recursive: true, force: true }));
+
+  const first = await startHubAt(dataDir);
+  const initial = await request(first.base, 'GET', '/api/settings', {
+    headers: adminHeaders(first),
+  });
+  assert.equal(initial.status, 200);
+  assert.equal(initial.json.settings.taskSoundEnabled, true);
+
+  const snapBefore = await request(first.base, 'GET', '/api/snapshot', {
+    headers: adminHeaders(first),
+  });
+  assert.equal(snapBefore.json.settings.taskSoundEnabled, true);
+
+  const muted = await request(first.base, 'PATCH', '/api/settings', {
+    headers: adminHeaders(first),
+    body: { taskSoundEnabled: false },
+  });
+  assert.equal(muted.status, 200);
+  assert.equal(muted.json.settings.taskSoundEnabled, false);
+
+  const snapAfter = await request(first.base, 'GET', '/api/snapshot', {
+    headers: adminHeaders(first),
+  });
+  assert.equal(snapAfter.json.settings.taskSoundEnabled, false);
+
+  const invalid = await request(first.base, 'PATCH', '/api/settings', {
+    headers: adminHeaders(first),
+    body: { taskSoundEnabled: 'yes' },
+  });
+  assert.equal(invalid.status, 400);
+  assert.match(invalid.json.error.message, /taskSoundEnabled/);
+
+  await first.hub.close();
+
+  const second = await startHubAt(dataDir);
+  try {
+    const reloaded = await request(second.base, 'GET', '/api/settings', {
+      headers: adminHeaders(second),
+    });
+    assert.equal(reloaded.json.settings.taskSoundEnabled, false);
+  } finally {
+    await second.hub.close();
+  }
+});
+
 test('执行记录 API：列表/搜索/详情/markdown 下载', async (t) => {
   const env = await startTestHub(t);
   const device = await registerDevice(env, makeManifest());

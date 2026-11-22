@@ -5,11 +5,12 @@
 
 - 包名：`com.superbutler.app`
 - 名称：**BattleStar**
-- 版本：`versionCode 6` / `versionName 0.1.5`
+- 版本：`versionCode 8` / `versionName 0.1.7`
 - minSdk **26**（Android 8.0）/ targetSdk **36**
-- 产物：`dist/BattleStar-0.1.5.apk`（约 **0.13 MB**，远低于 5 MB 目标）
+- 产物：`dist/BattleStar-0.1.7.apk`（约 **0.13 MB**，远低于 5 MB 目标）
 - 自动发现：扫描当前 Wi-Fi `/24` 的 7317 端口，找到 Hub 后只填令牌
-- 任务通知：通知栏进度条、完成/失败提醒；设置中可开启**常驻通知**，空闲时显示在线/待命主机数
+- 任务通知：通知栏进度条、完成/失败提醒；进度通知 30 分钟无更新 / 完成通知 10 分钟后自动消失；设置中可开启**常驻通知**，空闲时显示在线/待命主机数
+- 任务提示音：任务开始与完成/失败时响一声；系统免打扰/静音模式自动不响；控制台设置里可一键静音（`taskSoundEnabled`）
 - 提醒通知：原生 `AlarmManager` 精确/非精确闹钟 + `BroadcastReceiver`，App 被杀后仍能到点弹通知并回写 Hub
 - 决策通知：自主大脑需要主人拍板时，通知栏「管家需要你决定」直接带最多 3 个选项按钮（点选回传 Hub），无选项时点通知打开 App 的决策卡片
 - 任务页默认筛选：打开「任务」时默认选中「进行中」（APK 与浏览器控制台一致；用户仍可手动切到其它筛选）
@@ -27,6 +28,8 @@ android/
 ├─ src/com/superbutler/app/
 │  ├─ MainActivity.java         # WebView 宿主 + JS Bridge + 通知
 │  ├─ ButlerNotificationService.java  # 常驻通知前台服务（5s 轮询 Hub）
+│  ├─ TaskNotificationTracker.java    # 任务通知跟踪 + 超时/快照对账清理（0.1.6）
+│  ├─ TaskSound.java                  # 任务提示音：系统通知音 + 免打扰/静音判断 + 去重（0.1.7）
 │  ├─ ReminderScheduler.java    # 提醒缓存（SharedPreferences）+ AlarmManager 排程
 │  ├─ ReminderReceiver.java     # 提醒到点：弹通知 → 推进下次时间 → POST 回写 Hub
 │  ├─ DecisionActionReceiver.java # 决策通知按钮：POST 选择结果到 Hub
@@ -42,7 +45,7 @@ android/
 └─ build/                       # 中间产物（可删除，构建时重建）
 
 dist/
-├─ BattleStar-0.1.5.apk        # 可安装 APK
+├─ BattleStar-0.1.7.apk        # 可安装 APK
 └─ icon-512.png                 # 512×512 商店/展示图
 ```
 
@@ -118,7 +121,7 @@ JDK          : ...\super-butler\toolchain\jdk
 Build-Tools  : ...\super-butler\toolchain\android-sdk\build-tools\36.0.0
 Platform JAR : ...\super-butler\toolchain\android-sdk\platforms\android-36\android.jar
 
-package: name='com.superbutler.app' versionCode='6' versionName='0.1.5' ... compileSdkVersion='36'
+package: name='com.superbutler.app' versionCode='8' versionName='0.1.7' ... compileSdkVersion='36'
 minSdkVersion:'26'
 targetSdkVersion:'36'
 uses-permission: name='android.permission.INTERNET'
@@ -133,11 +136,11 @@ launchable-activity: name='com.superbutler.app.MainActivity'  label='BattleStar'
 Signer #1 certificate DN: CN=Super Butler, OU=Home Lab, O=Super Butler, L=KL, C=MY
 Signer #1 certificate SHA-256 digest: 45658ac253be038ab8dc6da60a99743afc7a3a5ac9c6b04d9f498cb7f914bb5a
 
-APK : dist\BattleStar-0.1.5.apk
-大小: 127926 bytes (0.12 MB)    # 上限目标 5 MB
+APK : dist\BattleStar-0.1.7.apk
+大小: 136115 bytes (0.13 MB)    # 上限目标 5 MB
 ```
 
-APK 关键条目（`jar tf dist/BattleStar-0.1.5.apk`）：
+APK 关键条目（`jar tf dist/BattleStar-0.1.7.apk`）：
 
 ```
 AndroidManifest.xml
@@ -158,22 +161,22 @@ Verified using v2 scheme (APK Signature Scheme v2): true
 Verified using v3 scheme (APK Signature Scheme v3): true
 ```
 
-对齐校验：`zipalign -c -v 4 dist\BattleStar-0.1.5.apk` → `Verification successful`。
+对齐校验：`zipalign -c -v 4 dist\BattleStar-0.1.7.apk` → `Verification successful`。
 
 > 每次重新构建 APK 的 SHA-256 可能不同（zip 时间戳/签名块），以 `build-apk.ps1` 末尾打印的值为准。
 >
-> 清单校验：`aapt2 dump xmltree --file AndroidManifest.xml dist\BattleStar-0.1.5.apk` 中可见
+> 清单校验：`aapt2 dump xmltree --file AndroidManifest.xml dist\BattleStar-0.1.7.apk` 中可见
 > `.ReminderReceiver` 与 `.BootReceiver` 均声明为 `exported="false"`，并带 `BOOT_COMPLETED` /
 > `MY_PACKAGE_REPLACED` intent-filter。
 
 ## 5. 安装与使用
 
-APK 在本目录 `dist/BattleStar-0.1.5.apk`。安装方式（任选其一）：
+APK 在本目录 `dist/BattleStar-0.1.7.apk`。安装方式（任选其一）：
 
 ```powershell
 # 手机开启「开发者选项 → USB 调试」并连接后：
 adb devices
-adb install -r "dist\BattleStar-0.1.5.apk"
+adb install -r "dist\BattleStar-0.1.7.apk"
 ```
 
 - 也可以把 APK 拷到手机（微信/网盘/数据线）直接点击安装，需允许「安装未知来源应用」。
@@ -194,9 +197,10 @@ adb install -r "dist\BattleStar-0.1.5.apk"
 ## 6. 实现要点
 
 - **WebView 配置**：JS、DOM storage、database、宽视口（`useWideViewPort` + `loadWithOverviewMode`）、
-  混合内容 `MIXED_CONTENT_ALWAYS_ALLOW`、自定义 UA 追加 `SuperButlerApp/0.1.5`。
+  混合内容 `MIXED_CONTENT_ALWAYS_ALLOW`、自定义 UA 追加 `SuperButlerApp/0.1.7`。
 - **JS Bridge**（对象名 `ButlerBridge`）：`getConfig` / `saveConfig` / `clearConfig` / `openDashboard` /
   `openSetup` / `appVersion` / `toast` / `testConnection` / `setPersistentNotification` /
+  `getNotificationSettings()` / `setTaskSound(boolean)` / `taskProgress(json)` / `taskFinished(json)` /
   `syncReminders(json)` / `getReminderStatus()`。
   - 仅在**本地 assets 页面**与**已配置 Hub 同主机页面**注入：`addJavascriptInterface` 前用
     `syncBridgeForUrl()` 判断并启停；页面切换时 `onPageStarted` 再次校正。
@@ -229,7 +233,7 @@ adb install -r "dist\BattleStar-0.1.5.apk"
   - `gentle` → `butler_reminders`：`IMPORTANCE_HIGH`，系统默认提示音 + 普通震动，温和的日常提醒；
   - `alarm` → `butler_reminders_alarm`：`IMPORTANCE_HIGH`，`AudioAttributes` 使用 **USAGE_ALARM** 闹钟音频流、
     长震动模式、通知 `CATEGORY_ALARM`，响亮如闹钟，适合重要事项（受系统勿扰/媒体音量影响，见第 8 节）。
-  两个渠道都与任务通知 `butler_task_progress` / `butler_task_done` 分开，用户可单独静音/关闭。
+  两个渠道都与任务通知 `butler_task_progress` / `butler_task_done_v2` 分开，用户可单独静音/关闭。
 - **本地缓存**：`ReminderScheduler` 把整份提醒数组写入 `SharedPreferences`（`butler_reminders` / `items`），
   开机或 App 重建后无需联网即可恢复排程。`sync()` 为全量同步：先取消旧闹钟，再按新列表重排，
   已删除/已禁用的提醒不会残留。
@@ -283,6 +287,45 @@ adb install -r "dist\BattleStar-0.1.5.apk"
 - `ownerAsk` 消失（已在控制台或通知栏选完/知道了）时自动取消通知 7600；
 - 该通道与任务、提醒、常驻通知渠道独立，用户可单独静音/关闭。
 
+### 任务通知超时（0.1.6）
+
+任务通知由 WebView 页面的 `ButlerBridge.taskProgress / taskFinished` 驱动，页面刷新、WebView 重建或任务
+从快照前 40 条滚出时可能收不到完成事件，导致 `setOngoing(true)` 的进度通知永久卡在通知栏（用户无法划掉）。
+0.1.6 起在原生侧增加超时兜底（`TaskNotificationTracker`）：
+
+- **超时时间**：进行中通知 = 最后一次更新后 **30 分钟** 无更新自动消失；完成/失败/超时/取消通知 = **10 分钟**后消失。
+  重新发送同一任务通知（进度变化/终态）会重置计时，长时间正常运行的任务不受影响。
+- **系统级兜底**：每次 `notify()` 都设置 `Notification.Builder.setTimeoutAfter(ttl)`，即使 App 进程被杀、
+  跟踪逻辑不再运行，系统也会到点自动移除通知。
+- **跟踪与主动清理**：每次发送把 `notifyId → taskId/状态/发出时间/到期时间` 写入内存表并持久化到
+  `SharedPreferences`（`butler_config` / `task_notifications`）。`MainActivity.onCreate/onResume` 与
+  `ButlerNotificationService` 每次 5s 轮询都会调用 `TaskNotificationTracker.sweep()` 取消到期通知，
+  并清理旧版本遗留的 7300 段任务通知（发出超过 30 分钟、且不在跟踪表中的）。
+- **快照对账**：常驻通知服务的 5s 轮询读取 `/api/snapshot?limit=10` 后，若发现某个仍在「进行中」的通知
+  对应任务已是终态（completed/failed/timeout/cancelled），立即取消该进度通知（不动已发出的完成通知）。
+- 常驻通知（7400）、决策通知（7600）、提醒通知（7500 段）不受影响，仍由各自逻辑管理。
+
+### 任务提示音（0.1.7）
+
+任务开始（第一次出现进度通知）与任务结束（完成/失败/超时/取消）时，APK 会响一声系统通知音。
+声音由原生层独立播放，而不是通知渠道声音，原因：Android 渠道创建后声音不可修改，无法满足
+「后台一键静音 / 免打扰自动静音」的即时需求。
+
+- **播放时机**：任务第一次出现进度通知 → 开始音（后续进度更新保持安静）；任务进入终态 →
+  完成音。终态通知会覆盖同一 `notifyId` 的进度通知，页面与常驻服务同时触发时由
+  `TaskSound` 按「任务 + 类型」做 **2.5 秒**去重，避免响两次。
+- **免打扰/静音自动静音**：`NotificationManager.getCurrentInterruptionFilter()` 为
+  `INTERRUPTION_FILTER_NONE / ALARMS / PRIORITY`，或铃声为 `RINGER_MODE_SILENT` 时不播放；
+  其余情况按系统通知音量播放（`USAGE_NOTIFICATION`）。
+- **后台静音开关**：控制台「设置 → 任务提示音」写入 Hub 的 `taskSoundEnabled`，随 snapshot
+  下发；WebView 页面通过 `ButlerBridge.setTaskSound(enabled)` 即时同步给原生，常驻通知服务
+  每次轮询 snapshot 时也会同步一次，因此 App 在后台/页面未打开时同样生效。
+- **通知渠道不发声**：进度渠道 `butler_task_progress` 与完成渠道 `butler_task_done_v2` 均
+  `setSound(null, null)`；旧版带系统音的 `butler_task_done` 渠道在升级后删除，避免同一任务
+  双重响铃。
+- **与提醒/决策通知独立**：任务提示音只跟随任务事件，不受提醒渠道设置影响；关闭
+  `taskSoundEnabled` 不影响提醒与决策通知的声音。
+
 ## 7. 签名说明
 
 - 构建脚本首次运行会生成测试密钥库（之后复用，不覆盖）：
@@ -309,6 +352,13 @@ adb install -r "dist\BattleStar-0.1.5.apk"
 - **Bridge 信任边界按「同主机」判定**（而非严格同 scheme+port），以兼容 http↔https 跳转/反代；
   风险范围为家庭 LAN 内同主机页面。
 - **无下拉刷新 / 无自适应图标 / 无多语言**：需求中列为可选项，未实现。刷新可通过重新进入控制台或页面内操作完成。
+- **任务通知超时会兜底清除**：页面刷新/WebView 重建会丢失「任务已结束」事件，0.1.6 起由原生侧超时
+  （进行中 30 分钟、完成 10 分钟）与快照对账自动清理；若系统强停 App，新通知仍靠 `setTimeoutAfter`
+  在系统层移除，但升级前旧版本（≤0.1.5）已卡住的通知要等 0.1.6 打开一次才会被 `sweep()` 清理。
+- **任务提示音依赖系统通知音与免打扰状态**：0.1.7 起任务开始/结束会响一声；系统免打扰（勿扰）或
+  静音模式下自动不响，控制台「设置 → 任务提示音」也可一键静音（`taskSoundEnabled`）。若系统未设置
+  默认通知音则无声；任务通知渠道（`butler_task_progress` / `butler_task_done_v2`）本身静音，用户对
+  渠道的静音设置不影响独立播放的任务提示音，需要静音请用控制台开关或系统免打扰。
 - **提醒通知依赖系统闹钟调度**：App 被杀、设备重启后仍会生效（`AlarmManager` + `BOOT_COMPLETED` 重排），
   但**精确闹钟权限 `SCHEDULE_EXACT_ALARM` 可被用户/系统撤销**（Android 12+ 默认按应用类别授予），
   撤销后自动回退 `setAndAllowWhileIdle`：Doze 深度休眠下可能延迟数分钟，系统也可能合并相邻闹钟。

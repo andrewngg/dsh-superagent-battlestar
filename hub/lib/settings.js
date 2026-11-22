@@ -6,12 +6,13 @@
  * 保存位置：<dataDir>/settings.json（gitignore，和 state.json 同级）。
  * 语言值：'zh-CN'（默认）| 'en'。
  * 主设备（母机）：mainDeviceId；空字符串表示自动使用 Hub 所在的本机设备。
+ * 手机提示音：taskSoundEnabled；false = 静音模式（任务开始/完成不在 APK 上响铃，免打扰模式始终静音）。
  */
 
 const fs = require('node:fs');
 const path = require('node:path');
 
-const DEFAULT_SETTINGS = Object.freeze({ language: 'zh-CN', mainDeviceId: '' });
+const DEFAULT_SETTINGS = Object.freeze({ language: 'zh-CN', mainDeviceId: '', taskSoundEnabled: true });
 const SUPPORTED_LANGUAGES = Object.freeze(['zh-CN', 'en']);
 const LANGUAGE_LABELS = Object.freeze({ 'zh-CN': '简体中文', en: 'English' });
 const MAX_MAIN_DEVICE_ID_LENGTH = 120;
@@ -49,6 +50,19 @@ function assertMainDeviceId(value) {
   return normalizeMainDeviceId(value, '');
 }
 
+/** 手机提示音开关：布尔值；持久化损坏时静默回退默认值。 */
+function normalizeTaskSoundEnabled(value, fallback = DEFAULT_SETTINGS.taskSoundEnabled) {
+  return typeof value === 'boolean' ? value : fallback;
+}
+
+/** 严格校验提示音开关：非布尔值抛错（用于管理端 PATCH）。 */
+function assertTaskSoundEnabled(value) {
+  if (typeof value !== 'boolean') {
+    throw new Error(`taskSoundEnabled 仅支持 true / false，收到：${String(value)}`);
+  }
+  return value;
+}
+
 function mergeSettings(base, patch) {
   const next = { ...DEFAULT_SETTINGS, ...(base && typeof base === 'object' ? base : {}) };
   if (patch && typeof patch === 'object' && patch.language !== undefined) {
@@ -56,6 +70,9 @@ function mergeSettings(base, patch) {
   }
   if (patch && typeof patch === 'object' && patch.mainDeviceId !== undefined) {
     next.mainDeviceId = normalizeMainDeviceId(patch.mainDeviceId, next.mainDeviceId);
+  }
+  if (patch && typeof patch === 'object' && patch.taskSoundEnabled !== undefined) {
+    next.taskSoundEnabled = normalizeTaskSoundEnabled(patch.taskSoundEnabled, next.taskSoundEnabled);
   }
   return next;
 }
@@ -99,6 +116,8 @@ module.exports = {
   assertLanguage,
   normalizeMainDeviceId,
   assertMainDeviceId,
+  normalizeTaskSoundEnabled,
+  assertTaskSoundEnabled,
   mergeSettings,
   settingsFile,
   readSettings,

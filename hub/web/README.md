@@ -97,6 +97,7 @@ node hub/server.js --port 7317
 - 设置面板新增「派发与母机」：下拉选择母机设备或「本机（自动识别）」，调用 `PATCH /api/settings {mainDeviceId}`；保存成功后立即生效并写入 Hub `state.json`，未知设备由 Hub 返回 400「主设备不存在：…」。
 - 派发优先级：显式设备要求 > 项目上次成功设备（项目亲和）> 同一线程上次执行的主机 > 母机 > 常规能力评分；首选主机离线或并发已满时任务排队等待（「亲和等待：…」），不会改派给没有项目上下文的设备；失败任务手动重试会继续留在原主机。
 - 与「系统默认语言」同属 Hub 级设置；设备排序按用途昵称/机器名展示。
+- 设置面板另有「任务提示音」开关：`PATCH /api/settings {taskSoundEnabled}`，关闭后 APK 任务开始/完成不再响铃（浏览器与 DSH 面板本身不响）；开启时若手机处于系统免打扰/静音模式也会自动静音。页面通过 `window.ButlerBridge.setTaskSound(enabled)` 把开关即时同步给原生，APK 的常驻通知服务轮询 snapshot 时也会同步。
 
 ## 头脑风暴（Brainstorm）
 

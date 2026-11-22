@@ -151,7 +151,7 @@ score = 100
 - **计划子任务特例**：`parentTaskId` 非空的子任务若因线程亲和指向的设备离线/并发满，直接回退自动路由（并行子任务不能被单并发设备卡住）；显式 deviceId 与任务原主机不受影响。
 - **失败语义**：`_finishTask(completed)` 记录项目亲和；任务内容层失败保留 `task.affinity`，手动重试回到原主机；`_dispatchFailure`（ack 超时/设备掉线，任务未真正执行）清空 `task.affinity` 并按 `_avoidDeviceIds` 重派，避免把“机器没跑起来”误判成“项目上下文不匹配”。
 - **自动标签**：设备 manifest 的 `tags` 之外，Hub 按「该设备成功执行过哪些项目」推导 `autoTags`（项目名 + 项目别名；`deviceToJson` 下发、`_capabilitiesForMatch` 合并进路由匹配）；任务 `requirements.project` 出现过的标签写入 `state.routing.projectTags` 作为项目别名，大脑写错的项目标签因此能自动匹配；显式 `deviceId` 钉住的设备只缺标签时按无 tags 需求评分派发，缺 model/skills/profile/gateway 仍排除；测试 `hub/test/auto-tags.test.js`。
-- **设置**：`PATCH /api/settings {mainDeviceId}`（空串=本机自动识别；非空必须已注册，未知返回 400「主设备不存在：…」），`state.json` 的 `routing = { projectAffinity, projectTags, mainDeviceId }`；控制台「设置 → 派发与母机」提供下拉选择。
+- **设置**：`PATCH /api/settings {mainDeviceId}`（空串=本机自动识别；非空必须已注册，未知返回 400「主设备不存在：…」），`state.json` 的 `routing = { projectAffinity, projectTags, mainDeviceId }`；同一接口还接受 `language` 与 `taskSoundEnabled`（APK 任务提示音开关，随 snapshot 下发）；控制台「设置 → 派发与母机」提供下拉选择、「设置 → 任务提示音」提供开关。
 - **测试**：`hub/test/routing-affinity.test.js` 覆盖母机优先、线程/项目亲和（含重启恢复）、容量/离线等待、硬 deviceId、失败重试粘性、设置校验；`plan-devices.test.js` 覆盖子任务线程亲和回退。
 
 ### 3.4 命令与执行

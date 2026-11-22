@@ -54,7 +54,7 @@ import java.util.Locale;
 public class MainActivity extends Activity {
 
     private static final String TAG = "SuperButler";
-    private static final String APP_VERSION = "0.1.5";
+    private static final String APP_VERSION = "0.1.7";
     private static final String SETUP_URL = "file:///android_asset/setup.html";
     private static final String ERROR_BASE = "file:///android_asset/error.html";
     private static final String ASSET_BASE = "file:///android_asset/";
@@ -66,11 +66,12 @@ public class MainActivity extends Activity {
     private static final String KEY_PERSISTENT_NOTIFY = "persistent_notification";
 
     private static final String TASK_PROGRESS_CHANNEL = "butler_task_progress";
-    private static final String TASK_DONE_CHANNEL = "butler_task_done";
+    /** 0.1.7 起完成通知由原生侧播放提示音，渠道本身必须静音；旧渠道 butler_task_done 带系统音，弃用。 */
+    private static final String TASK_DONE_CHANNEL = "butler_task_done_v2";
+    private static final String TASK_DONE_CHANNEL_LEGACY = "butler_task_done";
     private static final String DECISION_CHANNEL = "butler_decision";
     private static final int REQ_POST_NOTIFICATIONS = 7301;
     private static final int REQ_FILE_CHOOSER = 7302;
-    private static final int TASK_NOTIFY_BASE = 7300;
 
     /** APK 兜底：任务页默认「进行中」——Web 控制台默认已是「进行中」，注入仅用于兼容旧版 Hub 页面。 */
     private static final String TASK_FILTER_DEFAULT_JS =
@@ -180,6 +181,8 @@ public class MainActivity extends Activity {
         setContentView(root);
 
         createNotificationChannels();
+        // 启动时清理上次遗留/过期的任务通知（含旧版本没有超时机制时卡住的通知）
+        TaskNotificationTracker.sweep(this);
         requestNotificationPermissionIfNeeded();
         if (prefs.getBoolean(KEY_PERSISTENT_NOTIFY, false)) {
             startPersistentNotificationService();
@@ -191,7 +194,8 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        // 首页/前台也主动拉一次提醒并重排闹钟（即使页面暂未调用 Bridge、或常驻服务未开启）
+        // 回到前台时清理过期任务通知，并主动拉一次提醒并重排闹钟
+        TaskNotificationTracker.sweep(this);
         syncRemindersFromHubAsync();
     }
 
@@ -708,11 +712,13 @@ public class MainActivity extends Activity {
         if (nm == null) return;
         NotificationChannel progress = new NotificationChannel(
                 TASK_PROGRESS_CHANNEL, "BattleStar 任务进度", NotificationManager.IMPORTANCE_LOW);
-        progress.setDescription("正在执行的任务进度（常驻通知栏）");
+        progress.setDescription("正在执行的任务进度（常驻通知栏，不响铃）");
         progress.setShowBadge(false);
+        progress.setSound(null, null);
         NotificationChannel done = new NotificationChannel(
                 TASK_DONE_CHANNEL, "BattleStar 任务完成", NotificationManager.IMPORTANCE_DEFAULT);
-        done.setDescription("任务完成、失败或超时提醒");
+        done.setDescription("任务完成、失败或超时提醒；提示音由 App 按设置/免打扰状态播放");
+        done.setSound(null, null);
         // 自主大脑需要主人决定：高优先级，通知栏直接展示可点选项
         NotificationChannel decision = new NotificationChannel(
                 DECISION_CHANNEL, "BattleStar 管家决策", NotificationManager.IMPORTANCE_HIGH);
@@ -720,6 +726,12 @@ public class MainActivity extends Activity {
         nm.createNotificationChannel(progress);
         nm.createNotificationChannel(done);
         nm.createNotificationChannel(decision);
+        // 旧完成渠道自带系统提示音，升级后弃用并删除，避免同一任务双重响铃/设置页出现重复渠道。
+        try {
+            nm.deleteNotificationChannel(TASK_DONE_CHANNEL_LEGACY);
+        } catch (Exception e) {
+            Log.w(TAG, "delete legacy task done channel failed", e);
+        }
         // 提醒事项渠道：gentle（butler_reminders）+ alarm（butler_reminders_alarm），
         // Receiver/开机重排里也会确保创建（进程被杀后 Receiver 可能先于 Activity 运行）
         ReminderScheduler.ensureChannels(this);
@@ -802,7 +814,8 @@ public class MainActivity extends Activity {
             String device = obj.optString("device", "");
             int percent = obj.optInt("percent", -1);
             if (percent > 100) percent = 100;
-            int notifyId = TASK_NOTIFY_BASE + (Math.abs(taskId.hashCode()) % 10000);
+            int notifyId = TaskNotificationTracker.TASK_NOTIFY_BASE
+                    + (Math.abs(taskId.hashCode()) % TaskNotificationTracker.TASK_NOTIFY_COUNT);
             String label = taskStatusLabel(status);
             String channel = finished ? TASK_DONE_CHANNEL : TASK_PROGRESS_CHANNEL;
             int icon = finished
@@ -832,10 +845,22 @@ public class MainActivity extends Activity {
                 }
             } else {
                 b.setOngoing(false).setAutoCancel(true).setOnlyAlertOnce(false).setProgress(0, 0, false);
-                if ("completed".equals(status)) b.setDefaults(Notification.DEFAULT_SOUND);
             }
+            // 超时兜底：系统到点自动移除通知（即使 App 进程被杀、跟踪表不再运行）。
+            b.setTimeoutAfter(TaskNotificationTracker.ttlFor(finished));
             NotificationManager nm = notificationManager();
-            if (nm != null) nm.notify(notifyId, b.build());
+            if (nm != null) {
+                nm.notify(notifyId, b.build());
+                // 记录跟踪信息：App 存活时由 TaskNotificationTracker.sweep 主动取消过期通知
+                boolean first = TaskNotificationTracker.track(this, notifyId, taskId, status, finished);
+                // 提示音：完成/失败每次都响（页面与服务可能重复触发，由 TaskSound 去重）；
+                // 「任务开始」只在该任务第一次出现通知时响一次，后续进度更新保持安静。
+                if (finished) {
+                    TaskSound.playFinished(this, taskId);
+                } else if (first) {
+                    TaskSound.playStart(this, taskId);
+                }
+            }
         } catch (Exception e) {
             Log.w(TAG, "postTaskNotification failed", e);
         }
@@ -1014,10 +1039,28 @@ public class MainActivity extends Activity {
                 o.put("ok", true);
                 o.put("enabled", prefs.getBoolean(KEY_PERSISTENT_NOTIFY, false));
                 o.put("permissionGranted", notificationPermissionGranted());
+                o.put("taskSoundEnabled", TaskSound.isEnabled(MainActivity.this));
+                o.put("dndActive", TaskSound.isDndActive(MainActivity.this));
             } catch (Exception e) {
                 return errorJson("internal", "读取通知设置失败");
             }
             return o.toString();
+        }
+
+        /** 后台「任务提示音」开关由页面同步下来；免打扰/静音模式下即使开启也不响。 */
+        @JavascriptInterface
+        public String setTaskSound(boolean enabled) {
+            if (!bridgeAllowed) return errorJson("forbidden", "仅允许在管家页面调用");
+            try {
+                TaskSound.setEnabled(MainActivity.this, enabled);
+                JSONObject o = new JSONObject();
+                o.put("ok", true);
+                o.put("taskSoundEnabled", TaskSound.isEnabled(MainActivity.this));
+                o.put("dndActive", TaskSound.isDndActive(MainActivity.this));
+                return o.toString();
+            } catch (Exception e) {
+                return errorJson("internal", "设置任务提示音失败");
+            }
         }
 
         @JavascriptInterface

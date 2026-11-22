@@ -1,7 +1,7 @@
 # Android APK：安装、使用与构建
 
-产物：`dist/BattleStar-0.1.5.apk`（132,019 bytes，约 0.13 MB）
-包名：`com.superbutler.app` · minSdk 26（Android 8.0+）· targetSdk 36 · versionCode 6 · versionName 0.1.5
+产物：`dist/BattleStar-0.1.7.apk`（约 0.13 MB）
+包名：`com.superbutler.app` · minSdk 26（Android 8.0+）· targetSdk 36 · versionCode 8 · versionName 0.1.7
 
 App 名称：**BattleStar**（包名仍为 `com.superbutler.app`，可覆盖安装旧版）。
 App 是一个轻量原生 WebView 壳：首次启动自动扫描局域网中的 Hub；发现后填管理员令牌，之后直接加载 `/m?token=...`。
@@ -68,7 +68,8 @@ adb install -r dist/BattleStar-0.1.5.apk
 - **任务**：实时进度、输出、事件时间线、取消/重试。
 - **任务通知**：
   - 任务进入 `queued / assigned / running` 时，手机通知栏出现**常驻进度条**（有百分比显示百分比，否则为不确定进度）；
-  - 任务 `completed / failed / timeout / cancelled` 时更新为完成/失败通知，完成时播放提示音；
+  - 任务 `completed / failed / timeout / cancelled` 时更新为完成/失败通知；进度通知 30 分钟无更新、完成通知 10 分钟后自动消失（0.1.6 起：原生 `TaskNotificationTracker` 跟踪 + 快照对账兜底）；
+  - 任务开始（第一次出现进度）与任务结束（完成/失败/超时/取消）时响一声系统通知音（0.1.7 起）：系统免打扰/静音模式自动不响，控制台「设置 → 任务提示音」可一键静音（Hub 设置 `taskSoundEnabled`，后台服务也会同步）；
   - Android 13+ 首次启动会请求通知权限；拒绝后可在系统设置中开启；
   - 点击通知回到 APK 控制台。
 - **提醒通知**：
@@ -91,7 +92,7 @@ adb install -r dist/BattleStar-0.1.5.apk
   - 关闭开关会停止前台服务并移除常驻通知。
 - **实时**：SSE 推送，断线自动重连；不可用时降级 5 秒轮询。
 
-> 任务通知由 WebView 页面通过 `ButlerBridge.taskProgress / taskFinished` 驱动；常驻通知由原生前台服务轮询 Hub；两者在系统强行停止 App 后都会停止更新。
+> 任务通知由 WebView 页面通过 `ButlerBridge.taskProgress / taskFinished` 驱动；常驻通知由原生前台服务轮询 Hub；两者在系统强行停止 App 后都会停止更新。0.1.6 起原生侧对任务通知做超时清理；0.1.7 起任务开始/结束提示音由原生播放，遵循系统免打扰与控制台静音开关。
 > **提醒通知不同**：由原生 `AlarmManager` + `ReminderReceiver` 驱动，不依赖 WebView 页面，App 被杀/重启后仍有效；`notifyStyle` 决定使用普通提示音还是闹钟铃音+长震动。
 
 ## 4. 从源码构建
@@ -169,28 +170,28 @@ toolchain\jdk\bin\java.exe -jar toolchain\android-sdk\build-tools\36.0.0\lib\apk
 toolchain\android-sdk\build-tools\36.0.0\zipalign.exe -c -v 4 dist\BattleStar-0.1.5.apk
 ```
 
-本机实测（2026-11-10）：
+本机实测（2026-11-21）：
 
 | 检查 | 结果 |
 | --- | --- |
-| package / version | `com.superbutler.app` / versionCode 6 / versionName 0.1.5 |
+| package / version | `com.superbutler.app` / versionCode 8 / versionName 0.1.7 |
 | minSdk / targetSdk | 26 / 36 |
 | 权限 | INTERNET / POST_NOTIFICATIONS / RECEIVE_BOOT_COMPLETED / SCHEDULE_EXACT_ALARM / FOREGROUND_SERVICE(_DATA_SYNC / _SPECIAL_USE) |
 | 组件 | `MainActivity`（launcher）、`ButlerNotificationService`、`ReminderReceiver`(exported=false)、`BootReceiver`(exported=false) |
 | apksigner verify | v1/v2/v3 有效 |
 | zipalign | Verification successful |
-| 体积 | 132,019 bytes |
-| SHA256 | `47FC088B5499BC65E3CFCF006C34DB9A9CC99DC40F2EF55DE14342A61E1DED62`（重新构建会因打包时间戳不同而改变） |
+| 体积 | 136,115 bytes |
+| SHA256 | `0599DC680BE5E7BD2FFB562FB3667699A2F0501A91AB70BC5C8D1EB80B2CAA84`（重新构建会因打包时间戳不同而改变） |
 
 ## 5. 实现说明
 
 - 单 Activity + WebView，纯 Java（无 Kotlin/AndroidX）。
 - 首启加载 `file:///android_asset/setup.html`；配置保存到应用私有 `SharedPreferences`。
-- JS Bridge：`getConfig / saveConfig / clearConfig / openDashboard / openSetup / testConnection / appVersion / toast / startDiscovery / getDiscovery / taskProgress / taskFinished / getNotificationSettings / setPersistentNotification / syncReminders / getReminderStatus`；
+- JS Bridge：`getConfig / saveConfig / clearConfig / openDashboard / openSetup / testConnection / appVersion / toast / startDiscovery / getDiscovery / taskProgress / taskFinished / getNotificationSettings / setTaskSound / setPersistentNotification / syncReminders / getReminderStatus`；
   只在本地配置页与「已配置 Hub 的同主机页面」注入，方法内部再次校验来源，URL 仅接受 http(s)。
 - 提醒：`ReminderScheduler`（本地 JSON 缓存 + `AlarmManager` 排程 + 双渠道创建）、`ReminderReceiver`（按 `notifyStyle` 选渠道发通知 + 本地推进 + `POST /api/reminders/:id/fire` 回写）、`BootReceiver`（开机/升级后重排）。通知 id 从 7500 起（任务 7300、常驻 7400），精确闹钟不可用时自动回退 non-exact。`gentle` 走 `butler_reminders`（普通提示音），`alarm` 走 `butler_reminders_alarm`（`USAGE_ALARM` 闹钟音 + 长震动）。
 - 测试连接走原生 `HttpURLConnection`，避免 `file://` → `http://` 的 CORS 问题。
-- WebView 开启 JS / DOM storage / 宽视口 / mixed content；UA 追加 `SuperButlerApp/0.1.5`。
+- WebView 开启 JS / DOM storage / 宽视口 / mixed content；UA 追加 `SuperButlerApp/0.1.7`。
 - 错误页（加载失败）提供「重试 / 修改配置」；返回键可后退则后退，否则退出。
 - targetSdk 36 已做 Android 15+ edge-to-edge insets 适配。
 
@@ -214,6 +215,7 @@ toolchain\android-sdk\build-tools\36.0.0\zipalign.exe -c -v 4 dist\BattleStar-0.
 - 无服务端推送、离线缓存、下拉刷新、自适应图标、扫码配对（v1 范围）；任务通知依赖 WebView 页面运行，App 被系统彻底杀死后不再更新。**提醒通知例外**：由原生 `AlarmManager` 发送，不依赖页面；但精确闹钟权限被撤销时会退化为非精确（Doze 下可能延迟数分钟）。「闹钟」方式只是高优先级通知 + 闹钟铃音/长震动（非系统级闹钟 App，不会全屏），受勿扰模式/音量/渠道设置影响。
 - 自动发现只扫描当前 Wi-Fi 的 `/24` 网段和指定端口；不同网段/VLAN 或防火墙拦截时需手动填写或放行 7317。
 - 通知权限（Android 13+）需用户在首次启动时允许；未授权时任务与提醒照常排程/回写，只是不显示通知。
+- 任务提示音（0.1.7+）：任务开始/结束由原生播放系统默认通知音；系统免打扰（勿扰）或静音模式自动不响，控制台「设置 → 任务提示音」可一键静音（`taskSoundEnabled`）。若系统未设置默认通知音则无声；任务通知渠道本身静音，用户对渠道的静音设置不影响独立播放的任务提示音。
 - 决策通知栏最多 3 个动作按钮（Android 通知 actions 上限）；选项更多时点通知进入 App 的「自主大脑」卡片选择。
 - 常驻通知依赖前台服务轮询 Hub（默认 5 秒）；Hub 不可达时通知会显示“无法连接 Hub”。
 - **Android 15 前台服务超时**：系统对 `dataSync` 类型前台服务有 6 小时/24 小时运行上限，超时未停会抛 `ForegroundServiceDidNotStopInTimeException` 杀死整个 App（0.1.2 在真机上即因此反复闪退）。0.1.3 起常驻通知改用 `specialUse` 类型（`FOREGROUND_SERVICE_SPECIAL_USE`，Manifest 中声明 `dataSync|specialUse`，Android 10-13 回退 `dataSync`），并实现 `Service.onTimeout()` 兜底：即使系统触发超时也只会优雅停止服务、移除常驻通知，不再崩溃。

@@ -38,6 +38,8 @@ public class ButlerNotificationService extends Service {
     private static final String PREFS_NAME = "butler_config";
     private static final String KEY_HUB = "hub_url";
     private static final String KEY_TOKEN = "admin_token";
+    /** 上一次观察到的活动任务 id：用于后台播报「开始」与「完成」提示音。 */
+    private static final String KEY_LAST_ACTIVE_TASK = "task_sound_last_active";
 
     private volatile boolean running = true;
     private Thread worker;
@@ -156,6 +158,9 @@ public class ButlerNotificationService extends Service {
             return;
         }
 
+        // 后台也遵循 Hub 的「任务提示音」开关：页面没打开时设置依然生效
+        syncTaskSoundSetting(snapshot);
+
         // 每次 snapshot 轮询顺便把提醒同步到原生闹钟（App 停在后台也能排程）
         syncReminders(snapshot);
 
@@ -163,7 +168,12 @@ public class ButlerNotificationService extends Service {
         syncBrainAsk(snapshot);
 
         JSONArray tasks = snapshot.optJSONArray("tasks");
+        // 任务通知兜底：先清过期/遗留通知，再按 snapshot 修正「任务已结束但通知仍卡在进行中」
+        TaskNotificationTracker.sweep(this);
+        reconcileTaskNotifications(tasks);
         JSONObject active = findActiveTask(tasks);
+        // 后台提示音：页面在后台/被系统回收时，也由这里播报任务开始与结束
+        playTaskSounds(active);
         if (active != null) {
             String instruction = active.optString("instruction", "任务执行中");
             String status = active.optString("status", "running");
@@ -194,6 +204,74 @@ public class ButlerNotificationService extends Service {
         String text = online + " 台在线 · " + idle + " 台待命";
         if (total > online) text += "（共 " + total + " 台）";
         publish("BattleStar · 待命中", text, "无进行中任务", -1);
+    }
+
+    /**
+     * 后台任务提示音：snapshot 里出现「新的活动任务」时播开始音；上一个活动任务从活动位
+     * 消失（完成/失败/超时/取消，或换成了下一个任务）时播完成音并清除记录。
+     * 与页面侧的提示音使用同一套去重窗口，避免同时响两次。
+     */
+    private void playTaskSounds(JSONObject active) {
+        try {
+            String activeId = active == null ? "" : active.optString("id", "");
+            String lastId = prefs.getString(KEY_LAST_ACTIVE_TASK, "");
+            if (!activeId.isEmpty()) {
+                if (!activeId.equals(lastId)) {
+                    if (!lastId.isEmpty()) TaskSound.playFinished(this, lastId);
+                    TaskSound.playStart(this, activeId);
+                    prefs.edit().putString(KEY_LAST_ACTIVE_TASK, activeId).apply();
+                }
+            } else if (!lastId.isEmpty()) {
+                TaskSound.playFinished(this, lastId);
+                prefs.edit().remove(KEY_LAST_ACTIVE_TASK).apply();
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "play task sounds failed", e);
+        }
+    }
+
+    /** 把 Hub 设置里的 taskSoundEnabled 同步到本地；未下发时保持原设置。 */
+    private void syncTaskSoundSetting(JSONObject snapshot) {
+        try {
+            JSONObject settings = snapshot.optJSONObject("settings");
+            if (settings == null || !settings.has("taskSoundEnabled")) return;
+            TaskSound.setEnabled(this, settings.optBoolean("taskSoundEnabled", true));
+        } catch (Exception e) {
+            Log.w(TAG, "sync task sound setting failed", e);
+        }
+    }
+
+    /**
+     * 页面刷新/重启会丢掉「任务已结束」事件，导致进度通知一直卡住；这里用 snapshot 兜底：
+     * 已跟踪的「进行中」通知，只要对应任务在 snapshot 中已是终态，就直接取消。
+     * 已被完成事件覆盖的通知（finished=true）不动，其余仍由超时机制兜底。
+     */
+    private void reconcileTaskNotifications(JSONArray tasks) {
+        try {
+            if (tasks == null) return;
+            java.util.Map<String, String> statusById = new java.util.HashMap<>();
+            for (int i = 0; i < tasks.length(); i++) {
+                JSONObject task = tasks.optJSONObject(i);
+                if (task == null) continue;
+                String id = task.optString("id", "");
+                if (id.isEmpty()) continue;
+                statusById.put(id, task.optString("status", ""));
+            }
+            if (statusById.isEmpty()) return;
+            for (TaskNotificationTracker.Entry entry : TaskNotificationTracker.snapshot(this)) {
+                if (entry.finished) continue;
+                String status = statusById.get(entry.taskId);
+                if (status == null || !isTerminalStatus(status)) continue;
+                TaskNotificationTracker.cancelTask(this, entry.taskId, true);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "reconcile task notifications failed", e);
+        }
+    }
+
+    private static boolean isTerminalStatus(String status) {
+        return "completed".equals(status) || "failed".equals(status)
+                || "timeout".equals(status) || "cancelled".equals(status);
     }
 
     /** snapshot 里的 reminders 数组交给 ReminderScheduler 全量同步（失败不影响常驻通知）。 */

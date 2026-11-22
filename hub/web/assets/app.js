@@ -972,6 +972,7 @@
     if (!settings) return;
     state.settings = settings;
     applyLanguageFromServer(settings.language);
+    syncTaskSoundToBridge();
     refreshSettings();
   }
 
@@ -990,6 +991,7 @@
     if (data.settings && typeof data.settings === 'object') {
       state.settings = data.settings;
       applyLanguageFromServer(data.settings.language);
+      syncTaskSoundToBridge();
     }
     if (Array.isArray(data.events)) state.activity = data.events.slice();
     if (Array.isArray(data.goals)) {
@@ -1074,6 +1076,17 @@
     if (taskNotifyState.size > 100) {
       const keep = new Set(state.tasks.slice(0, 100).map((t) => t.id));
       for (const id of taskNotifyState.keys()) if (!keep.has(id)) taskNotifyState.delete(id);
+    }
+  }
+
+  /** 把「手机提示音」开关同步给 APK 原生层（浏览器中没有 ButlerBridge，自动忽略）。 */
+  function syncTaskSoundToBridge() {
+    try {
+      const bridge = window.ButlerBridge;
+      if (!bridge || typeof bridge.setTaskSound !== 'function') return;
+      bridge.setTaskSound(!!(state.settings && state.settings.taskSoundEnabled !== false));
+    } catch (e) {
+      // 提示音设置同步失败不影响主界面
     }
   }
 
@@ -7026,6 +7039,39 @@
         }
       });
     }
+
+    // 手机提示音：任务开始/完成时在 APK 上响铃；系统免打扰模式自动静音。
+    const soundEnabled = !(state.settings && state.settings.taskSoundEnabled === false);
+    const soundToggle = el('input', { type: 'checkbox', id: 'task-sound-toggle' });
+    soundToggle.checked = soundEnabled;
+    const soundDescribe = (enabled) => (enabled
+      ? '已开启：任务开始与完成时手机会响铃；系统「免打扰」模式下自动静音。'
+      : '已静音：任务开始/完成不再响铃（系统「免打扰」模式下始终静音）。');
+    const soundStatus = el('p', { className: 'settings-note', text: soundDescribe(soundEnabled) });
+    soundToggle.addEventListener('change', async () => {
+      const target = soundToggle.checked;
+      soundToggle.disabled = true;
+      try {
+        const res = await api('/api/settings', { method: 'PATCH', body: { taskSoundEnabled: target } });
+        if (res && res.settings && typeof res.settings === 'object') state.settings = res.settings;
+        syncTaskSoundToBridge();
+        soundStatus.textContent = soundDescribe(target);
+        toast(target ? '任务提示音已开启' : '任务提示音已静音', 'success');
+      } catch (err) {
+        soundToggle.checked = !target;
+        toast(err.message || '保存提示音设置失败', 'error');
+      } finally {
+        soundToggle.disabled = false;
+      }
+    });
+    const soundSection = el('section', { className: 'settings-section' },
+      el('h3', { text: '任务提示音' }),
+      el('label', { className: 'settings-note', style: { display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' } },
+        soundToggle, ' 任务开始 / 完成时在手机响铃'),
+      soundStatus,
+      el('p', { className: 'settings-note', text: '提示音由手机 APK 播放；浏览器和 DSH 面板本身不响。静音后只保留通知，不响铃。' }),
+    );
+    wrap.appendChild(soundSection);
 
     const languageSection = el('section', { className: 'settings-section' },
       el('h3', { text: tr('settings.languageSection') }),

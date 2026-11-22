@@ -21,6 +21,7 @@ const {
   SUPPORTED_LANGUAGES,
   assertLanguage,
   assertMainDeviceId,
+  assertTaskSoundEnabled,
   mergeSettings,
   readSettings,
   writeSettings,
@@ -992,9 +993,9 @@ class Hub {
   }
 
   /**
-   * 更新系统设置（language / mainDeviceId）。
-   * @param {{language?: string, mainDeviceId?: string}} patch
-   * @returns {{language:string, mainDeviceId:string}}
+   * 更新系统设置（language / mainDeviceId / taskSoundEnabled）。
+   * @param {{language?: string, mainDeviceId?: string, taskSoundEnabled?: boolean}} patch
+   * @returns {{language:string, mainDeviceId:string, taskSoundEnabled:boolean}}
    */
   updateSettings(patch = {}) {
     const input = util.isPlainObject(patch) ? patch : {};
@@ -1017,6 +1018,13 @@ class Hub {
         throw badRequest(`主设备不存在：${next.mainDeviceId}`);
       }
     }
+    if (input.taskSoundEnabled !== undefined) {
+      try {
+        next.taskSoundEnabled = assertTaskSoundEnabled(input.taskSoundEnabled);
+      } catch (err) {
+        throw badRequest(err.message);
+      }
+    }
     const changed = JSON.stringify(next) !== JSON.stringify(this.settings);
     if (!changed) return this.getSettings();
     this.settings = next;
@@ -1026,7 +1034,7 @@ class Hub {
       this.log('warn', `系统设置写入失败：${err && err.message ? err.message : err}`);
     }
     this.broadcast('settings.updated', { settings: this.getSettings(), at: protocol.nowIso() });
-    this.log('info', `系统设置更新：language=${this.settings.language} mainDeviceId=${this.settings.mainDeviceId || '(本机)'}`);
+    this.log('info', `系统设置更新：language=${this.settings.language} mainDeviceId=${this.settings.mainDeviceId || '(本机)'} taskSoundEnabled=${this.settings.taskSoundEnabled !== false}`);
     this.schedulePersist();
     return this.getSettings();
   }
