@@ -361,7 +361,23 @@ async function handleRequest(hub, req, res) {
     requireAdmin(hub, req, url);
     if (method !== 'GET') throw notFound('接口不存在');
     const limit = util.clampInt(queryNumber(url, 'limit'), 50, 1, 200);
-    return sendJson(res, 200, { ...hub.snapshot(limit), dshBridge: { url: dshBridgeUrl(hub) } });
+    return sendJson(res, 200, {
+      ...hub.snapshot(limit),
+      joinCode: hub.joinCode,
+      dshBridge: { url: dshBridgeUrl(hub) },
+    });
+  }
+
+  // 加入码管理：GET 供控制台显示；POST 轮换（母机改一次，在线设备下一次心跳自动同步）。
+  if (pathname === '/api/admin/join-code') {
+    requireAdmin(hub, req, url);
+    if (method === 'GET') {
+      return sendJson(res, 200, { joinCode: hub.joinCode, hubTime: protocol.nowIso() });
+    }
+    if (method !== 'POST') throw notFound('接口不存在');
+    await readJsonBody(req);
+    const joinCode = hub.rotateJoinCode();
+    return sendJson(res, 200, { joinCode, hubTime: protocol.nowIso() });
   }
 
   if (pathname === '/api/settings') {
@@ -370,6 +386,7 @@ async function handleRequest(hub, req, res) {
       return sendJson(res, 200, {
         settings: hub.getSettings(),
         supportedLanguages: hub.getSupportedLanguages(),
+        joinCode: hub.joinCode,
         hubTime: protocol.nowIso(),
       });
     }
@@ -999,6 +1016,8 @@ async function handleRegister(hub, req, res) {
       deviceToken: device.deviceToken,
       heartbeatIntervalMs: hub.heartbeatIntervalMs,
       ttlSec: Math.max(1, Math.round(hub.ttlMs / 1000)),
+      // 当前加入码随注册响应下发，设备保存后令牌失效时可直接重注册（母机轮换后自动同步）。
+      joinCode: hub.joinCode,
       hubTime: protocol.nowIso(),
     });
   };
@@ -1048,6 +1067,8 @@ async function handleDeviceScoped(hub, req, res, url, method, deviceId, rest) {
       hubTime: protocol.nowIso(),
       heartbeatIntervalMs: hub.heartbeatIntervalMs,
       ttlSec: Math.max(1, Math.round(hub.ttlMs / 1000)),
+      // 加入码下发通道：母机轮换后在线设备靠这条心跳值自动同步本地保存的加入码。
+      joinCode: hub.joinCode,
       commands: result.commands,
     });
   }
@@ -1056,7 +1077,7 @@ async function handleDeviceScoped(hub, req, res, url, method, deviceId, rest) {
     if (method !== 'POST') throw notFound('接口不存在');
     const body = await readJsonBody(req);
     hub.updateDeviceManifest(device, body);
-    return sendJson(res, 200, { ok: true, device: hub.deviceToJson(device) });
+    return sendJson(res, 200, { ok: true, device: hub.deviceToJson(device), joinCode: hub.joinCode });
   }
 
   if (rest === 'commands') {

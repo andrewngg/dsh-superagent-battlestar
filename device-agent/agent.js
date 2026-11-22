@@ -122,6 +122,9 @@ class Agent {
 
     this.hubUrl = normalizeBaseUrl(options.hub || this.config.hub || DEFAULTS.hub);
     this.joinCode = options.joinCode || this.config.joinCode || this.env.BUTLER_JOIN_CODE || null;
+    // 显式传入的加入码（CLI/config/env）优先于本地保存的码，用于人工救援；
+    // 未显式指定时启动会采用状态文件里由 Hub 同步下来的最新码。
+    this._joinCodeExplicit = Boolean(options.joinCode || this.config.joinCode || this.env.BUTLER_JOIN_CODE);
     this.autoDiscover = options.discoverHub !== undefined
       ? options.discoverHub !== false
       : this.config.discoverHub !== false;
@@ -230,6 +233,14 @@ class Agent {
         );
         this.state = null;
       }
+    }
+    // Hub 轮换加入码后会在心跳里同步，代理把新码存进状态文件；
+    // 未显式传 --join-code 时优先用这份最新码，重启或令牌失效后直接就能重注册。
+    if (!this._joinCodeExplicit && this.state && nonEmptyString(this.state.joinCode)) {
+      if (this.joinCode !== this.state.joinCode) {
+        this.log.info('使用状态文件里同步保存的设备加入码');
+      }
+      this.joinCode = this.state.joinCode;
     }
 
     // 2. 能力探测 + config 合并
@@ -380,6 +391,8 @@ class Agent {
       try {
         const res = await resumeClient.updateManifest(this.manifest);
         this.client = resumeClient;
+        // manifest 响应也带当前加入码：母机轮换过也能顺手同步，不必等心跳。
+        await this._syncJoinCode(res.json && res.json.joinCode);
         this.device = this._deviceFromManifest(res.json && res.json.device);
         this.stats.registeredAt = this.stats.registeredAt || this.state.registeredAt || new Date().toISOString();
         if (this.state.hub !== this.hubUrl) {
@@ -447,6 +460,8 @@ class Agent {
       hub: this.hubUrl,
       deviceId: body.deviceId,
       deviceToken: body.deviceToken,
+      // 保存当前加入码：令牌失效后可无人工介入重注册；母机轮换后心跳会刷新此值。
+      joinCode: nonEmptyString(body.joinCode) ? body.joinCode : this.joinCode,
       name: this.manifest.name,
       platform: this.manifest.platform,
       kind: this.manifest.kind,
@@ -462,6 +477,33 @@ class Agent {
     }
     this._onConnected();
     return this.device;
+  }
+
+  /**
+   * 同步 Hub 下发的加入码（注册 / manifest / 心跳响应）。
+   *
+   * 母机轮换加入码后，在线设备靠这里自动更新并写回状态文件；
+   * 之后设备令牌失效需要重新注册时，直接用最新码，无需人工改各工作机启动参数。
+   * @param {unknown} code
+   * @returns {Promise<boolean>} 是否发生了更新
+   */
+  async _syncJoinCode(code) {
+    if (!nonEmptyString(code)) return false;
+    const next = code.trim().slice(0, 100);
+    if (!next || next === this.joinCode) return false;
+    this.joinCode = next;
+    if (this.state) {
+      this.state = { ...this.state, joinCode: next };
+      try {
+        await saveState(this.stateFile, this.state);
+        this.log.info('已同步 Hub 最新设备加入码（用于令牌失效后重新注册）');
+      } catch (err) {
+        this.log.warn(`保存同步的加入码失败：${err.message}`);
+      }
+    } else {
+      this.log.info('已同步 Hub 最新设备加入码（尚未注册，仅保存在内存）');
+    }
+    return true;
   }
 
   _deviceFromManifest(device, fallbackId) {
@@ -539,6 +581,8 @@ class Agent {
     const res = await this.client.heartbeat(payload);
     const body = (res.json && typeof res.json === 'object' && res.json) || {};
     this.stats.heartbeats += 1;
+    // 加入码下发通道：母机轮换后这里自动同步，令牌失效时用新码重注册。
+    await this._syncJoinCode(body.joinCode);
     if (Number.isFinite(body.heartbeatIntervalMs)) {
       this.intervalMs = clampInt(body.heartbeatIntervalMs, DEFAULTS.minHeartbeatMs, DEFAULTS.maxHeartbeatMs, this.intervalMs);
     }

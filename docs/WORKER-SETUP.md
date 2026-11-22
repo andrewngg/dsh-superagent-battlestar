@@ -205,6 +205,15 @@ node device-agent/agent.js `
 
 首次注册后，设备令牌保存在 `device-agent/.state/worker/`；重启会复用，不会重复占号。
 
+### 加入码轮换与自动同步
+
+母机在控制台「设置 → 设备加入码」点「轮换加入码」（或调 `POST /api/admin/join-code`）后，旧码立即作废，但**已注册工作机不受影响**：
+
+- Hub 会在注册 / manifest / 心跳响应里带上当前 `joinCode`，在线工作机在下一次心跳自动同步，并写入 `device-agent/.state/...` 的状态文件；
+- 工作机启动时若**没有**显式传 `--join-code`（也没有 `config.joinCode` / `BUTLER_JOIN_CODE`），会优先使用状态文件里同步下来的最新加入码，重启或令牌失效后可直接重注册，无需逐台改启动参数；
+- 显式传入的 `--join-code` 优先级最高（人工救援用）；两边都有时以启动参数为准。
+- 轮换只挡住「新设备加入」。要彻底撤销某台工作机，请在控制台设备列表删除该设备（`DELETE /api/devices/:id`），并清理它本地的 `device-agent/.state/` 目录。
+
 ### 保持运行（推荐）
 
 - Windows：`Start-Process node -ArgumentList ... -WindowStyle Hidden`，或任务计划程序；

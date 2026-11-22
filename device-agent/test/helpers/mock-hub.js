@@ -203,7 +203,7 @@ class MockHub {
         device.manifest = body;
         if (typeof body.name === 'string') device.name = body.name;
         this.records.manifests.push({ deviceId, body, headers: req.headers });
-        send(res, 200, { ok: true, device });
+        send(res, 200, { ok: true, device, joinCode: this.joinCode });
         return;
       }
       if (method === 'POST' && parts[3] === 'heartbeat') {
@@ -217,6 +217,7 @@ class MockHub {
           hubTime: nowIso(),
           heartbeatIntervalMs: this.heartbeatIntervalMs,
           ttlSec: 30,
+          joinCode: this.joinCode,
           commands,
         });
         return;
@@ -282,6 +283,7 @@ class MockHub {
         deviceToken: providedToken,
         heartbeatIntervalMs: this.heartbeatIntervalMs,
         ttlSec: 30,
+        joinCode: this.joinCode,
         hubTime: nowIso(),
       });
       return;
@@ -311,6 +313,7 @@ class MockHub {
       deviceToken: token,
       heartbeatIntervalMs: this.heartbeatIntervalMs,
       ttlSec: 30,
+      joinCode: this.joinCode,
       hubTime: nowIso(),
     });
   }

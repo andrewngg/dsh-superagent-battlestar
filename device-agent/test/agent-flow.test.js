@@ -400,6 +400,67 @@ test('令牌失效：心跳 401 后自动用加入码重新注册并继续执行
   }
 });
 
+test('加入码自动同步：心跳下发新码后持久化，重启仅凭状态文件即可重注册', async () => {
+  const hub = new MockHub();
+  await hub.listen();
+  const stateDir = await makeTempDir();
+  const agent = createAgent(hub, stateDir);
+  try {
+    await agent.start();
+    // 母机轮换加入码：在线设备下一次心跳自动同步
+    hub.joinCode = 'test-join-rotated';
+    await hub.waitFor(() => agent.joinCode === 'test-join-rotated', {
+      timeoutMs: 5000,
+      label: '心跳同步加入码',
+    });
+    const saved = JSON.parse(await fsp.readFile(agent.stateFile, 'utf8'));
+    assert.equal(saved.joinCode, 'test-join-rotated');
+    await agent.stop({ unregister: false });
+
+    // 模拟 Hub 侧登记丢失（令牌失效）；新进程没有 --join-code，只能用状态文件里的码
+    hub.devices.clear();
+    const restarted = createAgent(hub, stateDir, { joinCode: '' });
+    try {
+      const device = await restarted.start();
+      assert.ok(device && device.id);
+      const lastRegister = hub.records.registers[hub.records.registers.length - 1];
+      assert.equal(lastRegister.headers['x-butler-join-code'], 'test-join-rotated');
+      assert.equal(hub.records.registers.length, 2);
+    } finally {
+      await restarted.stop({ unregister: false });
+    }
+  } finally {
+    await agent.stop({ unregister: false });
+    await hub.close();
+    await fsp.rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test('加入码自动同步：令牌失效重注册时使用同步到的最新码', async () => {
+  const hub = new MockHub();
+  await hub.listen();
+  const stateDir = await makeTempDir();
+  const agent = createAgent(hub, stateDir);
+  try {
+    await agent.start();
+    const firstId = agent.device.id;
+    hub.joinCode = 'test-join-rotated-2';
+    await hub.waitFor(() => agent.joinCode === 'test-join-rotated-2', {
+      timeoutMs: 5000,
+      label: '心跳同步加入码',
+    });
+    // 模拟 Hub 侧令牌轮换
+    hub.devices.get(firstId).token = 'rotated-token';
+    await hub.waitFor(() => hub.records.registers.length >= 2, { timeoutMs: 10000, label: '重新注册' });
+    const reRegister = hub.records.registers[1];
+    assert.equal(reRegister.headers['x-butler-join-code'], 'test-join-rotated-2');
+  } finally {
+    await agent.stop({ unregister: false });
+    await hub.close();
+    await fsp.rm(stateDir, { recursive: true, force: true });
+  }
+});
+
 test('--once 单次运行：注册 → 心跳领命令 → 执行 → 退出（不注销）', async () => {
   const hub = new MockHub();
   await hub.listen();

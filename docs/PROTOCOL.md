@@ -26,6 +26,7 @@
 | 设备令牌 `deviceToken` | 已注册设备的心跳/命令/回报 | `X-Butler-Device-Token: <token>` |
 
 - Hub 首次启动生成 `adminToken` 与 `joinCode`，保存到 `hub/data/state.json`，并在控制台启动日志打印。也可用环境变量 `BUTLER_ADMIN_TOKEN` / `BUTLER_JOIN_CODE` 固定。
+- 加入码轮换（母机一改，全网同步）：控制台「设备加入码 → 轮换加入码」或 `POST /api/admin/join-code`（管理员令牌）会生成新码并持久化。Hub 在**注册 / manifest / 心跳响应**里回传当前 `joinCode`，在线设备自动同步并写进本地状态文件（`device-agent/.state/*.json`）；设备未显式传 `--join-code` 时，重启或令牌失效后直接使用这份同步值重注册。已注册设备的设备令牌不受轮换影响。
 - 错误格式统一：`{ "error": { "code": "unauthorized|forbidden|not_found|bad_request|conflict|rate_limited|internal", "message": "..." } }`，HTTP 状态码对应 401/403/404/400/409/429/500。
 - 设备令牌只能访问自己的 `/api/devices/:id/*` 路径；管理员令牌可访问全部。
 
@@ -96,15 +97,15 @@ assigned/running ──timeout──▶ retry（maxAttempts 内自动重排，�
 `POST /api/devices/register`
 Headers: `X-Butler-Join-Code`（首次注册必需；携带已注册 `deviceId` + 有效设备令牌时视为更新 manifest，可不用加入码）
 Body: manifest（见 §3）
-Resp: `{ deviceId, deviceToken, heartbeatIntervalMs:10000, ttlSec:30, hubTime }`
+Resp: `{ deviceId, deviceToken, heartbeatIntervalMs:10000, ttlSec:30, joinCode, hubTime }`（`joinCode` 为当前加入码，设备保存后令牌失效时可自动重注册）
 
 ### 5.3 设备运行时（设备令牌）
 
 `POST /api/devices/:id/heartbeat`
 Body: `{ status, load:{ running, max }, metrics:{ cpuPct?, memPct?, uptimeSec? }, taskIds?:[] }`
-Resp: `{ ok:true, hubTime, heartbeatIntervalMs, ttlSec, commands:[Command] }`（把待执行命令顺带下发，减少延迟）
+Resp: `{ ok:true, hubTime, heartbeatIntervalMs, ttlSec, joinCode, commands:[Command] }`（把待执行命令顺带下发，减少延迟；`joinCode` 为加入码同步通道——母机轮换后设备下一次心跳即可更新）
 
-`POST /api/devices/:id/manifest` → `{ ok:true, device }`
+`POST /api/devices/:id/manifest` → `{ ok:true, device, joinCode }`
 
 `GET /api/devices/:id/commands?waitMs=25000&limit=5` — 长轮询：有命令立即返回，否则最多挂起 `waitMs`（上限 30000），超时返回空数组。
 Resp: `{ commands:[Command] }`
@@ -127,9 +128,10 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
 
 ### 5.4 手机/控制台（管理员令牌）
 
-- `GET /api/snapshot?limit=50` → `{ server:{version,uptimeSec,hubTime}, settings:{language,mainDeviceId,taskSoundEnabled}, stats:{...}, devices:[Device], tasks:[Task], goals:[Goal], reminders:[Reminder], events:[Event] }`
-- `GET /api/settings` → `{ settings:{ language, mainDeviceId, taskSoundEnabled }, supportedLanguages:['zh-CN','en'], hubTime }`
+- `GET /api/snapshot?limit=50` → `{ server:{version,uptimeSec,hubTime}, settings:{language,mainDeviceId,taskSoundEnabled}, joinCode, stats:{...}, devices:[Device], tasks:[Task], goals:[Goal], reminders:[Reminder], events:[Event] }`
+- `GET /api/settings` → `{ settings:{ language, mainDeviceId, taskSoundEnabled }, supportedLanguages:['zh-CN','en'], joinCode, hubTime }`
 - `PATCH|PUT /api/settings` body `{ language?:'zh-CN'|'en', mainDeviceId?:string, taskSoundEnabled?:boolean }` → `{ settings, hubTime }`；`mainDeviceId` 为空字符串表示「本机自动识别」，非空必须是已注册设备 id（否则 400「主设备不存在：…」），最长 120 字符；`taskSoundEnabled` 必须为布尔值（否则 400），false 表示 APK 任务提示音静音（系统免打扰模式仍会自动静音）；持久化到 `<dataDir>/settings.json`，并广播 SSE `settings.updated`。
+- `GET /api/admin/join-code` → `{ joinCode, hubTime }`；`POST /api/admin/join-code`（管理员令牌，不需要 body）→ `{ joinCode, hubTime }`：轮换设备加入码并持久化到 `state.json`，同时广播 SSE `joinCode.updated`（`record:false`，不写进事件历史）。在线设备在下一次心跳自动同步；已注册设备令牌不受影响。
 - `GET /api/goals?status=` → `{ goals:[Goal], hubTime }`
 - `POST /api/goals` body `{ title, nickname?, description?, schedule?, requirements? }` → `{ goal, hubTime }`
   - `nickname`: 目标昵称（≤40 字，可选）；控制台卡片、提醒与每日总结优先用昵称称呼目标，留空则显示 `title`。
@@ -203,6 +205,7 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
 | `device.online` / `device.offline` | `{ deviceId, name, at }` |
 | `task.created` / `task.updated` / `task.completed` / `task.failed` | `{ task }` |
 | `settings.updated` | `{ settings, at }` |
+| `joinCode.updated` | `{ joinCode, hubTime }`（母机轮换加入码；在线设备靠心跳同步，控制台据此刷新显示） |
 | `goal.created` / `goal.updated` | `{ goal, at }` |
 | `goal.deleted` | `{ goalId, at }` |
 | `reminder.created` / `reminder.updated` / `reminder.fired` | `{ reminder, at }` |

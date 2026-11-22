@@ -1043,6 +1043,27 @@ class Hub {
     return [...SUPPORTED_LANGUAGES];
   }
 
+  /**
+   * 轮换设备加入码（母机改一次，全网同步）。
+   *
+   * 生成新码并持久化；已注册设备不受影响（仍用各自的设备令牌），
+   * 新码会随注册 / 心跳 / manifest 响应下发，在线设备在下一次心跳时自动同步，
+   * 令牌失效后重新注册时直接使用最新码。
+   *
+   * 注意：轮换只能挡住「新设备加入」；已注册设备的令牌依然有效，
+   * 要彻底清理旧设备需删除设备（DELETE /api/devices/:id）。
+   * @returns {string} 新的加入码
+   */
+  rotateJoinCode() {
+    this.joinCode = util.generateToken('join');
+    this.schedulePersist();
+    // SSE 客户端都是管理员，事件带完整新码好让各控制台立即刷新显示；
+    // record=false 避免把明文加入码写进事件历史（state.json / 快照）。
+    this.broadcast('joinCode.updated', { joinCode: this.joinCode, hubTime: protocol.nowIso() }, { record: false });
+    this.log('info', `设备加入码已轮换：${this.joinCode}（在线设备将在下一次心跳自动同步）`);
+    return this.joinCode;
+  }
+
   // ---------------------------------------------------------------- 长期目标
 
   _requireGoal(goalId) {

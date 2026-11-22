@@ -320,6 +320,7 @@
     health: null,
     server: null,
     settings: null,
+    joinCode: '',
     devices: new Map(),
     tasks: [],
     stats: null,
@@ -956,6 +957,7 @@
     if (name === 'journal.updated') return onJournalUpdated(payload);
     if (name === 'brainstorm.updated') return onBrainstormUpdated(payload);
     if (name === 'settings.updated') return onSettingsUpdated(payload);
+    if (name === 'joinCode.updated') return onJoinCodeUpdated(payload);
     if (name === 'log') return onLogEvent(payload);
     if (name === 'ping') return;
   }
@@ -976,6 +978,13 @@
     refreshSettings();
   }
 
+  function onJoinCodeUpdated(payload) {
+    const joinCode = payload && typeof payload.joinCode === 'string' ? payload.joinCode : '';
+    if (!joinCode) return;
+    state.joinCode = joinCode;
+    refreshSettings();
+  }
+
   /* ==================================================================
    * 快照应用与增量
    * ================================================================== */
@@ -993,6 +1002,7 @@
       applyLanguageFromServer(data.settings.language);
       syncTaskSoundToBridge();
     }
+    if (typeof data.joinCode === 'string') state.joinCode = data.joinCode;
     if (Array.isArray(data.events)) state.activity = data.events.slice();
     if (Array.isArray(data.goals)) {
       state.goals = data.goals.filter((goal) => goal && goal.id);
@@ -7112,6 +7122,18 @@
     );
     wrap.appendChild(routingSection);
 
+    // 设备加入码：新设备首次接入用；轮换后在线设备下一次心跳自动同步。
+    const joinCodeSection = el('section', { className: 'settings-section' },
+      el('h3', { text: tr('settings.joinCodeSection') }),
+      el('p', { className: 'settings-note', text: tr('settings.joinCodeHint') }),
+      kvCopy(tr('settings.joinCodeLabel'), state.joinCode || '', tr('settings.joinCodeCopied')),
+      el('div', { className: 'settings-actions' },
+        el('button', { type: 'button', className: 'btn btn-danger btn-sm', dataset: { action: 'rotate-join-code' } }, icon('refresh'), tr('settings.joinCodeRotate')),
+      ),
+      el('p', { className: 'settings-note', text: tr('settings.joinCodeWarn') }),
+    );
+    wrap.appendChild(joinCodeSection);
+
     const maintenance = el('section', { className: 'settings-section' },
       el('h3', { text: '系统维护' }),
       el('p', { className: 'settings-note', text: '重启会先通知所有在线设备代理自我重启，随后 Hub 自动重启；运行中的任务会自动重新排队（不占用重试次数）。' }),
@@ -7172,6 +7194,27 @@
         } catch (err) {
           if (err.status === 401) handleAuthLost(err.message);
           else toast(err.message || '重启失败', 'error');
+          btn.disabled = false;
+        }
+      } else if (action === 'rotate-join-code') {
+        const ok = await confirmDialog({
+          title: tr('settings.joinCodeRotateTitle'),
+          message: tr('settings.joinCodeRotateConfirm'),
+          okText: tr('settings.joinCodeRotateOk'),
+        });
+        if (!ok) return;
+        btn.disabled = true;
+        try {
+          const res = await api('/api/admin/join-code', { method: 'POST', body: {} });
+          const joinCode = res && typeof res.joinCode === 'string' ? res.joinCode : '';
+          if (joinCode) state.joinCode = joinCode;
+          copyText(joinCode, tr('settings.joinCodeCopied'));
+          toast(tr('settings.joinCodeRotated'), 'success', 6000);
+          refreshSettings();
+        } catch (err) {
+          if (err.status === 401) handleAuthLost(err.message);
+          else toast(err.message || tr('settings.joinCodeRotateFailed'), 'error');
+        } finally {
           btn.disabled = false;
         }
       } else if (action === 'logout') {
