@@ -201,16 +201,19 @@ py -3 .\worker-workspace\Mika\tools\mika\scripts\mika_cli.py --device <序列号
 | 时机 | 行为 |
 | --- | --- |
 | 派发前 preflight | `recovery.diagnose()` **发现无障碍不健康**（总开关/列表/崩溃/绑定）→ 先自愈再派发（进度里可见「先自愈再派发」）。只有手机助手没跑时不提前修：实测本机不少任务在无助手时仍能跑完（Mika 退化到纯无障碍操作），提前拉起要多花十几秒，留到真失败再修 |
-| 任务报手机类错误 | 命中 `phone_unavailable` / `NO_ACCESSIBILITY` / `NO_PHONE_HELPER` / `UsbHelperStopped` / `stale_connection` / `connection_info` / `adb_unavailable` / `device_offline` 等 → 自愈（此时连同手机助手一起修）→ `mika connect` 刷新连接信息 → **重试一次原任务** |
+| 派发前连接预检 | `connectPreflight`（默认开启，需配 `adb`）：把指令发给手机之前，先在母机侧跑一次 `mika connect`（进度「正在通过母机 ADB 检查并修复 Mika 连接…」）。报 `bootstrap did not complete / Unlock the phone` 时先唤醒 + 拉起 Mika 再试一次；仍失败则**不把指令发到手机**，任务直接失败并提示「Mika 连接未就绪（已在母机执行 ADB 修复仍失败…）；本次指令没有发送到手机，请解锁手机并打开 Mika 后重试」 |
+| 任务报手机类错误 | 命中 `phone_unavailable` / `NO_ACCESSIBILITY` / `NO_PHONE_HELPER` / `UsbHelperStopped` / `stale_connection` / `connection_info` / `connection`（CLI 报 `Could not read a valid response from Mika; … run mika connect` 也属于这类）/ `adb_unavailable` / `device_offline` 等 → 自愈（此时连同手机助手一起修）→ `mika connect` 刷新连接信息 → **重试一次原任务** |
+| 刷新连接时被息屏/锁屏挡住 | `mika connect` 报 `Mika's phone bootstrap did not complete. Unlock the phone, open Mika once, then retry connect.` → 先 `wake`（唤醒屏幕 + 解除 keyguard）并拉起 Mika，再 `mika connect` 一次；仍失败则进度提示「请解锁手机并保持 Mika 在前台」。有 PIN/图案锁时 adb 解不开，仍需人工解锁（§10） |
 | 自愈后仍失败 | 原错误追加「（已通过 USB ADB 自愈并重试 N 次仍失败；可运行 `node scripts/mika-phone-recovery.js --check` 查看手机状态）」 |
-| 没配 `adb` | 不启用自愈（纯 Wi-Fi 模式下没有 USB 可修，行为与旧版一致） |
+| 没配 `adb` | 不启用 adb 自愈；若 CLI 仍配置了 `--adb`（例如 `recovery.enabled=false`），连接类错误会先 `mika connect` 刷新一次再重试；纯 Wi-Fi 模式（无 adb）与旧版一致 |
 
 配置项（`worker-workspace\phone-mika.json` 的 `executor.mika` 下）：
 
 ```json
 "recovery": {
   "enabled": true,        // false = 关闭内建自愈（仍可手工跑 CLI）
-  "preflight": true,      // false = 只在任务失败后才修
+  "preflight": true,      // false = 只在任务失败后才修（无障碍）
+  "connectPreflight": true, // false = 派发前不先跑 mika connect；默认开启，需配 adb
   "timeoutMs": 20000,     // 单条 adb 命令超时
   "rebindGapMs": 700,     // 无障碍「摘掉→放回」之间的间隔
   "retries": 1            // 自愈后重试任务的次数（0..3）
@@ -219,6 +222,19 @@ py -3 .\worker-workspace\Mika\tools\mika\scripts\mika_cli.py --device <序列号
 
 其它字段：`recovery.adb`（默认沿用 `executor.mika.adb`）、`recovery.serial`（默认沿用 `device`）、
 `recovery.packageName` / `recovery.appLabel`（默认 Mika 官方包名与 `Mika`）。
+
+### 电脑文件与手机 Download
+
+Mika 的远程任务接口**只传文本**（`task run --goal-file`），没有附件参数；Mika 的沙箱也读不到
+`/sdcard`（工具访问工作区外文件会返回 `path_outside_workspace`）。所以电脑上发起的任务如果引用了
+电脑本地文件（例如 `C:\Users\…\Downloads\resume.pdf`），设备代理会：
+
+1. 用 adb 把该文件推到手机的 `/sdcard/Download/<文件名>`（手机 App 的文件选择器能看到 Download）；
+2. 把任务指令里的电脑路径改写为「手机『下载/Download』文件夹里的 resume.pdf」，并追加一句
+   「你在 Android 手机上执行，无法访问电脑路径」。
+
+这样 Mika 在手机上操作投递类 App 时，可以从文件选择器里选 Download 里的 PDF；不要指望 Mika
+用读文件工具直接读 `/sdcard`。adb 不可用时只做文案改写，需要人工先把文件放进手机 Download。
 
 真机实测（2026-11-18，同一天内逐项验过）：
 
@@ -242,7 +258,7 @@ py -3 .\worker-workspace\Mika\tools\mika\scripts\mika_cli.py --device <序列号
 | `phone_unavailable` / `NO_ACCESSIBILITY` | 任务记录里的 `phone_unavailable`，Mika 自检建议「重新开启无障碍」 | 无障碍服务不可用 | `--check` → `--repair`（本手册 §2/§3） |
 | `phone_unavailable` / `NO_PHONE_HELPER(_USB)` | — | 手机助手没跑 | `--check` 应报 `helper-not-running`；`--repair` 会跑 `usb-start.sh` |
 | `UsbHelperStopped` | 手机侧重启/被清理后助手停了 | 同上 | 同上；若反复出现看 §11 |
-| `connection` | `Could not read a valid response from Mika; check the connection and run mika connect.` | CLI 说不上话：休眠/锁屏/Mika 进程被杀 | `-Check` 或 `--check`；唤醒手机 → 拉起 Mika → 重跑 `mika connect` |
+| `connection` | `Could not read a valid response from Mika; check the connection and run mika connect.` | CLI 说不上话：休眠/锁屏/Mika 进程被杀 | 设备代理会自动唤醒屏幕/拉起 Mika → `mika connect` → 重试一次（§5）；手工排查：`-Check` → 唤醒手机 → 拉起 Mika → `mika connect` |
 | `stale_connection` | `The phone has rebooted; run mika connect ...` | 手机重启过，连接信息过期 | `mika connect` 刷新（代理自愈时会自动做） |
 | `connection_info` | `Mika's connection information is invalid. Unlock the phone, open Mika once, then retry connect.` | 手机端连接信息文件缺失/损坏 | 解锁 → 打开一次 Mika → `connect` |
 | `adb_unavailable` | `adb was not found or cannot be run.` | adb 路径不对 | 检查 `-Adb` / `recovery.adb` |

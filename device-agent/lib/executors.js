@@ -1391,9 +1391,60 @@ function mikaErrorText(payload) {
 function looksLikeMikaPhoneFailure(text) {
   const value = String(text || '');
   if (!value) return false;
-  return /phone_unavailable|NO_ACCESSIBILITY|NO_PHONE_HELPER|UsbHelperStopped|helper_available|stale_connection|connection_info|adb_unavailable|device_offline|手机助手|无障碍|accessibility/i.test(
+  return /phone_unavailable|NO_ACCESSIBILITY|NO_PHONE_HELPER|UsbHelperStopped|helper_available|stale_connection|connection_info|\bconnection\b|Could not read a valid response|run mika connect|adb_unavailable|device_offline|手机助手|无障碍|accessibility/i.test(
     value,
   );
+}
+
+/** 连接层失败（CLI 说不上话 / 连接信息过期）：可以只刷新 `mika connect` 后重试，不一定要 adb 自愈。 */
+function looksLikeMikaConnectionFailure(text) {
+  return /\bconnection\b|connection_info|stale_connection|Could not read a valid response|run mika connect/i.test(
+    String(text || ''),
+  );
+}
+
+/**
+ * 指令里引用的电脑本地文件（Windows 绝对路径）。Mika 的任务接口只传文本，
+ * 电脑上的文件必须先在手机上准备好——推到手机 Download 后，手机 App 的文件选择器才选得到。
+ */
+const INSTRUCTION_FILE_REF_RE = /[A-Za-z]:\\(?:[^\\/:*?"<>|\r\n]+\\)*[^\\/:*?"<>|\r\n]+\.(?:pdf|docx?|xlsx?|pptx?|txt|csv|png|jpe?g|zip)\b/gi;
+
+function findInstructionFileRefs(instruction) {
+  const text = String(instruction || '');
+  const seen = new Set();
+  const refs = [];
+  for (const match of text.matchAll(INSTRUCTION_FILE_REF_RE)) {
+    const raw = match[0];
+    if (seen.has(raw)) continue;
+    seen.add(raw);
+    refs.push({ raw, path: raw });
+  }
+  return refs;
+}
+
+/**
+ * 把指令里的电脑路径改写成手机上的说法（纯函数，便于测试）。
+ * placedFiles：已经成功推到手机 Download 的文件名；全部就位时才说「请从选择器里选」。
+ */
+function rewriteInstructionForPhone(instruction, { placedFiles = [] } = {}) {
+  const text = String(instruction || '');
+  const refs = findInstructionFileRefs(text);
+  if (!refs.length) return text;
+  const placed = new Set(placedFiles.map((name) => String(name).toLowerCase()));
+  let out = text;
+  const names = [];
+  for (const ref of refs) {
+    const base = path.basename(ref.path);
+    names.push(base);
+    out = out.split(ref.raw).join(`手机「下载/Download」文件夹里的 ${base}`);
+  }
+  const allPlaced = names.every((name) => placed.has(name.toLowerCase()));
+  out += `\n\n补充说明：你在 Android 手机上执行，无法访问电脑路径。上面提到的文件（${names.join('、')}）${
+    allPlaced
+      ? '已经放到手机的「下载/Download」文件夹，请用 App 的文件选择器选择它们。'
+      : '请使用手机的文件管理器/文件选择器打开「下载/Download」文件夹里的同名文件。'
+  }`;
+  return out;
 }
 
 function extractMikaAnswer(task) {
@@ -1466,6 +1517,9 @@ function createMikaExecutor(options = {}) {
     : null;
   const recoveryPreflight = recoveryCfg.preflight !== false;
   const recoveryRetries = recovery ? clampInt(recoveryCfg.retries, 0, 3, 1) : 0;
+  // 派发前在母机侧先检查/修复 Mika 连接：连接没就绪（息屏、锁屏、bootstrap 未完成）
+  // 时绝不把指令发到手机，先在母机执行唤醒 + connect，修好后才发任务。
+  const connectPreflight = recoveryCfg.connectPreflight !== false && Boolean(adb);
 
   function executable() {
     if (interpreter) return { exe: interpreter, args: [command, ...commandArgs] };
@@ -1514,6 +1568,74 @@ function createMikaExecutor(options = {}) {
     return args;
   }
 
+  /** 直接跑一条 adb 命令（输出写临时文件，避免管道在受限环境里被拒）。 */
+  async function runAdb(args, { timeout = 60000, signal = null } = {}) {
+    if (!adb) throw new Error('未配置 adb');
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'butler-adb-'));
+    const outFile = path.join(dir, 'stdout.log');
+    const errFile = path.join(dir, 'stderr.log');
+    const outFd = fs.openSync(outFile, 'a');
+    const errFd = fs.openSync(errFile, 'a');
+    let child;
+    try {
+      child = spawn(adb, [...(device ? ['-s', String(device)] : []), ...args], {
+        cwd: workdir,
+        env: envBase,
+        stdio: ['ignore', outFd, errFd],
+        windowsHide: true,
+      });
+    } catch (err) {
+      fs.closeSync(outFd);
+      fs.closeSync(errFd);
+      await removeDirSafe(dir);
+      throw new Error(`启动 adb 失败：${err.message}`);
+    }
+    try {
+      const { code } = await waitForChild(child, { timeoutMs: timeout, signal, label: 'adb' });
+      const stdout = await readFileSafe(outFile);
+      const stderr = await readFileSafe(errFile);
+      return { code, stdout, stderr };
+    } finally {
+      fs.closeSync(outFd);
+      fs.closeSync(errFd);
+      await removeDirSafe(dir);
+    }
+  }
+
+  /** 把电脑上的文件推到手机 Download 文件夹（手机文件选择器能看到的位置）。 */
+  async function pushFileToPhoneDownload(filePath) {
+    if (!adb || !fs.existsSync(filePath)) return false;
+    const base = path.basename(filePath);
+    try {
+      await runAdb(['shell', 'mkdir', '-p', '/sdcard/Download'], { timeout: 20000 });
+      const pushed = await runAdb(['push', filePath, `/sdcard/Download/${base}`], { timeout: 120000 });
+      return pushed.code === 0;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 电脑上的文件没法直接交给 Mika（CLI 只传文本）：先把指令里引用的本机文件推到手机
+   * Download，再把路径改写成手机上的说法。Mika 的沙箱读不到 /sdcard，所以只能让它在
+   * 手机 App 的文件选择器里选 Download 里的文件。
+   */
+  async function prepareGoalText(instruction, progress) {
+    const text = String(instruction || '');
+    const refs = findInstructionFileRefs(text);
+    if (!refs.length) return text;
+    const placed = [];
+    for (const ref of refs) {
+      const base = path.basename(ref.path);
+      if (!fs.existsSync(ref.path)) continue;
+      await progress(`正在把「${base}」放到手机 Download 文件夹…`, 7);
+      if (await pushFileToPhoneDownload(ref.path)) placed.push(base);
+    }
+    const rewritten = rewriteInstructionForPhone(text, { placedFiles: placed });
+    if (rewritten !== text) await progress('任务里的电脑文件路径已改为手机 Download 文件夹', 7);
+    return rewritten;
+  }
+
   /** 跑一次 Mika 任务（提交 + 轮询等待）；手机控制类失败由外层 run() 自愈后重试。 */
   async function runOnce(ctx = {}) {
     const signal = ctx.signal || null;
@@ -1530,7 +1652,8 @@ function createMikaExecutor(options = {}) {
       const deadline = startedAt + timeoutMs;
       const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'butler-mika-goal-'));
       const goalFile = path.join(dir, 'goal.txt');
-      await fsp.writeFile(goalFile, instruction, 'utf8');
+      const goalText = await prepareGoalText(instruction, progress);
+      await fsp.writeFile(goalFile, goalText, 'utf8');
       let taskId = '';
       let snapshot = null;
       try {
@@ -1724,10 +1847,74 @@ function createMikaExecutor(options = {}) {
       // idle → 没修过；ok → 本次派发里已经修好过（再失败可以直接重试，不必重复修）；failed → 修不动。
       let healState = 'idle';
 
+      /** 手机息屏/锁屏时先唤醒并拉起 Mika：connect 需要手机解锁后才能完成 bootstrap。 */
+      const awakenPhone = async () => {
+        if (recovery && typeof recovery.wake === 'function') {
+          try {
+            await recovery.wake({ signal });
+            if (typeof recovery.launchApp === 'function') await recovery.launchApp({ signal });
+            return true;
+          } catch (err) {
+            if (err && err.name === 'AbortError') throw err;
+          }
+        }
+        if (adb) {
+          try {
+            await runAdb(['shell', 'input', 'keyevent', '224'], { timeout: 15000, signal });
+            await runAdb(['shell', 'wm', 'dismiss-keyguard'], { timeout: 15000, signal });
+            return true;
+          } catch (err) {
+            if (err && err.name === 'AbortError') throw err;
+          }
+        }
+        return false;
+      };
+
+      /** 只刷新 Mika 连接信息：连接类错误的最轻量修复（不需要 adb 自愈）。 */
+      const refreshConnection = async () => {
+        const attemptConnect = async () => {
+          try {
+            const connectRun = await runCli([...connectionArgs(), '--json', 'connect'], { timeout: 120000, signal });
+            const connectError = mikaErrorText(connectRun.payload);
+            return { ok: !connectError, error: connectError };
+          } catch (err) {
+            if (err && err.name === 'AbortError') throw err;
+            return { ok: false, error: err.message };
+          }
+        };
+        await progress('正在刷新 Mika 连接信息…', 14);
+        let result = await attemptConnect();
+        if (!result.ok && /bootstrap|unlock|open Mika|锁屏|息屏/i.test(String(result.error || ''))) {
+          await progress('Mika 连接被锁屏/息屏挡住，正在唤醒手机并打开 Mika…', 14);
+          if (await awakenPhone()) {
+            await progress('手机已唤醒，重新刷新 Mika 连接信息…', 14);
+            result = await attemptConnect();
+          }
+        }
+        if (!result.ok) {
+          await progress(`刷新连接信息失败（${result.error}），请解锁手机并保持 Mika 在前台后重试`, 15);
+          return { ok: false, error: result.error };
+        }
+        return { ok: true, error: null };
+      };
+
       /** 走 USB ADB 自愈手机控制（无障碍 + 手机助手），成功后刷新 CLI 连接信息。 */
       const heal = async (reason) => {
-        if (!recovery || healState === 'failed') return false;
-        if (healState === 'ok') return true;
+        if (healState === 'failed') return false;
+        if (healState === 'ok') {
+          // 已经修过一次：连接类错误再刷一次 connect 就够，避免重复整套自愈。
+          if (!looksLikeMikaConnectionFailure(reason)) return true;
+          const refreshed = await refreshConnection();
+          return refreshed.ok;
+        }
+        if (!recovery) {
+          // 没配 adb 自愈时，连接类错误仍可以先 mika connect 刷新一次再重试（例如 recovery.enabled=false）。
+          if (!looksLikeMikaConnectionFailure(reason)) return false;
+          healState = 'failed';
+          const refreshed = await refreshConnection();
+          healState = refreshed.ok ? 'ok' : 'failed';
+          return refreshed.ok;
+        }
         healState = 'failed';
         try {
           await progress(`Mika 手机控制不可用（${reason}），正在通过 USB ADB 自愈…`, 10);
@@ -1745,14 +1932,8 @@ function createMikaExecutor(options = {}) {
             return false;
           }
           await progress('手机控制已恢复，正在刷新 Mika 连接信息…', 14);
-          try {
-            const connectRun = await runCli([...connectionArgs(), '--json', 'connect'], { timeout: 120000, signal });
-            const connectError = mikaErrorText(connectRun.payload);
-            if (connectError) await progress(`刷新连接信息失败（${connectError}），直接重试任务`, 15);
-          } catch (err) {
-            if (err && err.name === 'AbortError') throw err;
-            await progress(`刷新连接信息失败（${err.message}），直接重试任务`, 15);
-          }
+          const refreshed = await refreshConnection();
+          if (!refreshed.ok) return false;
           healState = 'ok';
           return true;
         } catch (err) {
@@ -1780,9 +1961,31 @@ function createMikaExecutor(options = {}) {
         }
       }
 
+      // 派发前连接预检（在母机侧执行）：先唤醒/解锁/拉起 Mika 并刷新 connect；
+      // 修好后才会把指令交给手机，避免「手机息屏/锁屏时任务直接失败」。
+      if (connectPreflight) {
+        await progress('正在通过母机 ADB 检查并修复 Mika 连接…', 9);
+        let conn = await refreshConnection();
+        if (!conn.ok) {
+          await progress(`Mika 连接未就绪（${conn.error}），正在执行手机自愈后再派发…`, 10);
+          if (await heal(conn.error)) conn = await refreshConnection();
+        }
+        if (!conn.ok) {
+          return {
+            output: { text: '' },
+            error:
+              `Mika 连接未就绪（已在母机执行 ADB 修复仍失败：${conn.error}）；`
+              + '本次指令没有发送到手机，请解锁手机并打开 Mika 后重试',
+          };
+        }
+        await progress('Mika 连接已就绪，开始派发手机任务', 10);
+      }
+
       let result = await runOnce(ctx);
       let attempts = 0;
-      while (result && result.error && attempts < recoveryRetries && looksLikeMikaPhoneFailure(result.error)) {
+      // 没配 adb 自愈时，连接类错误仍允许一次「mika connect 刷新后重试」。
+      const maxAttempts = recovery ? recoveryRetries : adb ? 1 : 0;
+      while (result && result.error && attempts < maxAttempts && looksLikeMikaPhoneFailure(result.error)) {
         attempts += 1;
         const healedOk = await heal(result.error);
         if (!healedOk) break;
@@ -1790,7 +1993,7 @@ function createMikaExecutor(options = {}) {
         await progress('手机控制已修复，正在重试 Mika 任务…', 16);
         result = await runOnce(ctx);
       }
-      if (result && result.error && attempts > 0 && looksLikeMikaPhoneFailure(result.error)) {
+      if (result && result.error && attempts > 0 && recovery && looksLikeMikaPhoneFailure(result.error)) {
         return {
           ...result,
           error: `${result.error}（已通过 USB ADB 自愈并重试 ${attempts} 次仍失败；可运行 node scripts/mika-phone-recovery.js --check 查看手机状态）`,
@@ -1891,6 +2094,8 @@ module.exports = {
   parseWorkerProgressLine,
   createProgressFileTailer,
   assertEndpointAllowed,
+  findInstructionFileRefs,
+  rewriteInstructionForPhone,
   killProcessTree,
   quoteForShell,
   truncate,

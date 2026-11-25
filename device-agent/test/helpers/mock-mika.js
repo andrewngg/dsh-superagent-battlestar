@@ -12,6 +12,10 @@
  *   MOCK_MIKA_COUNTER  file used to count waits
  *   MOCK_MIKA_MODE     ok | question | fail
  *   MOCK_MIKA_PHONE_FAIL_ONCE  file flag：存在时第一次 task run 返回 phone_unavailable 并删除该文件
+ *   MOCK_MIKA_CONNECTION_FAIL_ONCE  file flag：存在时第一次 task run 返回 connection 错误并删除该文件
+ *   MOCK_MIKA_CONNECT_FAIL_ONCE  file flag：存在时第一次 connect 返回 bootstrap 未完成错误并删除该文件
+ *   MOCK_MIKA_CONNECT_FAIL_ALWAYS  file flag：存在时每次 connect 都返回 bootstrap 未完成错误（不删除）
+ *   MOCK_MIKA_GOAL_CAPTURE  file：把 task run 收到的 --goal-file 内容复制到这里（供测试断言）
  */
 
 const fs = require('node:fs');
@@ -27,6 +31,11 @@ const taskId = 'mk_task_1';
 const mode = process.env.MOCK_MIKA_MODE || 'ok';
 const counterFile = process.env.MOCK_MIKA_COUNTER || '';
 const phoneFailFlag = process.env.MOCK_MIKA_PHONE_FAIL_ONCE || '';
+const connectionFailFlag = process.env.MOCK_MIKA_CONNECTION_FAIL_ONCE || '';
+const connectFailFlag = process.env.MOCK_MIKA_CONNECT_FAIL_ONCE || '';
+const connectFailAlways = process.env.MOCK_MIKA_CONNECT_FAIL_ALWAYS || '';
+const goalCapture = process.env.MOCK_MIKA_GOAL_CAPTURE || '';
+const goalFile = valueOf('--goal-file') || '';
 
 function emit(payload, code = 0) {
   process.stdout.write(`${JSON.stringify(payload)}\n`);
@@ -34,8 +43,49 @@ function emit(payload, code = 0) {
 }
 
 if (action === '' && args.includes('connect')) {
+  if (connectFailAlways || (connectFailFlag && fs.existsSync(connectFailFlag))) {
+    if (connectFailFlag && !connectFailAlways) {
+      try {
+        fs.unlinkSync(connectFailFlag);
+      } catch {
+        /* ignore */
+      }
+    }
+    emit(
+      {
+        error: {
+          code: 'adb',
+          message: "Mika's phone bootstrap did not complete. Unlock the phone, open Mika once, then retry connect.",
+        },
+      },
+      1,
+    );
+  }
   emit({ connection: 'ok', transport: 'adb', device: 'mock-phone', api_version: 1 });
 } else if (action === 'run') {
+  if (goalCapture && goalFile) {
+    try {
+      fs.writeFileSync(goalCapture, fs.readFileSync(goalFile, 'utf8'));
+    } catch {
+      /* ignore */
+    }
+  }
+  if (connectionFailFlag && fs.existsSync(connectionFailFlag)) {
+    try {
+      fs.unlinkSync(connectionFailFlag);
+    } catch {
+      /* ignore */
+    }
+    emit(
+      {
+        error: {
+          code: 'connection',
+          message: 'Could not read a valid response from Mika; check the connection and run mika connect.',
+        },
+      },
+      1,
+    );
+  }
   if (phoneFailFlag && fs.existsSync(phoneFailFlag)) {
     try {
       fs.unlinkSync(phoneFailFlag);
