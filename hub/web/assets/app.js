@@ -2787,6 +2787,12 @@
       el('span', { className: 'goal-compact-label', text: '最近进度' }),
       goalRawText('span', 'goal-compact-text', progressText),
     ));
+    if (goal.deviceId) {
+      card.appendChild(el('p', { className: 'goal-compact-line' },
+        el('span', { className: 'goal-compact-label', text: '固定工作机' }),
+        goalRawText('span', 'goal-compact-text', `${deviceName(goal.deviceId)}（硬性）`),
+      ));
+    }
 
     const linkedStats = goal.linkedStats && typeof goal.linkedStats === 'object' ? goal.linkedStats : null;
     if (linkedStats && num(linkedStats.total) > 0) {
@@ -3525,6 +3531,25 @@
     typeSelect.addEventListener('change', syncScheduleRows);
     syncScheduleRows();
 
+    // 固定工作机（硬性指向）：留空 = 自动路由；选定后该目标直接关联的任务都会锁到这台设备。
+    const deviceSelect = el('select', { attrs: { 'aria-label': '固定工作机（硬性，可选）' } });
+    deviceSelect.appendChild(el('option', { value: '', text: '自动（不指定，按路由选择）' }));
+    const goalDevices = Array.from(state.devices.values())
+      .filter((device) => device && device.id)
+      .sort((a, b) => Number(Boolean(b.online)) - Number(Boolean(a.online))
+        || deviceDisplayName(a).localeCompare(deviceDisplayName(b), 'zh-Hans-CN'));
+    for (const device of goalDevices) {
+      deviceSelect.appendChild(el('option', {
+        value: device.id,
+        text: `${deviceDisplayName(device)}${device.online ? '' : '（离线）'}`,
+      }));
+    }
+    const currentGoalDeviceId = goal ? str(goal.deviceId) : '';
+    if (currentGoalDeviceId && !Array.from(deviceSelect.options).some((option) => option.value === currentGoalDeviceId)) {
+      deviceSelect.appendChild(el('option', { value: currentGoalDeviceId, text: `${currentGoalDeviceId}（设备已移除）` }));
+    }
+    deviceSelect.value = currentGoalDeviceId;
+
     const nicknameHint = el('span', { className: 'field-hint', text: '列表和提醒里优先用这个称呼；留空则显示标题' });
     form.append(
       el('div', { className: 'field' }, el('label', { text: '昵称（可选）' }), nicknameInput, nicknameHint),
@@ -3533,6 +3558,11 @@
       el('div', { className: 'field' }, el('label', { text: '检查计划' }), typeSelect),
       dailyRow,
       intervalRow,
+      el('div', { className: 'field' }, el('label', { text: '指定工作机（硬性，可选）' }), deviceSelect,
+        el('span', {
+          className: 'field-hint',
+          text: '设置后，归属这个目标的新任务（含定时跟进）都会锁到这台设备，覆盖任务栏选择器与继承来的设备；留空自动路由',
+        })),
       el('p', { className: 'goal-form-hint', text: 'Hub 会按计划定时创建任务检查进度并给出建议。' }),
     );
 
@@ -3564,6 +3594,7 @@
           nickname: nicknameInput.value.trim(),
           description: descInput.value.trim(),
           schedule: scheduleBody,
+          deviceId: deviceSelect.value || null,
         };
         const res = goal
           ? await api(`/api/goals/${encodeURIComponent(goal.id)}`, { method: 'PATCH', body, timeout: 15000 })
@@ -3690,6 +3721,7 @@
       kv('昵称', str(goal.nickname) || '—'),
       kv('状态', GOAL_STATUS[status] ? GOAL_STATUS[status].label : status),
       kv('计划', goalPlanText(goal.schedule)),
+      kv('固定工作机', goal.deviceId ? deviceName(goal.deviceId) : '自动（不指定）'),
       kv('下次跟进', goal.nextCheckAt ? fmtDateTime(goal.nextCheckAt) : '—'),
       kv('上次检查', goal.lastCheckAt ? fmtDateTime(goal.lastCheckAt) : '—'),
       kv('检查结果', goal.lastCheckStatus ? (GOAL_CHECK_STATUS[goal.lastCheckStatus] || goal.lastCheckStatus) : '—'),
@@ -8911,6 +8943,10 @@
     if (!task) return;
     state.followUpTaskId = id;
     const step = Number.isFinite(task.threadStep) ? task.threadStep + 1 : 2;
+    // 跟进任务不沿用上一步手动选择的“目标设备”，否则会像 task_bphrnvpm 那样把新指令硬钉在母机上。
+    // 留空即自动路由（Hub 仍按线程亲和把默认主机放在原设备）；若用户本步确实要指定设备，可重新选择或直接在指令里点名。
+    const deviceSelect = $('#target-device');
+    if (deviceSelect) deviceSelect.value = '';
     const banner = $('#followup-banner');
     setText('#followup-title', `继续任务 · 第 ${step} 步`);
     setText('#followup-desc', `基于：${shorten(task.instruction, 60)}`);

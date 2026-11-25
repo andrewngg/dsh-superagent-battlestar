@@ -26,6 +26,8 @@ const MAX_DESCRIPTION = 4000;
 const MAX_SUMMARY = 4000;
 const MAX_GUIDANCE_ENTRIES = 20;
 const MAX_GUIDANCE_TEXT = 2000;
+/** 目标固定工作机（硬性指向）的设备 id 最大长度。 */
+const MAX_DEVICE_ID = 80;
 /** 「暂停到某个时间」的最长跨度（自动恢复）。 */
 const MAX_PAUSE_MS = 366 * 24 * 60 * 60 * 1000;
 
@@ -175,6 +177,20 @@ function normalizeGoalRequest(input, { partial = false, base = null, nowMs = Dat
     ).trim();
   }
 
+  // 固定工作机（硬性指向）：null / 空串表示「自动派发」，不写死设备。
+  if (src.deviceId !== undefined || !partial) {
+    const rawDeviceId = src.deviceId !== undefined ? src.deviceId : prev.deviceId;
+    if (rawDeviceId === null || rawDeviceId === undefined || rawDeviceId === '') {
+      value.deviceId = null;
+    } else if (typeof rawDeviceId !== 'string') {
+      errors.push('deviceId 必须是设备 id 字符串或 null');
+    } else {
+      const deviceId = rawDeviceId.trim();
+      if (deviceId.length > MAX_DEVICE_ID) errors.push(`deviceId 最多 ${MAX_DEVICE_ID} 个字符`);
+      else value.deviceId = deviceId || null;
+    }
+  }
+
   if (src.schedule !== undefined || !partial) {
     value.schedule = normalizeSchedule(src.schedule, prev.schedule || null);
   }
@@ -270,6 +286,7 @@ function restoreGoal(raw) {
     status,
     schedule,
     requirements: util.isPlainObject(raw.requirements) ? { ...raw.requirements } : null,
+    deviceId: util.str(raw.deviceId, MAX_DEVICE_ID).trim() || null,
     nextCheckAt: status === 'active' ? nextCheckAt || computeNextCheckAt(schedule) : null,
     pausedUntil,
     guidance,
@@ -299,6 +316,7 @@ function goalToJson(goal) {
     status: goal.status,
     schedule: { ...goal.schedule },
     requirements: goal.requirements ? { ...goal.requirements } : null,
+    deviceId: goal.deviceId || null,
     nextCheckAt: goal.nextCheckAt,
     pausedUntil: goal.pausedUntil || null,
     guidance: (goal.guidance || []).map((entry) => ({ ...entry })),
@@ -323,12 +341,18 @@ function goalDisplayName(goal) {
   return util.str(goal && goal.title, MAX_TITLE).trim() || '未命名目标';
 }
 
-/** 生成跟进任务指令：让设备检查目标进展并给出建议（中文 Markdown）。 */
-function buildGoalCheckInstruction(goal) {
+/**
+ * 生成跟进任务指令：让设备检查目标进展并给出建议（中文 Markdown）。
+ * @param {object} goal
+ * @param {string|null} [deviceLabel] 固定工作机的展示名（由 Hub 按设备表解析）
+ */
+function buildGoalCheckInstruction(goal, deviceLabel = null) {
   const scheduleText =
     goal.schedule && goal.schedule.type === 'interval'
       ? `每 ${goal.schedule.minutes} 分钟`
       : `每天 ${goal.schedule && goal.schedule.time ? goal.schedule.time : '09:00'}`;
+  const pinnedDeviceId = goal.deviceId || null;
+  const pinnedLabel = deviceLabel || pinnedDeviceId;
   const recent = (goal.checks || [])
     .slice(-3)
     .map((check) => `- ${check.at}（${check.status}）：${util.truncate(check.summary || check.error || '', 200)}`)
@@ -342,6 +366,9 @@ function buildGoalCheckInstruction(goal) {
     `目标：${goalDisplayName(goal)}`,
     goal.nickname ? `正式标题：${goal.title}` : '',
     `描述：${goal.description || '（未填写）'}`,
+    pinnedDeviceId
+      ? `固定工作机（硬性规矩）：${pinnedLabel}（${pinnedDeviceId}）——本次跟进必须在该设备上执行，不要改用其它设备。`
+      : '',
     guidance ? `用户指导（按时间顺序，越靠后越新；请优先遵守）：\n${guidance}` : '',
     `计划：${scheduleText}`,
     `上次检查：${goal.lastCheckAt || '尚未检查'}（${goal.lastCheckStatus || '无'}）`,
@@ -365,6 +392,7 @@ module.exports = {
   MAX_CHECKS,
   MAX_NICKNAME,
   MAX_PAUSE_MS,
+  MAX_DEVICE_ID,
   MAX_GUIDANCE_ENTRIES,
   MAX_GUIDANCE_TEXT,
   normalizeSchedule,

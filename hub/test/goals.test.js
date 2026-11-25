@@ -853,3 +853,95 @@ test('目标指导指令 API：追加即生效、空文本报错、恢复自动�
   assert.equal(resumedPaused.json.goal.status, 'active');
   assert.equal(resumedPaused.json.goal.pausedUntil, null);
 });
+
+test('长期目标固定工作机：校验、跟进任务与关联任务硬性锁定、可更新清空', async (t) => {
+  const env = await startTestHub(t);
+  const desktop = await registerDevice(env, makeManifest({ name: '母机', tags: ['本机'] }));
+  const mika = await registerDevice(env, makeManifest({
+    name: 'Mika手机',
+    platform: 'android',
+    kind: 'multi',
+    limits: { maxConcurrentTasks: 2 },
+  }));
+
+  // 不存在的设备 id 不能写进目标
+  const invalid = await request(env.base, 'POST', '/api/goals', {
+    headers: adminHeaders(env),
+    body: { title: '错误设备目标', deviceId: 'dev_missing' },
+  });
+  assert.equal(invalid.status, 400);
+  assert.match(invalid.json.error.message, /指定工作机不存在/);
+
+  const goal = await createGoal(env, {
+    title: '求职投递',
+    description: '固定用 Mika 手机投递简历',
+    schedule: { type: 'daily', time: '09:30' },
+    deviceId: mika.deviceId,
+  });
+  assert.equal(goal.deviceId, mika.deviceId);
+
+  // 跟进任务：即使 requirements 里显式写了母机，也要锁到 Mika 手机
+  const check = await request(env.base, 'POST', `/api/goals/${goal.id}/check`, {
+    headers: adminHeaders(env),
+    body: {},
+  });
+  assert.equal(check.status, 200, check.text);
+  assert.equal(check.json.task.requirements.deviceId, mika.deviceId);
+  assert.equal(check.json.task.assignedDeviceId, mika.deviceId);
+  assert.match(check.json.task.instruction, /固定工作机（硬性规矩）/);
+  assert.match(check.json.task.instruction, /Mika手机/);
+
+  // 直接创建并归属该目标的任务：requirements 指向母机也会被改派，并留下事件
+  const forced = await createTask(env, {
+    instruction: '整理求职材料',
+    goalId: goal.id,
+    requirements: { deviceId: desktop.deviceId },
+  });
+  assert.equal(forced.requirements.deviceId, mika.deviceId);
+  assert.equal(forced.assignedDeviceId, mika.deviceId);
+  const goalDeviceEvent = forced.events.find((event) => event.type === 'goal-device');
+  assert.ok(goalDeviceEvent, '应记录长期目标固定工作机改派事件');
+  assert.match(goalDeviceEvent.message, /固定工作机/);
+  assert.match(goalDeviceEvent.message, /Mika手机/);
+
+  // 更新为不存在的设备报 400，原指向保持不变
+  const badUpdate = await request(env.base, 'PATCH', `/api/goals/${goal.id}`, {
+    headers: adminHeaders(env),
+    body: { deviceId: 'dev_another_missing' },
+  });
+  assert.equal(badUpdate.status, 400);
+  assert.match(badUpdate.json.error.message, /指定工作机不存在/);
+  assert.equal((await getGoal(env, goal.id)).deviceId, mika.deviceId);
+
+  // 清空指向后恢复普通路由：显式母机保持母机
+  const cleared = await request(env.base, 'PATCH', `/api/goals/${goal.id}`, {
+    headers: adminHeaders(env),
+    body: { deviceId: null },
+  });
+  assert.equal(cleared.status, 200, cleared.text);
+  assert.equal(cleared.json.goal.deviceId, null);
+  const freed = await createTask(env, {
+    instruction: '母机本地整理',
+    goalId: goal.id,
+    requirements: { deviceId: desktop.deviceId },
+  });
+  assert.equal(freed.requirements.deviceId, desktop.deviceId);
+  assert.equal(freed.assignedDeviceId, desktop.deviceId);
+  assert.ok(!freed.events.some((event) => event.type === 'goal-device'));
+
+  // 纯函数：指令里带固定工作机说明，带标签的行为不变
+  const instruction = buildGoalCheckInstruction({
+    title: '求职投递',
+    description: '固定用 Mika 手机投递简历',
+    schedule: { type: 'daily', time: '09:30' },
+    checks: [],
+    deviceId: mika.deviceId,
+  }, 'Mika手机');
+  assert.match(instruction, /固定工作机（硬性规矩）：Mika手机/);
+  const normalized = normalizeGoalRequest({ title: 'x', deviceId: '  ' });
+  assert.equal(normalized.ok, true);
+  assert.equal(normalized.value.deviceId, null);
+  // 持久化恢复时不能丢掉固定工作机
+  assert.equal(restoreGoal({ id: 'goal_restore', status: 'active', deviceId: mika.deviceId }).deviceId, mika.deviceId);
+  assert.equal(restoreGoal({ id: 'goal_restore2', status: 'active' }).deviceId, null);
+});

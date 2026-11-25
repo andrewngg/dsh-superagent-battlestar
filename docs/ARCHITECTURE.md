@@ -115,6 +115,29 @@ score = 100
 
 每次路由都写入 `task.route = { reason, candidates[], excluded[] }`，手机和控制台会直接展示，方便排查“为什么没派给我的设备”。
 
+#### 3.3.0 指令点名设备（确定性）
+
+用户经常在指令里直接写「用 mika 工作机」「交给手机跑」。Hub 在 `createTask` 路由前用 `hub/lib/device-mention.js#resolveDeviceMention` 识别这类点名，命中后把 `requirements.deviceId` 改成该设备并写一条 `routing` 事件（「指令点名「Mika」→ 锁定 Mika手机」），因此：
+
+- 指令点名的优先级高于 Web 输入框的下拉选择器，也高于跟进任务继承的 `requirements.deviceId`：`createFollowUp` 命中点名时不再继承源任务的设备/模型/技能硬约束，只带本步骤显式需求 + 项目上下文；
+- 别名来自设备 `id`、昵称、名称及名称片段（按 `· / | （）` 等切分）、tags，且必须唯一映射到一台设备；只有一台 Android 设备时「手机」「安卓」可用。别名同时指向多台设备时不自动派发（保守回退选择器）；
+- 只认有路由语境的点名（前面是「用/交给/改用/让…」或后面是「工作机/电脑/上…」），并跳过「不要用/别用/不用」等否定语境：「mika 的简历核对一下」这种普通提及不会改路由；
+- 点名设备离线/禁用时任务保持 `queued`，`route.reason` 与事件写明「指定设备「Mika手机」离线，已排队等待上线」，上线后自动派发；
+- 计划子任务已由父任务/规划器定好设备时不做二次点名覆盖，避免子任务文案里的「在另一台机器上…」把用户显式指定的设备冲掉。
+
+长期目标还可以设置「固定工作机」（`goal.deviceId`，见 3.6）：归属该目标的任务在 `createTask` 里最后统一改写到目标设备，因此优先级最高——**长期目标固定工作机 > 指令点名 > 用户显式 deviceId > 其它路由依据**；改派会写一条 `goal-device` 事件，任务照常受设备并发/离线排队约束。
+
+#### 3.3.0.1 主机感知守卫：电脑侧指令不派给手机
+
+大脑曾把「执行 `python applier.py --help`」「`adb devices`」这类电脑侧任务派给 Mika 手机（`requirements.deviceId` 也指向手机），任务必然失败。`createTask` 现在在路由前用 `hub/lib/instruction-host.js` 做最后一道保底判定：命中 Windows 路径、adb 命令、python/py 脚本、PowerShell/cmd、node 脚本、`.exe/.ps1/.bat/.cmd`、「母机上执行」类措辞时：
+
+- 若任务当前 `deviceId` 为空或指向手机（Android/iOS/HarmonyOS），改派 `_primaryPcDeviceId()`（主设备 → tags 含「本机」→ 在线非手机 → 任意非手机），并写 `host-guard` 事件（「指令含电脑侧操作（python 命令），不能派给手机「Mika手机」→ 改派母机「主工作机」执行」）；
+- 长期目标固定工作机是手机时，电脑侧步骤不锁手机：`goal-device` 不强制改写，`host-guard` 事件注明「不适用于电脑侧步骤」；
+- 没有可用电脑设备时写警告事件，任务可能继续排队等设备；
+- 手机侧指令（打开 App、点按钮、读手机通知、确认手机文件）不受影响。
+
+它解决的是「母机先执行 adb 修复/脚本准备，再把手机操作指令发给 Mika」这类分步编排被单条混合指令绕过的问题；提示词侧也要求大脑按主机拆分 `create_task`，不要把电脑命令和手机操作混进同一条指令。
+
 #### 3.3.1 路由提示：本地文件预检（A）+ 规划器设备指派（C）
 
 路由评分只认识 `requirements`，不认识“这条指令要改的文件在哪台机器上”。A+C 在路由之前补上这层理解，并把依据写进可审计字段 `task.routingAdvice`：
@@ -122,7 +145,7 @@ score = 100
 **A. 本地文件预检（确定性，默认开启）**：任务创建时若用户没有显式指定设备，Hub 扫描指令里出现的本地文件/路径（`hub/lib/preflight.js`：Windows/UNC 绝对路径、带分隔符的相对路径、扩展名白名单的裸文件名；先剔除 URL 与邮箱），在 Hub 宿主的当前工作目录、仓库根、`Downloads`、`Documents`、`Desktop`、用户 home 下查找（默认深度 3、索引预算 150ms、总预算 250ms）。
 命中即把 `requirements.deviceId` 固定到「本机」设备（优先 `BUTLER_LOCAL_DEVICE_ID`，否则 tags 含「本机」的设备，否则名称含主机名者），并把依据写入 `task.routingAdvice.preflight`、`task.route.reason` 前缀（「本地文件预检：…」）、任务事件与任务记录的「## 路由提示」章节。显式 `deviceId` 优先，不被覆盖；`createTask`/`createPlanTask` 的自动重试与 follow-up 同样继承/重算该提示。关闭方式：Hub 选项 `preflight:false` 或环境变量 `BUTLER_PREFLIGHT=0`。
 
-**C. 设备感知的 Agnes 规划器指派**：长任务拆分时，Hub 把未禁用设备清单（id/名称/平台/tags/是否本机/skills/models，`deviceInventory()`）传给 planner；子任务可额外返回可选 `deviceId`、`tags`。Hub 负责校验：`deviceId` 必须存在于注册设备且未禁用，`tags` 必须至少存在于一台设备，非法值丢弃并回退自动路由。优先级为：用户显式 `deviceId` > 子任务指令自身命中的本地文件预检 > 规划器指派 > 父任务预检 pin > 自动路由；规划器指派还必须满足用户的其他要求（model/skills/tags），不满足则忽略。规划器指派写入子任务 `routingAdvice.planner` 与 `route.reason` 前缀（「Agnes 指派：…」）。
+**C. 设备感知的 Agnes 规划器指派**：长任务拆分时，Hub 把未禁用设备清单（id/名称/平台/tags/是否本机/skills/models，`deviceInventory()`）传给 planner；子任务可额外返回可选 `deviceId`、`tags`。Hub 负责校验：`deviceId` 必须存在于注册设备且未禁用，`tags` 必须至少存在于一台设备，非法值丢弃并回退自动路由。优先级为：长期目标固定工作机 > 指令点名设备 > 用户显式 `deviceId` > 子任务指令自身命中的本地文件预检 > 规划器指派 > 父任务预检 pin > 自动路由；规划器指派还必须满足用户的其他要求（model/skills/tags），不满足则忽略。规划器指派写入子任务 `routingAdvice.planner` 与 `route.reason` 前缀（「Agnes 指派：…」）。
 
 **审计与持久化**：`task.routingAdvice = { preflight?, planner? }` 会随任务一起写入 `state.json` 并在重启后恢复，同时展示在任务记录中，因此“为什么派到这台机器”在控制台、手机和 Markdown 记录里都可追溯。
 
@@ -202,6 +225,7 @@ flowchart TD
 - 「暂停止」：`skip` 保持 `active`，把 `nextCheckAt` 推进一个计划周期并清空待确认提案；`pausedUntil` 记录暂停截止时间，调度器每个 tick 先调用 `_resumeExpiredGoalPauses` 把到点目标恢复为 `active` 并按计划重排（暂停期间不自动生成提案，手动 `check` 仍可用）；`paused` 且 `pausedUntil=null` 表示一直暂停，等手动恢复。最长暂停 366 天。
 - 「恢复自动跟进」：`paused` 或 `stopped` 的目标都可恢复——`updateGoal` 在 `status=active` 分支清空 `stoppedAt/pausedUntil`、从当前时间重排 `nextCheckAt`、清空 `pendingApproval`；`completed` 的「重新激活」共用该分支。
 - 「新的指导指令」：`POST /api/goals/:id/guidance` 把一条 ≤2000 字的指导追加到 `goal.guidance`（最多 20 条）；`buildGoalCheckInstruction` 每次构建跟进指令时注入最近 6 条（按时间顺序、越靠后越新），已有 `pendingApproval` 时同步重建其 `instruction`，因此下一次自动跟进/待批准提案都会带最新方向。
+- 「固定工作机（硬性指向）」：目标可带 `deviceId`（`POST/PATCH /api/goals`，必须是已注册设备，否则 400；`null` 清除）。设置后：① 跟进任务的 `requirements.deviceId` 锁定该设备，指令里写明「固定工作机（硬性规矩）：<名称>（id）——本次跟进必须在该设备上执行」；② 任何 `createTask` 里带 `goalId` 的任务（含大脑为该目标创建的任务）在路由前被强制改写到该设备，并写一条 `goal-device` 事件；③ 大脑提示词在目标行显示固定工作机并要求 `create_task` 带上它。计划子任务只带 `context.goalId`，不强制重写，保留规划器按步骤分派的能力。设备离线时任务排队等待上线，不会被静默改派。
 - 目标不是新任务类型：每次跟进就是一条普通任务，通过 `task.goalId` 关联，复用路由/并发/重试/记录全套机制；优先级手动 7、定时 4。
 - 调度由 Hub 内置定时器完成（`BUTLER_GOAL_TICK_MS`，默认 30000ms），无需外部 cron；Hub 停机期间错过的检查不补跑，恢复后按计划排下一次。
 - 同一个目标同时只允许一条跟进任务（`runningTaskId` 防重），已有待确认提案时亦不重复生成，避免目标检查自我叠加。
@@ -325,7 +349,7 @@ flowchart TD
 ### 4.3 长期目标（Goal）
 
 状态机：`active ⇄ paused`，可 `stopped`（用户停止，终态）或 `completed`（目标达成，终态）；`stopped/completed` 不再自动排期。
-字段：`id/title/nickname/description/status/schedule/nextCheckAt/lastCheckAt/lastCheckStatus/lastSummary/runningTaskId/taskIds[]/checks[]/pendingApproval/pausedUntil/guidance[]`（`nickname` 是用户给目标起的称呼，≤40 字、可选，控制台卡片/提醒/跟进指令/每日总结优先用它，留空回退 `title`；最近 20 次跟进记录，含时间/任务/状态/摘要/错误；`pendingApproval={id,at,reason,instruction,source}` 表示到点后等待用户同意的跟进提案，持久化并在重启后恢复；`pausedUntil` 仅在 `paused` 时非空，ISO 字符串，到点由调度器自动恢复，`null` 表示一直暂停；`guidance` 是追加式指导指令列表 `{id,text,createdAt}`，最多 20 条，`buildGoalCheckInstruction` 取最近 6 条注入跟进任务）。
+字段：`id/title/nickname/description/status/schedule/requirements/deviceId/nextCheckAt/lastCheckAt/lastCheckStatus/lastSummary/runningTaskId/taskIds[]/checks[]/pendingApproval/pausedUntil/guidance[]`（`deviceId` 是可选「固定工作机（硬性指向）」：设备 id 或 null，设置后该目标直接关联的任务都会被锁定到这台设备；`nickname` 是用户给目标起的称呼，≤40 字、可选，控制台卡片/提醒/跟进指令/每日总结优先用它，留空回退 `title`；最近 20 次跟进记录，含时间/任务/状态/摘要/错误；`pendingApproval={id,at,reason,instruction,source}` 表示到点后等待用户同意的跟进提案，持久化并在重启后恢复；`pausedUntil` 仅在 `paused` 时非空，ISO 字符串，到点由调度器自动恢复，`null` 表示一直暂停；`guidance` 是追加式指导指令列表 `{id,text,createdAt}`，最多 20 条，`buildGoalCheckInstruction` 取最近 6 条注入跟进任务）。
 `taskIds[]` 保存已关联任务（最多 50 条，含计划父任务；计划子任务折叠在父任务的 `childProgress` 中），`runningTaskId` 只在关联任务执行中占位；`GET /api/goals` 列表与 `GET /api/goals/:id` 详情附带实时计算的 `linkedStats={total,running,completed,failed,waiting,planTotal,planCompleted}`。
 `schedule` 为 `{type:'daily',time:'HH:mm'}`（本地时区，默认 09:00）或 `{type:'interval',minutes}`（5 分钟–7 天）。
 `state.json` 顶层 `nightlyReview` 保存每晚总结：`{date,taskId,status,startedAt,finishedAt,summary,error}`。
@@ -503,7 +527,7 @@ flowchart TD
 
 - Hub 是**单点**：常开设备（NAS/小主机）上跑；断网时任务无法下发。
 - 设备端执行器是“薄适配层”：DSH 的命令行/接口因版本而异，默认提供可配置命令模板与模拟器，生产环境需要按实际 DSH 版本调模板。
-- 路由评分本身是确定性规则；长任务拆分与子任务设备指派由 Agnes 规划器（LLM）提供建议，Hub 校验后执行（见 3.3.1）。子任务依赖只允许指向更早序号（线性 DAG），不是通用 DAG 调度器。未显式指定设备、预检未命中的任务仍按评分 + 心跳新鲜度选择，可能落到非预期的机器上——需要确定性时请显式指定设备，或让指令直接提到本机文件。
+- 路由评分本身是确定性规则；长任务拆分与子任务设备指派由 Agnes 规划器（LLM）提供建议，Hub 校验后执行（见 3.3.1）。子任务依赖只允许指向更早序号（线性 DAG），不是通用 DAG 调度器。未显式指定设备、预检未命中的任务仍按评分 + 心跳新鲜度选择，可能落到非预期的机器上——需要确定性时请显式指定设备、在指令里点名设备（如「用 mika 工作机」，见 3.3.0），或让指令直接提到本机文件。
 - 本地文件预检只做**存在性**判断，不会把文件同步到别的机器；命中后任务会固定到 Hub 宿主执行，跨机执行需要共享盘或自行同步。
 - APK 是 WebView 壳（内网直连），不是完整原生客户端；离线缓存与推送通知不在 v1 范围。提醒通知是例外：由原生 `AlarmManager` 排程，App 被杀死/手机重启后仍可触发；但精确闹钟权限被撤销时会退化为非精确（Doze 下可能延迟数分钟），通知权限被拒时只回写不弹窗。「闹钟」方式只是高优先级通知 + 闹钟音/震动（非系统级闹钟，不会全屏），受勿扰模式、音量与渠道设置影响；通知渠道属性创建后不可变。
 

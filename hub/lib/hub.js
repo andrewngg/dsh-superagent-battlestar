@@ -16,6 +16,8 @@ const { badRequest, notFound, conflict } = require('./errors');
 const { createPlan } = require('./planner');
 const { writeTaskRecord, writeTaskIndex } = require('./task-record');
 const preflight = require('./preflight');
+const { resolveDeviceMention } = require('./device-mention');
+const { looksLikePcOnlyInstruction, pcOnlyReason } = require('./instruction-host');
 const {
   DEFAULT_SETTINGS,
   SUPPORTED_LANGUAGES,
@@ -1275,6 +1277,10 @@ class Hub {
     const normalized = normalizeGoalRequest(input, { partial: false });
     if (!normalized.ok) throw badRequest(normalized.errors.join('；'));
     const value = normalized.value;
+    // 固定工作机必须真实存在；允许离线（任务会排队等上线），但不允许写错 id。
+    if (value.deviceId && !this.devices.get(value.deviceId)) {
+      throw badRequest(`指定工作机不存在：${value.deviceId}`);
+    }
     const now = protocol.nowIso();
     const status = value.status === 'paused' ? 'paused' : 'active';
     const goal = {
@@ -1285,6 +1291,8 @@ class Hub {
       status,
       schedule: value.schedule,
       requirements: value.requirements || null,
+      // 固定工作机（硬性指向）：该目标直接关联的任务一律锁到这台设备。
+      deviceId: value.deviceId || null,
       nextCheckAt: status === 'active' ? computeNextCheckAt(value.schedule) : null,
       pausedUntil: status === 'paused' ? (value.pausedUntil || null) : null,
       guidance: [],
@@ -1318,6 +1326,12 @@ class Hub {
     if (value.nickname !== undefined) goal.nickname = value.nickname;
     if (value.description !== undefined) goal.description = value.description;
     if (value.requirements !== undefined) goal.requirements = value.requirements;
+    if (value.deviceId !== undefined) {
+      if (value.deviceId && !this.devices.get(value.deviceId)) {
+        throw badRequest(`指定工作机不存在：${value.deviceId}`);
+      }
+      goal.deviceId = value.deviceId || null;
+    }
     let scheduleChanged = false;
     if (value.schedule !== undefined && JSON.stringify(value.schedule) !== JSON.stringify(goal.schedule)) {
       goal.schedule = value.schedule;
@@ -1551,9 +1565,15 @@ class Hub {
     // 手动/已批准的跟进视为用户已同意，清掉旧的待确认提案。
     goal.pendingApproval = null;
     const manual = options.manual !== false;
+    const pinnedDevice = goal.deviceId ? this.devices.get(goal.deviceId) : null;
+    const pinnedDeviceLabel = goal.deviceId
+      ? (pinnedDevice ? deviceDisplayName(pinnedDevice) : goal.deviceId)
+      : null;
+    const checkRequirements = { ...(goal.requirements || {}) };
+    if (goal.deviceId) checkRequirements.deviceId = goal.deviceId;
     const task = this.createTask({
-      instruction: buildGoalCheckInstruction(goal),
-      requirements: goal.requirements || {},
+      instruction: buildGoalCheckInstruction(goal, pinnedDeviceLabel),
+      requirements: checkRequirements,
       priority: manual ? 7 : 4,
       timeoutSec: 600,
       maxAttempts: 2,
@@ -4378,6 +4398,24 @@ class Hub {
     return this._localDevice();
   }
 
+  /** 手机类设备（Android/iOS）：只能执行手机 App 操作，不能跑电脑侧命令。 */
+  _isPhoneDevice(device) {
+    if (!device) return false;
+    return /^(android|ios|iphone|ipad|harmonyos)$/i.test(String(device.platform || '').trim());
+  }
+
+  /** 电脑侧指令的兜底落点：优先主设备/本机，其次任一在线电脑设备。 */
+  _primaryPcDeviceId() {
+    const main = this._mainDevice();
+    if (main && !this._isPhoneDevice(main)) return main.id;
+    const local = this._localDevice();
+    if (local && !this._isPhoneDevice(local)) return local.id;
+    const pcs = [...this.devices.values()].filter((device) => !device.disabled && !this._isPhoneDevice(device));
+    const onlinePc = pcs.find((device) => device.online);
+    if (onlinePc) return onlinePc.id;
+    return pcs.length ? pcs[0].id : null;
+  }
+
   _taskProject(task) {
     const req = task && task.requirements;
     return util.str(req && req.project, 120) || null;
@@ -4647,6 +4685,30 @@ class Hub {
       events: [{ at: now, type: 'created', message: '任务已创建' }],
       _avoidDeviceIds: [],
     };
+    // 指令点名设备（昵称/名称/标签/id）：优先于下拉选择器以及跟进继承来的 deviceId。
+    // 用户写「用 mika 工作机」时，不应该被界面上一次选择或源任务的硬 pin 带偏。
+    // 计划子任务已由父任务/规划器确定设备时不做二次点名覆盖，避免子任务文案里的
+    // 「在另一台机器上…」这类描述把用户显式指定的设备冲掉。
+    const mention =
+      internal.preserveDeviceId && task.requirements.deviceId
+        ? null
+        : resolveDeviceMention(task.instruction, this.devices.values());
+    if (mention) {
+      const previousDeviceId = task.requirements.deviceId;
+      const previousDevice = previousDeviceId ? this.devices.get(previousDeviceId) : null;
+      task.requirements = { ...task.requirements, deviceId: mention.deviceId };
+      const previousLabel = previousDevice
+        ? deviceDisplayName(previousDevice)
+        : previousDeviceId || '';
+      task.events.push({
+        at: protocol.nowIso(),
+        type: 'routing',
+        message:
+          previousDeviceId && previousDeviceId !== mention.deviceId
+            ? `指令点名「${mention.matchedText}」→ 改派 ${mention.deviceName}（忽略原指定 ${previousLabel}）`
+            : `指令点名「${mention.matchedText}」→ 锁定 ${mention.deviceName}`,
+      });
+    }
     // 本地文件预检（A）：指令提到的本机文件存在时，固定到「本机」设备执行。
     // internal.routingAdvice 只由 Hub 内部（拆分/跟进）传入，外部请求无法伪造。
     let routingAdvice = this.normalizeRoutingAdvice(internal.routingAdvice);
@@ -4660,6 +4722,67 @@ class Hub {
     task.routingAdvice = routingAdvice;
     if (routingAdvice && routingAdvice.preflight && routingAdvice.preflight.reason) {
       task.events.push({ at: protocol.nowIso(), type: 'preflight', message: routingAdvice.preflight.reason });
+    }
+    // 主机感知守卫：python/adb/命令行/Windows 路径属于电脑侧操作，绝不能派给手机。
+    // 大脑曾把「执行 python applier.py」「adb devices」这类任务派给 Mika 手机，必然失败。
+    const pcOnlyReasonText = pcOnlyReason(task.instruction);
+    // 长期目标固定工作机（硬性指向）：归属该目标的任务一律锁定到目标设备。
+    // 这是用户在「长期任务」里设的硬规矩，优先级高于界面选择器、跟进继承与指令点名。
+    // 但电脑侧指令不能锁到手机目标上——这类任务只能在母机执行。
+    const goalPin = task.goalId ? this.goals.get(task.goalId) : null;
+    const pinnedDevice = goalPin && goalPin.deviceId ? this.devices.get(goalPin.deviceId) : null;
+    const goalPinIsPhone = Boolean(pinnedDevice && this._isPhoneDevice(pinnedDevice));
+    const pinLabel = pinnedDevice ? deviceDisplayName(pinnedDevice) : (goalPin && goalPin.deviceId) || '';
+    if (
+      goalPin
+      && goalPin.deviceId
+      && !(pcOnlyReasonText && goalPinIsPhone)
+      && task.requirements.deviceId !== goalPin.deviceId
+    ) {
+      const previousDeviceId = task.requirements.deviceId || null;
+      const previousDevice = previousDeviceId ? this.devices.get(previousDeviceId) : null;
+      task.requirements = { ...task.requirements, deviceId: goalPin.deviceId };
+      task.events.push({
+        at: protocol.nowIso(),
+        type: 'goal-device',
+        message: previousDeviceId
+          ? `长期目标「${goalDisplayName(goalPin)}」固定工作机「${pinLabel}」→ 改派（忽略原指定 ${previousDevice ? deviceDisplayName(previousDevice) : previousDeviceId}）`
+          : `长期目标「${goalDisplayName(goalPin)}」固定工作机「${pinLabel}」→ 锁定`,
+      });
+    }
+    if (pcOnlyReasonText) {
+      const currentDevice = task.requirements.deviceId ? this.devices.get(task.requirements.deviceId) : null;
+      if (!currentDevice || this._isPhoneDevice(currentDevice)) {
+        const previousLabel = currentDevice ? deviceDisplayName(currentDevice) : '';
+        const pcDeviceId = this._primaryPcDeviceId();
+        const pcDevice = pcDeviceId ? this.devices.get(pcDeviceId) : null;
+        if (pcDeviceId) {
+          task.requirements = { ...task.requirements, deviceId: pcDeviceId };
+          task.events.push({
+            at: protocol.nowIso(),
+            type: 'host-guard',
+            message:
+              `指令含电脑侧操作（${pcOnlyReasonText}），不能派给手机`
+              + (previousLabel ? `「${previousLabel}」` : '')
+              + `→ 改派母机「${pcDevice ? deviceDisplayName(pcDevice) : pcDeviceId}」执行`
+              + (goalPinIsPhone ? `（长期目标固定工作机「${pinLabel}」不适用于电脑侧步骤）` : ''),
+          });
+        } else {
+          task.events.push({
+            at: protocol.nowIso(),
+            type: 'host-guard',
+            message: `指令含电脑侧操作（${pcOnlyReasonText}），但当前没有可用的电脑设备；任务可能无法执行`,
+          });
+        }
+      } else if (goalPinIsPhone) {
+        task.events.push({
+          at: protocol.nowIso(),
+          type: 'host-guard',
+          message:
+            `长期目标固定工作机「${pinLabel}」是手机，但本指令是电脑侧操作（${pcOnlyReasonText}）`
+            + `→ 未锁定手机，继续由「${deviceDisplayName(currentDevice)}」执行`,
+        });
+      }
     }
     // 规划子任务兜底：太短的 timeoutSec（如 60/90/180s）会让长任务必然超时。
     const planFloor = this._planSubtaskTimeoutFloor(task);
@@ -4707,15 +4830,26 @@ class Hub {
         .map((task) => `${task.threadStep || 1}. [${task.status}] ${util.truncate(task.instruction, 120)}`)
         .join('\n'),
     };
-    const mergedRequirements = {
-      ...source.requirements,
-      skills: value.requirements.skills.length ? value.requirements.skills : source.requirements.skills,
-      tags: value.requirements.tags.length ? value.requirements.tags : source.requirements.tags,
-    };
-    if (value.requirements.model) mergedRequirements.model = value.requirements.model;
-    if (value.requirements.profile) mergedRequirements.profile = value.requirements.profile;
-    if (value.requirements.gateway) mergedRequirements.gateway = value.requirements.gateway;
-    if (value.requirements.deviceId) mergedRequirements.deviceId = value.requirements.deviceId;
+    // 指令点名设备时以指令为准：不再继承源任务的设备/模型/技能等硬约束，
+    // 否则源任务 pin 的母机 deviceId 会把「用 mika 工作机」的跟进任务继续排除在 Mika 之外。
+    const mention = resolveDeviceMention(value.instruction, this.devices.values());
+    const mergedRequirements = mention
+      ? {
+          ...value.requirements,
+          project: value.requirements.project || source.requirements.project,
+          deviceId: mention.deviceId,
+        }
+      : {
+          ...source.requirements,
+          skills: value.requirements.skills.length ? value.requirements.skills : source.requirements.skills,
+          tags: value.requirements.tags.length ? value.requirements.tags : source.requirements.tags,
+        };
+    if (!mention) {
+      if (value.requirements.model) mergedRequirements.model = value.requirements.model;
+      if (value.requirements.profile) mergedRequirements.profile = value.requirements.profile;
+      if (value.requirements.gateway) mergedRequirements.gateway = value.requirements.gateway;
+      if (value.requirements.deviceId) mergedRequirements.deviceId = value.requirements.deviceId;
+    }
     return this.createTask(
       {
         instruction: value.instruction,
@@ -4732,8 +4866,8 @@ class Hub {
         attachments: Array.isArray(input.attachments) ? input.attachments : [],
       },
       {
-        // 用户没有在跟进里显式改设备时，继承源任务的预检/指派依据（已 pin 的 deviceId 也一并继承）。
-        routingAdvice: value.requirements.deviceId ? null : source.routingAdvice,
+        // 指令点名设备或用户显式改设备时，不再沿用源任务的预检/指派依据。
+        routingAdvice: value.requirements.deviceId || mention ? null : source.routingAdvice,
       },
     );
   }
@@ -4756,8 +4890,9 @@ class Hub {
     if (!normalized.ok) throw badRequest(normalized.errors.join('；'));
     const value = normalized.value;
     const planGoalId = util.str(input.goalId, 80) || null;
-    // 路由提示优先级：用户显式 deviceId > Agnes 指派 > 本地文件预检 pin。
-    const userDeviceId = value.requirements.deviceId || null;
+    const mention = resolveDeviceMention(value.instruction, this.devices.values());
+    // 路由提示优先级：指令点名设备 > 用户显式 deviceId > Agnes 指派 > 本地文件预检 pin。
+    const userDeviceId = (mention && mention.deviceId) || value.requirements.deviceId || null;
     let routingAdvice = this.normalizeRoutingAdvice(input.routingAdvice);
     let pinnedDeviceId = userDeviceId;
     if (!routingAdvice && !pinnedDeviceId) {
@@ -4957,7 +5092,11 @@ class Hub {
           attachments: parent.attachments || [],
         },
         // 先不派发：写完依赖元数据再决定是否可以上路。
-        { routingAdvice: Object.keys(childAdvice).length ? childAdvice : null, deferRoute: true },
+        {
+          routingAdvice: Object.keys(childAdvice).length ? childAdvice : null,
+          deferRoute: true,
+          preserveDeviceId: Boolean(childRequirements.deviceId),
+        },
       );
       child.planStep = planIndex + 1;
       child.planGroup = util.str(subtask.parallelGroup, 60) || null;
@@ -5636,16 +5775,34 @@ class Hub {
       task.assignedDeviceId = null;
       task.assignedDeviceName = null;
       task.updatedAt = protocol.nowIso();
-      const firstReason = excluded.length ? excluded[0].reason : 'no devices registered';
+      // 硬 pin 设备离线/禁用时，说清楚在等哪台设备，而不是笼统的 no matching device。
+      const pinned = requirements.deviceId ? this.devices.get(requirements.deviceId) : null;
+      const pinnedName = pinned ? deviceDisplayName(pinned) : requirements.deviceId;
+      let firstReason = excluded.length ? excluded[0].reason : 'no devices registered';
+      let queuedMessage = `暂无匹配设备：${firstReason}`;
+      let pinnedIssue = false;
+      if (pinned && !pinned.online) {
+        pinnedIssue = true;
+        firstReason = `指定设备「${pinnedName}」离线，已排队等待上线`;
+        queuedMessage = `等待指定设备「${pinnedName}」上线`;
+      } else if (pinned && pinned.disabled) {
+        pinnedIssue = true;
+        firstReason = `指定设备「${pinnedName}」已禁用`;
+        queuedMessage = firstReason;
+      } else if (requirements.deviceId && !pinned) {
+        pinnedIssue = true;
+        firstReason = `指定的设备不存在（${requirements.deviceId}）`;
+        queuedMessage = firstReason;
+      }
       task.route = {
         reason: this._withAdvice(
           this._routingAdviceText(task.routingAdvice),
-          `no matching device (${excluded.length} excluded): ${firstReason}`,
+          pinnedIssue ? firstReason : `no matching device (${excluded.length} excluded): ${firstReason}`,
         ),
         candidates: [],
         excluded: excluded.slice(0, 10),
       };
-      this._pushTaskEvent(task, 'queued', `暂无匹配设备：${firstReason}`);
+      this._pushTaskEvent(task, 'queued', queuedMessage);
       this.broadcast('task.updated', { task: this.taskToJson(task) });
       return task;
     }

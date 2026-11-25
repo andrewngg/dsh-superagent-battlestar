@@ -133,15 +133,15 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
 - `PATCH|PUT /api/settings` body `{ language?:'zh-CN'|'en', mainDeviceId?:string, taskSoundEnabled?:boolean }` → `{ settings, hubTime }`；`mainDeviceId` 为空字符串表示「本机自动识别」，非空必须是已注册设备 id（否则 400「主设备不存在：…」），最长 120 字符；`taskSoundEnabled` 必须为布尔值（否则 400），false 表示 APK 任务提示音静音（系统免打扰模式仍会自动静音）；持久化到 `<dataDir>/settings.json`，并广播 SSE `settings.updated`。
 - `GET /api/admin/join-code` → `{ joinCode, hubTime }`；`POST /api/admin/join-code`（管理员令牌，不需要 body）→ `{ joinCode, hubTime }`：轮换设备加入码并持久化到 `state.json`，同时广播 SSE `joinCode.updated`（`record:false`，不写进事件历史）。在线设备在下一次心跳自动同步；已注册设备令牌不受影响。
 - `GET /api/goals?status=` → `{ goals:[Goal], hubTime }`
-- `POST /api/goals` body `{ title, nickname?, description?, schedule?, requirements? }` → `{ goal, hubTime }`
+- `POST /api/goals` body `{ title, nickname?, description?, schedule?, requirements?, deviceId? }` → `{ goal, hubTime }`；`deviceId` 是「固定工作机（硬性指向）」，必须是已注册设备 id（不存在返回 400），`null`/省略表示自动路由。
   - `nickname`: 目标昵称（≤40 字，可选）；控制台卡片、提醒与每日总结优先用昵称称呼目标，留空则显示 `title`。
   - `schedule`: `{ type:'daily', time:'HH:mm' }`（默认）或 `{ type:'interval', minutes:5..10080 }`；缺省为每天 09:00。
   - 生命周期：`active | paused | stopped | completed`；创建默认 `active`，并按计划计算 `nextCheckAt`。
 - `GET /api/goals/:id` → `{ goal }`
-- `PATCH|PUT /api/goals/:id` body `{ title?, nickname?, description?, schedule?, status?, pausedUntil? }` → `{ goal }`；`nickname` 传空字符串可清除昵称；恢复为 `active` 时从当前时间重新排期，不补跑错过的检查。`pausedUntil` 仅在 `status='paused'` 时有意义：ISO 时间字符串表示到点自动恢复，`null` 表示一直暂停、等你手动恢复（最长 366 天）；暂停中的目标可只传 `pausedUntil` 修改恢复时间，其它状态传该字段返回 400。
+- `PATCH|PUT /api/goals/:id` body `{ title?, nickname?, description?, schedule?, status?, pausedUntil?, deviceId? }` → `{ goal }`；`nickname` 传空字符串可清除昵称；`deviceId` 传设备 id 可设置固定工作机（不存在返回 400），传 `null`/空串清除、恢复自动路由；恢复为 `active` 时从当前时间重新排期，不补跑错过的检查。`pausedUntil` 仅在 `status='paused'` 时有意义：ISO 时间字符串表示到点自动恢复，`null` 表示一直暂停、等你手动恢复（最长 366 天）；暂停中的目标可只传 `pausedUntil` 修改恢复时间，其它状态传该字段返回 400。
 - `POST /api/goals/:id/skip` → `{ goal, hubTime }`：跳过下一次自动跟进（保持 `active`），把 `nextCheckAt` 推进一个计划周期（每天计划顺延到下一次同时刻，间隔计划顺延一个间隔），并清空该目标待确认的 `pendingApproval`；非 `active` 目标返回 409。
 - `POST /api/goals/:id/guidance` body `{ text }` → `{ goal, hubTime }`：给目标追加一条「新的指导指令」（trim 后 1–2000 字，最多保留最近 20 条）；之后每次自动跟进任务都会按时间顺序带上最近 6 条（越靠后越新、优先遵守），已有待确认提案时同步刷新其指令；空文本或超长返回 400。
-- `POST /api/goals/:id/check` → `{ goal, task, hubTime }`：立即创建一次跟进任务（`task.goalId` 指向目标），视为用户已同意执行；该目标已有执行中的跟进任务时返回 409。
+- `POST /api/goals/:id/check` → `{ goal, task, hubTime }`：立即创建一次跟进任务（`task.goalId` 指向目标），视为用户已同意执行；该目标已有执行中的跟进任务时返回 409。目标设置了 `deviceId` 时，跟进任务的指令会写明「固定工作机（硬性规矩）」、`requirements.deviceId` 锁定该设备。
 - `POST /api/goals/:id/link` body `{ taskId }` → `{ goal, task, hubTime }`：把已有任务关联到目标（`task.goalId` 指向目标、加入 `goal.taskIds`）。任务已结束时同步写入 `goal.lastCheckAt/lastCheckStatus/lastTaskId/lastSummary` 并追加一条 `checks`（同一任务不会重复追加），下一次跟进任务会带着这段结论继续；关联执行中的任务则登记为 `goal.runningTaskId`。
 - `POST /api/goals/:id/approve` → `{ goal, task, hubTime }`：同意该目标的待确认跟进，立即创建跟进任务并清空 `pendingApproval`；没有待确认提案时返回 409。
 - `POST /api/goals/:id/reject` → `{ goal, hubTime }`：否决待确认跟进，清空 `pendingApproval`、把目标置为 `paused` 并清空 `nextCheckAt`（等用户下一步指令）；没有待确认提案时返回 409。
@@ -171,8 +171,9 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
 - `DELETE /api/devices/:id` → `{ ok:true }`
 - `POST /api/tasks` body `{ instruction, requirements?, priority?, timeoutSec?, maxAttempts? }` → `{ task }`
   - `requirements`: `{ model?, skills?:[], profile?, gateway?, project?, tags?:[], deviceId? }`，全部可选；`deviceId` 显式指定设备（仍须在线）；`project` 为 Hermes 项目归属（项目名或绝对路径，原样下发设备，由 `cli` 执行器解析并登记到 `$HERMES_HOME/projects.db`）。
+  - **指令点名设备优先**：若 `instruction` 里直接点名了某台设备（昵称/名称/名称片段/tags/id，如「用 mika 工作机」「交给手机跑」，且处于路由语境、非否定句），Hub 会把它的 `deviceId` 当作硬指定并写入一条 `routing` 事件，覆盖 body 里的 `requirements.deviceId`（规则见 `docs/ARCHITECTURE.md` 3.3.0）。`POST /api/tasks/:id/follow-up` 命中点名时不再继承源任务的 `deviceId`/`model`/`skills`/`tags` 硬约束，只带本步骤显式 requirements 与项目上下文；未命中时维持原有继承行为。
   - `priority`: 0-9，默认 5；`timeoutSec`: 30-3600，默认 300；`maxAttempts`: 1-3，默认 2。
-  - 创建后立即路由；若无匹配设备，任务留在 `queued` 并记录原因，之后设备上线/能力变化时自动重新路由。
+  - 创建后立即路由；若无匹配设备，任务留在 `queued` 并记录原因，之后设备上线/能力变化时自动重新路由；若硬指定的点名设备离线，则排队并写明「指定设备「…」离线，已排队等待上线」。
 - `GET /api/tasks?status=&deviceId=&limit=100&includeTrashed=1` → `{ tasks:[Task] }`
   - 默认排除已归档与回收站任务；`includeTrashed=1` 时列表包含回收站任务（`task.trashed=true`）。
 - `GET /api/tasks/:id` → `{ task:Task }`
@@ -283,6 +284,7 @@ Body: `{ ok:true|false, output?:{ text?, markdown?, artifacts?:[{name,url?,path?
   "status":"active",                       // active | paused | stopped | completed
   "schedule":{"type":"daily","time":"09:30"}, // 或 {"type":"interval","minutes":120}
   "requirements":null,
+  "deviceId":null,                         // 固定工作机（硬性指向）：设备 id；null=自动路由
   "pausedUntil":null,                      // 仅 status='paused'：ISO 到点自动恢复；null=一直暂停
   "guidance":[                             // 追加式指导指令；之后每次自动跟进都会带上（最多 20 条）
     {"id":"gd_a1b2c3","text":"优先处理 A 项目，B 项目暂缓","createdAt":"..."}

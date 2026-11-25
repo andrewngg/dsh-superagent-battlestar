@@ -562,7 +562,7 @@ function buildBrainPrompt(snapshot, options = {}) {
     '每次思考必须按六步走：1) 现在有什么目标 2) 进度在哪里 3) 有什么更好的工作方式 4) 我需要改进哪里 5) 我可以做什么推进进度 6) 是否需要提醒主人做什么、主人参与哪部分能加速。',
     'JSON 结构：{"assessment":{"goals":"现在有什么目标","progress":"进度在哪里","betterWay":"有什么更好的工作方式","improvement":"我需要改进哪里","myMove":"我可以做什么推进进度","ownerAsk":"需要主人做什么，没有就留空字符串；需要主人在几个方案里选时写成 {\\"text\\":\\"问题背景（发生了什么、为什么需要主人拍板）\\",\\"options\\":[{\\"label\\":\\"选项A（≤20字）\\",\\"detail\\":\\"这个选项具体做什么、大概要多久/多少代价、成功或失败分别会怎样（≤100字）\\"},{\\"label\\":\\"选项B\\",\\"detail\\":\\"...\\"}]}（2–4 个互斥选项，会显示成按钮和说明）"},"summary":"一句话结论","actions":[{"action":"retry_task|resume_thread|create_task|update_task|link_task|consult_worker|remember|none","taskId":"可空","goalId":"可空","instruction":"可空，仅 resume_thread/create_task 使用","reason":"为什么这么做","confidence":0.0,"timeoutSec":"可空，仅 create_task/consult_worker 使用，60–3600 秒","question":"可空，仅 consult_worker 使用：向设备提出的只读问题","note":"可空，仅 remember 使用：要长期记住的上下文","requirements":"可空，仅 create_task/update_task/consult_worker 使用：{skills:[],project,deviceId,model,tags}"}]}',
     '动作含义：retry_task 只重试 failed/timeout/cancelled 且有剩余次数的任务（可解开计划卡点）；已完成(completed)的任务想再做，用 resume_thread 说明下一步；resume_thread 对已结束但还需要下一步的任务创建跟进（instruction 写下一步）；create_task 新建任务（只在确有新工作且没有重复任务时）；link_task 把已有任务关联到目标；consult_worker 向指定设备提一个只读问题（需要 requirements.deviceId），系统创建咨询任务并把回答带回下一轮；update_task 修改排队中任务的需求（taskId + requirements/priority/timeoutSec，改完系统会立即重新派发，用来补上任务缺的能力/设备）；remember 把长期有用的上下文写入「管家记忆」，之后每轮都会看到。',
-    'create_task 的任务默认 600 秒；涉及多步读写文件、代码分析、打包等任务请显式给 timeoutSec（建议 900–1800）。任务需要特定能力时填 requirements：例如纯文件/CLI 任务用 {"skills":[],"deviceId":"主工作机或图像处理机的设备 id"} 或指定 project；不要给日志/代码/文件类任务指定手机或纯 ComfyUI 设备。requirements.tags 是设备能力标签，只能填设备清单里实际出现过的标签（如「本机」「手机」「GPU」）；一般任务不要填 tags，用 project 或 deviceId 定位即可。千万不要用项目名/任务名自造标签（例如「反腐AI」「验证」）——没有任何设备会声明它们，任务会一直排队。任务如果包含「多个仓库 / 发布 / 部署 / 迁移 / 全量验证」等跨阶段工作，拆成 2–3 个 create_task（实现 → 发布或验证），每个任务目标单一、能在 15 分钟内跑完；不要把一段需要 20 分钟以上的工作塞进一个任务，本机 CLI 有硬性执行上限，超时会整单作废。',
+    'create_task 的任务默认 600 秒；涉及多步读写文件、代码分析、打包等任务请显式给 timeoutSec（建议 900–1800）。任务需要特定能力时填 requirements：例如纯文件/CLI 任务用 {"skills":[],"deviceId":"主工作机或图像处理机的设备 id"} 或指定 project；不要给日志/代码/文件类任务指定手机或纯 ComfyUI 设备。requirements.tags 是设备能力标签，只能填设备清单里实际出现过的标签（如「本机」「手机」「GPU」）；一般任务不要填 tags，用 project 或 deviceId 定位即可。千万不要用项目名/任务名自造标签（例如「反腐AI」「验证」）——没有任何设备会声明它们，任务会一直排队。任务如果包含「多个仓库 / 发布 / 部署 / 迁移 / 全量验证」等跨阶段工作，拆成 2–3 个 create_task（实现 → 发布或验证），每个任务目标单一、能在 15 分钟内跑完；不要把一段需要 20 分钟以上的工作塞进一个任务，本机 CLI 有硬性执行上限，超时会整单作废。任务必须按主机拆分：python/adb/命令行/脚本/Windows 路径/本机文件等电脑侧步骤派母机；手机 App 界面操作派手机；不要把电脑命令和手机操作混进同一条指令，否则会被系统改派到母机或被拒绝。',
     '队列健康：如果「任务」里有排队超过 2 小时的任务，本轮不要 create_task；先 update_task 补 requirements（deviceId/skills/project）或 retry_task 重派，实在推进不了才考虑取消。',
     '排队中的计划子任务若「依赖」里的前置任务未完成，不要对它 retry（会一直等待）；应先推进前置任务，或选择 none 观察。',
     '六步要求：assessment 六项都要认真填，即使没有变化也要写清结论；ownerAsk 只在确实需要主人做决策/授权/偏好选择/确认方向时填写，否则留空；myMove 要与 actions 一致。',
@@ -571,7 +571,7 @@ function buildBrainPrompt(snapshot, options = {}) {
     'ownerAsk 带 options 时：2–4 个互斥选项，label ≤20 字且指向明确动作；每个选项必须给 detail：具体做什么、大概多久/什么代价、成功与失败分别会怎样（≤100 字，用人话写，主人要能只看这几行就做决定）；detail 里不要写任务 id、文件路径这类机器细节，也不要写「其他」「你自己决定」。ownerAsk.text 也要自带背景（发生了什么、为什么需要主人拍板），让主人不用翻历史就能判断。同一问题若已在「最近决策」的「当轮提问」里出现过，不要重复问。',
     '如果给不出选项细节（比如还没查清原因），先不要问主人：用 consult_worker 或 create_task 查清楚，下一轮再带着细节问；确实要问时至少把已知事实和不确定点写进 ownerAsk.text。',
     '凡是请主人在几个方案里拍板（例如 A/B/C、要不要继续、选哪个方向），ownerAsk 必须是带 options 的对象，不能只写一段文字问题；只写文字等于让主人无从选择，会被要求重问。',
-    '咨询 worker：缺少只有某台设备知道的事实（文件路径、项目目录、环境、设备状态）时，不要问主人，也不要凭空猜——用 consult_worker 向那台设备提问。设备选择顺序：下面「项目 ↔ 主机」映射 > 最近执行该项目的设备 > 母机；requirements.deviceId 必填。问题要简短、只读、可回答（例如「列出 applier.py 的绝对路径和 job_search 项目目录」）；每轮最多 1 个咨询，不要用它代替实际工作，也不要发给手机/纯 ComfyUI 设备。',
+    '咨询 worker：缺少只有某台设备知道的事实（文件路径、项目目录、环境、设备状态）时，不要问主人，也不要凭空猜——用 consult_worker 向那台设备提问。设备选择顺序：下面「项目 ↔ 主机」映射 > 最近执行该项目的设备 > 母机；requirements.deviceId 必填。问题要简短、只读、可回答（例如「列出 applier.py 的绝对路径和 job_search 项目目录」）；每轮最多 1 个咨询，不要用它代替实际工作，也不要发给手机/纯 ComfyUI 设备。如果问题涉及 python/adb/命令行/Windows 路径/本机文件/版本号，必须选母机（本机），手机只能回答手机 App 界面、通知、文件是否在手机里这类问题。',
     '记住上下文：remember 用来保存长期有用的事实（项目位置、关键约定、上次结论、设备分工），note ≤300 字、一条一个事实；每轮提示词都会带上「管家记忆」，不要重复记同一件事，也不要把临时进度写进来。',
     ...mindLines,
     `保守原则：优先重试/续做/关联已有任务，而不是新建；同一轮最多 ${maxActions} 个动作；没有明确必要时 actions 为空数组；置信度低于 0.6 的动作会被系统拒绝，请如实给出。`,
@@ -607,6 +607,14 @@ function buildBrainPrompt(snapshot, options = {}) {
       `${index + 1}. ${name}（${goal.id}）｜状态 ${goal.status}｜计划 ${scheduleText}｜下次 ${goal.nextCheckAt || '未排期'}`
         + `｜关联任务 ${linked.total || 0}（完成 ${linked.completed || 0}，进行中 ${(linked.running || 0) + (linked.waiting || 0)}，失败 ${linked.failed || 0}${linked.planTotal ? `，计划 ${linked.planCompleted || 0}/${linked.planTotal}` : ''}）`,
     );
+    if (goal.deviceId) {
+      const pinned = util.arr(snap.devices).find((device) => device && device.id === goal.deviceId);
+      const label = pinned ? (pinned.nickname || pinned.name || pinned.id) : goal.deviceId;
+      lines.push(
+        `   固定工作机（硬性）：${label}（${goal.deviceId}）——为该目标创建任务时必须把 requirements.deviceId 设为这台设备，不要改用其它设备。`
+          + '但如果本步需要电脑侧操作（python/adb/脚本/Windows 文件），不要写进这条手机任务：把电脑侧步骤单独 create_task 派给母机，手机任务只描述手机 App 上的操作。',
+      );
+    }
     if (goal.lastCheckStatus) lines.push(`   上次跟进：${goal.lastCheckStatus}｜${clampText(goal.lastSummary || '', 300)}`);
     if (goal.runningTaskId) lines.push(`   正在执行的任务：${goal.runningTaskId}`);
     if (goal.pendingApproval) lines.push(`   待用户确认：${clampText(goal.pendingApproval.reason || '', 160)}`);
